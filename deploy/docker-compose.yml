@@ -97,6 +97,32 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+    environment:
+      # Configuration is passed inline rather than mounted as a file so the
+      # advertised address can come from .env. livekit-sip accepts either a
+      # config path or a config body, not both, and a YAML file cannot do
+      # environment substitution.
+      #
+      # nat_1_to_1_ip is the load-bearing setting: without it livekit-sip
+      # advertises its Docker bridge address in SIP Contact headers and SDP,
+      # which a PBX on another host cannot route to. Signalling still succeeds,
+      # so the failure shows up as one-way or absent audio rather than as a
+      # connection error — much harder to diagnose after the fact.
+      SIP_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY:-devkey}
+        api_secret: ${LIVEKIT_API_SECRET:-devsecret-at-least-32-characters-long}
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis:6379
+        sip_port: 5060
+        rtp_port: 10100-10149
+        # STUN discovery would return this machine's internet-facing address,
+        # which is wrong for a PBX on the same LAN.
+        use_external_ip: false
+        nat_1_to_1_ip: ${SIP_NAT_IP:-}
+        logging:
+          level: info
+          json: true
     ports:
       # 5060 is the SIP convention, so a PBX needs no special configuration
       # to reach us. Verified free on this host — nothing else listens on it.
@@ -107,10 +133,6 @@ services:
       - "5060:5060/udp"                              # SIP signalling
       - "5060:5060/tcp"
       - "10100-10149:10100-10149/udp"                # RTP media (host==container: SDP advertises these)
-    volumes:
-      # This image reads its configuration from /sip/config.yaml; it does not
-      # take a config path from the environment.
-      - ./livekit/livekit-sip.yaml:/sip/config.yaml:ro
 
   # ----------------------------------------------------------------------- #
   # Control Plane (spec 2, 10)

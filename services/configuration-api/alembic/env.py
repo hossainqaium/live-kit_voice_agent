@@ -32,6 +32,22 @@ config.set_main_option("sqlalchemy.url", get_settings().sqlalchemy_dsn)
 target_metadata = Base.metadata
 
 
+def _render_item(type_, obj, autogen_context) -> str | bool:  # noqa: ANN001
+    """Render third-party column types with the import they need.
+
+    Autogenerate writes a fully-qualified type name into the revision but does
+    not add the corresponding import, so a pgvector column produces a script
+    that fails with NameError the first time it runs. Adding the import to the
+    template instead would put an unused import in every revision.
+
+    Returning False falls back to Alembic's default rendering.
+    """
+    if type_ == "type" and obj.__class__.__module__.startswith("pgvector"):
+        autogen_context.imports.add("import pgvector.sqlalchemy")
+        return f"pgvector.sqlalchemy.{obj.__class__.__name__}()"
+    return False
+
+
 def _include_object(object_, name, type_, reflected, compare_to) -> bool:  # noqa: ANN001
     """Keep extension-owned tables out of autogenerate.
 
@@ -53,6 +69,7 @@ def run_migrations_offline() -> None:
         compare_type=True,
         compare_server_default=True,
         include_object=_include_object,
+        render_item=_render_item,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -65,6 +82,7 @@ def _do_run_migrations(connection: Connection) -> None:
         compare_type=True,
         compare_server_default=True,
         include_object=_include_object,
+        render_item=_render_item,
         # Every migration runs in one transaction so a failure leaves no
         # half-applied schema behind.
         transaction_per_migration=False,

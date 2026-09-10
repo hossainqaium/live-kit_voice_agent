@@ -361,3 +361,159 @@ TENANT_ROLE_PERMISSIONS: dict[TenantRole, frozenset[Permission]] = {
         }
     ),
 }
+
+# --------------------------------------------------------------------------- #
+# Tenancy
+# --------------------------------------------------------------------------- #
+
+
+class TenantStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    ARCHIVED = "ARCHIVED"
+
+
+class RoleScope(StrEnum):
+    """Whether a role applies platform-wide or within one tenant (spec 8)."""
+
+    PLATFORM = "PLATFORM"
+    TENANT = "TENANT"
+
+
+# --------------------------------------------------------------------------- #
+# PBX
+# --------------------------------------------------------------------------- #
+
+
+class PbxType(StrEnum):
+    """SIP-compatible PBX systems the platform supports (spec 14)."""
+
+    ASTERISK = "ASTERISK"
+    FREEPBX = "FREEPBX"
+    FREESWITCH = "FREESWITCH"
+    FUSIONPBX = "FUSIONPBX"
+    KAMAILIO = "KAMAILIO"
+    THREE_CX = "THREE_CX"
+    CISCO = "CISCO"
+    MITEL = "MITEL"
+    #: Any other SIP-compatible system (spec 14 requires this stay open).
+    OTHER_SIP = "OTHER_SIP"
+
+
+class ConnectionTestResult(StrEnum):
+    """Outcome of a PBX or trunk connection test (spec 14, 15)."""
+
+    UNTESTED = "UNTESTED"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+
+
+# --------------------------------------------------------------------------- #
+# LiveKit dispatch
+# --------------------------------------------------------------------------- #
+
+
+class RoomStrategy(StrEnum):
+    """How inbound calls map to LiveKit rooms (spec 21).
+
+    ``INDIVIDUAL`` gives every call its own room, which is what a one-caller
+    conversation with an AI agent needs (spec 22).
+    """
+
+    INDIVIDUAL = "INDIVIDUAL"
+    SHARED = "SHARED"
+
+
+# --------------------------------------------------------------------------- #
+# Knowledge bases
+# --------------------------------------------------------------------------- #
+
+
+class KnowledgeSourceType(StrEnum):
+    """Knowledge base document sources (spec 33)."""
+
+    PDF = "PDF"
+    DOCX = "DOCX"
+    TXT = "TXT"
+    CSV = "CSV"
+    WEB = "WEB"
+
+
+class DocumentStatus(StrEnum):
+    """Ingestion state of a knowledge document."""
+
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    INDEXED = "INDEXED"
+    FAILED = "FAILED"
+
+
+# --------------------------------------------------------------------------- #
+# Tools
+# --------------------------------------------------------------------------- #
+
+
+class HttpMethod(StrEnum):
+    GET = "GET"
+    POST = "POST"
+    PUT = "PUT"
+    PATCH = "PATCH"
+    DELETE = "DELETE"
+
+
+class ToolAuthType(StrEnum):
+    """Authentication for an HTTP API tool (spec 31)."""
+
+    NONE = "NONE"
+    API_KEY_HEADER = "API_KEY_HEADER"
+    BEARER_TOKEN = "BEARER_TOKEN"  # noqa: S105 - an auth-type name, not a credential
+    BASIC = "BASIC"
+    OAUTH2_CLIENT_CREDENTIALS = "OAUTH2_CLIENT_CREDENTIALS"
+
+
+# --------------------------------------------------------------------------- #
+# Routing
+# --------------------------------------------------------------------------- #
+
+
+class FallbackAction(StrEnum):
+    """Where a caller goes when the primary target cannot take the call
+    (spec 38)."""
+
+    SECONDARY_AGENT = "SECONDARY_AGENT"
+    PBX_QUEUE = "PBX_QUEUE"
+    VOICEMAIL = "VOICEMAIL"
+    HANGUP = "HANGUP"
+
+
+class DayOfWeek(StrEnum):
+    """Explicit day names rather than integers, because 0 means Sunday in some
+    conventions and Monday in others (spec 37)."""
+
+    MONDAY = "MONDAY"
+    TUESDAY = "TUESDAY"
+    WEDNESDAY = "WEDNESDAY"
+    THURSDAY = "THURSDAY"
+    FRIDAY = "FRIDAY"
+    SATURDAY = "SATURDAY"
+    SUNDAY = "SUNDAY"
+
+
+# --------------------------------------------------------------------------- #
+# Billing
+# --------------------------------------------------------------------------- #
+
+
+class SubscriptionStatus(StrEnum):
+    TRIALING = "TRIALING"
+    ACTIVE = "ACTIVE"
+    PAST_DUE = "PAST_DUE"
+    CANCELLED = "CANCELLED"
+
+
+class TenantLimit(StrEnum):
+    """Limits enforced before a call is accepted (spec 47)."""
+
+    MAX_CONCURRENT_CALLS = "MAX_CONCURRENT_CALLS"
+    MAX_DAILY_CALLS = "MAX_DAILY_CALLS"
+    MAX_MONTHLY_MINUTES = "MAX_MONTHLY_MINUTES"
