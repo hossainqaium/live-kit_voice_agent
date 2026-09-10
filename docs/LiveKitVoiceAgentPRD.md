@@ -483,6 +483,25 @@ class TTSProvider:
 
 The architecture must allow additional providers later **without redesigning the platform**. [§25]
 
+#### 11.2.1 Implementation approach
+
+Every server speaking the OpenAI API shape is served by **one** adapter
+(`openai_compatible`) with a per-credential base URL. That covers OpenAI itself
+alongside self-hosted stacks — ollama, vLLM, speaches, faster-whisper — so
+§25's local/self-hosted requirement needs no second code path, and a tenant
+moves between hosted and self-hosted by changing a URL.
+
+Vendors with a genuinely different API shape (Anthropic, Deepgram, ElevenLabs,
+Cartesia) each get their own adapter behind the same interfaces. Adding one is
+a new module plus one registry entry; nothing in the pipeline changes.
+
+| ID | Requirement |
+|---|---|
+| PRV-1 | The base URL is a property of the **credential**, not the platform, so two tenants may point the same adapter at different endpoints. |
+| PRV-2 | STT, LLM and TTS credentials are independent, so a tenant may combine a hosted model with self-hosted speech. |
+| PRV-3 | A provider named in the database but absent from the running build must fail **loudly** at validation, never fall back to a different vendor silently. |
+| PRV-4 | Changing an agent's provider must not affect calls in progress. [§19, §45] |
+
 ### 11.3 ElevenLabs [§26]
 
 ElevenLabs must be supported as a TTS provider, with **streaming TTS** and integration with the
@@ -949,6 +968,7 @@ no SSH, and no manual LiveKit CLI configuration.
 | AC-6 | An agent can be built, validated, published, rolled back; in-flight calls keep their original version. | §18, §19, §63 |
 | AC-7 | The AI worker loads all behavior from configuration at call start and caches it for the call. | §23, §45 |
 | AC-8 | STT/LLM/TTS all sit behind provider adapters with timeout, retry, backoff, circuit breaker, and fallback. | §24, §55 |
+| AC-8a | Each configured provider is verified by **exercising the adapter and observing real output**, not by the absence of errors on a call. A greeting proves nothing: it is spoken by the session, not the model. | §24, §63 |
 | AC-9 | Barge-in, VAD, turn detection, TTS cancellation, and silence timeout work on live calls. | §29 |
 | AC-9a | A warm transfer back to the PBX plays the announcement to the caller, whispers the AI summary to the human agent only, and bridges the legs afterwards. Verified by listening to both legs: the caller must not hear the summary. | §35, §36, CR-1 |
 | AC-9b | A human agent who does not answer, is busy, or rejects the transfer causes the configured fallback chain to run, and the caller is never dropped silently. | §38, CR-1 |

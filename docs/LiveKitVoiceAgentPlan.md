@@ -133,7 +133,9 @@ Everything else in this plan is worthless until this works end to end.
 | 1.9 | `call_id` generated at call start; propagated through SIP, LiveKit, agent, STT, LLM, TTS, DB, logs | §43 |
 | 1.10 | `calls` table write path with the full minimum record from §41 | §41 |
 | 1.11 | Call state machine: `NEW → RINGING → ANSWERED → AI_CONNECTED → IN_PROGRESS → COMPLETED`, plus failure states | §42 |
-| 1.12 | Test PBX (Asterisk or FreePBX in Docker) wired to LiveKit SIP | §14 |
+| 1.12 | Test PBX wired to LiveKit SIP — satisfied by an existing FreeSWITCH/FusionPBX rather than a container, with a dedicated additive dialplan and no change to existing routes | §14 |
+| 1.13 | Provider credential storage: encrypted at rest with key versioning, read from stdin so a key never enters a process listing or shell history | §53, §54 |
+| 1.14 | CLI to store credentials and repoint an agent's STT/LLM/TTS — provider choice is configuration, not code | §9, §25 |
 
 ### Deliverables
 
@@ -150,6 +152,9 @@ Everything else in this plan is worthless until this works end to end.
 - The `calls` row is complete and correct: timestamps, duration, status, hangup reason.
 - The dispatch rule is reused across at least ten consecutive calls — none created per call.
 - No tenant-specific value appears anywhere in worker source code.
+- Each configured provider is verified by exercising the adapter and seeing real
+  output — a connected call and an absent error are not evidence that the model
+  replied.
 
 ### Out of scope
 
@@ -853,6 +858,33 @@ The general lesson: when inserting into an application's schema directly, the
 row has to satisfy that application's *queries*, not just its constraints. The
 database will accept a row the UI can never show.
 
+#### A broken LLM produces a call that sounds fine
+
+**Symptom:** calls connect, the greeting plays correctly, the call record shows
+`COMPLETED` with a sensible duration — and the agent never answers anything the
+caller says. In the worker log, `Error in _llm_inference_task` with
+`AttributeError: 'NoneType' object has no attribute 'max_retry'`.
+
+**Cause (defect):** the development echo adapter constructed its `LLMStream`
+with `conn_options=None`. The base class reads `.max_retry` from it, so every
+turn raised. **Fix:** pass a real `APIConnectOptions`
+(`DEFAULT_API_CONNECT_OPTIONS` when the caller supplies none).
+
+**Why it went unnoticed, which is the useful part:** the greeting is spoken by
+`session.say()`, not by the model. A completely broken LLM therefore yields a
+call that connects, greets the caller correctly, transitions through the state
+machine, and completes with a normal duration. Every outside signal looks
+healthy.
+
+Two habits that would have caught it immediately:
+
+1. **Verify a provider by exercising the adapter and reading its output**, not
+   by the absence of errors on a call. A direct `generate()` call returning a
+   real sentence is proof; a completed call is not.
+2. **Treat missing per-turn observability as a blocker, not a nicety.** With no
+   transcript rows and no latency metrics (both Phase 2), a conversation can
+   only be judged from the outside — which is exactly how this hid.
+
 #### Orphaned LiveKit resources after a failed sync
 
 **Symptom:** LiveKit holds more dispatch rules than our records name.
@@ -967,6 +999,8 @@ rediscover:
 | Phase | Watch for |
 |---|---|
 | 2 | Transcript persistence is not implemented yet; `call_transcript_segments` stays empty until item 2.7. The pipeline runs without it, so its absence is easy to mistake for an STT failure. |
+| 2 | **No per-turn observability yet.** Metric definitions exist but the pipeline does not populate them, so a conversation can only be judged from the outside. This is what made a broken LLM look like a working call for several attempts — items 2.5 and 2.7 close it, and they are worth doing early in the phase rather than last. |
+| 2 | The greeting is spoken by `session.say()`, not the model. Any check that treats "the caller heard the greeting" as evidence the pipeline works will pass on a completely broken LLM. |
 | 2 | The duplicate-log fix covers the main worker process. Job subprocesses forward records to the parent, which can re-emit them; check log volume per call before load testing. |
 | 4 | `inbound_numbers` semantics (§12.1) must be encoded in the dispatch-rule UI, or every tenant will hit the same `486 flood`. |
 | 5 | Orphan detection needs the LiveKit-to-database direction, not just per-row checks. |

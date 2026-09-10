@@ -21,7 +21,18 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from app.core.settings import get_settings
-from app.db.models import LiveKitDispatchRule, PhoneNumber, SipCredential, SipTrunk
+from app.db.models import (
+    Agent,
+    AgentVersion,
+    LiveKitDispatchRule,
+    Model,
+    PhoneNumber,
+    Provider,
+    ProviderCredential,
+    SipCredential,
+    SipTrunk,
+    Tenant,
+)
 from app.db.session import dispose_engine, get_session_factory
 from app.livekit import LiveKitError, LiveKitUnsupportedError, SipResourceManager
 from app.services.seed import (
@@ -32,7 +43,7 @@ from app.services.seed import (
 )
 from shared.crypto import CredentialCipher, CredentialEncryptionError
 from shared.logging import configure_logging, get_logger
-from shared.models import SyncStatus
+from shared.models import ProviderKind, SyncStatus
 
 settings = get_settings()
 configure_logging(service="configuration-api-cli", level=settings.log_level)
@@ -332,6 +343,166 @@ async def _release_trunk_and_rules(session, manager, trunk) -> None:
     await session.flush()
 
 
+async def cmd_set_credential(args: argparse.Namespace) -> int:
+    """Store a provider credential, encrypted (spec 53, 54).
+
+    The key is read from stdin rather than an argument, so it never appears in
+    a process listing, a shell history file, or this command's own logs. The
+    stored value is ciphertext; only a short hint is kept for display.
+    """
+    import sys as _sys
+
+    api_key = _sys.stdin.read().strip()
+    if not api_key:
+        print('no key on stdin; pipe it in, e.g. printf %s "$KEY" | ... ', file=sys.stderr)
+        return 2
+
+    try:
+        cipher = CredentialCipher.from_env()
+    except CredentialEncryptionError as exc:
+        print(f"cannot encrypt: {exc}", file=sys.stderr)
+        return 2
+
+    factory = get_session_factory()
+    async with factory() as session:
+        tenant = (
+            await session.execute(select(Tenant).where(Tenant.slug == args.tenant))
+        ).scalar_one_or_none()
+        if tenant is None:
+            print(f"no tenant with slug {args.tenant!r}", file=sys.stderr)
+            return 2
+
+        provider = (
+            await session.execute(
+                select(Provider).where(
+                    Provider.kind == ProviderKind(args.kind),
+                    Provider.slug == args.provider,
+                )
+            )
+        ).scalar_one_or_none()
+        if provider is None:
+            print(
+                f"no {args.kind} provider with slug {args.provider!r} in the catalog; "
+                "run seed-platform first",
+                file=sys.stderr,
+            )
+            return 2
+
+        encrypted = cipher.encrypt(api_key)
+        existing = (
+            await session.execute(
+                select(ProviderCredential).where(
+                    ProviderCredential.tenant_id == tenant.id,
+                    ProviderCredential.provider_id == provider.id,
+                    ProviderCredential.label == args.label,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            session.add(
+                ProviderCredential(
+                    tenant_id=tenant.id,
+                    provider_id=provider.id,
+                    label=args.label,
+                    api_key_ciphertext=encrypted.ciphertext,
+                    encryption_key_version=encrypted.key_version,
+                    key_hint=CredentialCipher.hint(api_key),
+                    base_url=args.base_url,
+                )
+            )
+            action = "stored"
+        else:
+            existing.api_key_ciphertext = encrypted.ciphertext
+            existing.encryption_key_version = encrypted.key_version
+            existing.key_hint = CredentialCipher.hint(api_key)
+            existing.base_url = args.base_url
+            existing.rotated_at = datetime.now(UTC)
+            action = "rotated"
+
+        await session.commit()
+
+    print(
+        f"credential {action}: tenant={args.tenant} {args.kind}/{args.provider} "
+        f"label={args.label} key=***{CredentialCipher.hint(api_key)} "
+        f"base_url={args.base_url or 'provider default'}"
+    )
+    return 0
+
+
+async def cmd_set_agent_provider(args: argparse.Namespace) -> int:
+    """Point an agent version's STT, LLM or TTS at a different provider.
+
+    Configuration, not code: switching a tenant between a self-hosted model
+    and a hosted one is a row update (spec 9, 25).
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        tenant = (
+            await session.execute(select(Tenant).where(Tenant.slug == args.tenant))
+        ).scalar_one_or_none()
+        if tenant is None:
+            print(f"no tenant with slug {args.tenant!r}", file=sys.stderr)
+            return 2
+
+        provider = (
+            await session.execute(
+                select(Provider).where(
+                    Provider.kind == ProviderKind(args.kind),
+                    Provider.slug == args.provider,
+                )
+            )
+        ).scalar_one_or_none()
+        if provider is None:
+            print(f"no {args.kind} provider {args.provider!r}", file=sys.stderr)
+            return 2
+
+        model = (
+            await session.execute(
+                select(Model).where(Model.provider_id == provider.id, Model.slug == args.model)
+            )
+        ).scalar_one_or_none()
+        if model is None:
+            # Registering it is the right move rather than failing: the catalog
+            # is data, and a provider ships new models constantly.
+            model = Model(
+                provider_id=provider.id,
+                slug=args.model,
+                display_name=args.model,
+            )
+            session.add(model)
+            await session.flush()
+            print(f"  registered model {args.model} in the catalog")
+
+        version = (
+            (
+                await session.execute(
+                    select(AgentVersion)
+                    .join(Agent, Agent.id == AgentVersion.agent_id)
+                    .where(Agent.tenant_id == tenant.id, Agent.name == args.agent)
+                    .order_by(AgentVersion.version_number.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if version is None:
+            print(f"no agent named {args.agent!r} for tenant {args.tenant}", file=sys.stderr)
+            return 2
+
+        field = args.kind.lower()
+        setattr(version, f"{field}_provider_id", provider.id)
+        setattr(version, f"{field}_model_id", model.id)
+        await session.commit()
+
+        print(
+            f"agent {args.agent!r} v{version.version_number}: "
+            f"{args.kind} -> {args.provider}/{args.model}"
+        )
+        print("in-flight calls keep their current configuration; new calls use this")
+    return 0
+
+
 async def cmd_show_config() -> int:
     """Print what LiveKit currently holds, next to what we recorded."""
     manager = SipResourceManager()
@@ -396,6 +567,25 @@ def main() -> int:
     sub.add_parser("sync-livekit", help="create or verify LiveKit SIP resources")
     sub.add_parser("show-config", help="compare LiveKit against our records")
 
+    cred = sub.add_parser(
+        "set-credential",
+        help="store a provider API key, encrypted; the key is read from stdin",
+    )
+    cred.add_argument("--tenant", default="dev", help="tenant slug")
+    cred.add_argument("--kind", required=True, choices=[k.value for k in ProviderKind])
+    cred.add_argument("--provider", required=True, help="provider slug, e.g. openai_compatible")
+    cred.add_argument("--label", default="primary", help="primary, failover, ...")
+    cred.add_argument("--base-url", default=None, help="endpoint override for this credential")
+
+    agentp = sub.add_parser(
+        "set-agent-provider", help="point an agent's STT, LLM or TTS at a provider"
+    )
+    agentp.add_argument("--tenant", default="dev", help="tenant slug")
+    agentp.add_argument("--agent", default="Development Agent", help="agent name")
+    agentp.add_argument("--kind", required=True, choices=[k.value for k in ProviderKind])
+    agentp.add_argument("--provider", required=True, help="provider slug")
+    agentp.add_argument("--model", required=True, help="model slug")
+
     args = parser.parse_args()
 
     async def run() -> int:
@@ -408,6 +598,10 @@ def main() -> int:
                 return await cmd_sync_livekit()
             if args.command == "show-config":
                 return await cmd_show_config()
+            if args.command == "set-credential":
+                return await cmd_set_credential(args)
+            if args.command == "set-agent-provider":
+                return await cmd_set_agent_provider(args)
             parser.error(f"unknown command {args.command}")
             return 2
         finally:

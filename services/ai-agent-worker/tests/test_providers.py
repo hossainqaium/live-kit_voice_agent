@@ -182,3 +182,60 @@ class TestErrorClassification:
             ProviderUnavailableError("u", provider="d"),
         ):
             assert error.provider
+
+
+class TestEchoModel:
+    """The development stand-in must actually produce a turn.
+
+    It silently failed for a while: the greeting is spoken by session.say()
+    rather than by the model, so a call connected and sounded correct right up
+    until someone spoke, at which point every turn raised AttributeError.
+    """
+
+    def _config(self) -> ProviderConfig:
+        return ProviderConfig(kind=ProviderKind.LLM, provider="echo_dev", model="echo")
+
+    @pytest.mark.asyncio
+    async def test_it_replies_with_what_it_heard(self) -> None:
+        from worker.providers.llm.echo import build
+
+        llm = build(self._config())
+        chunks = [c async for c in llm.generate([Message(role="user", content="hello there")])]
+        text = "".join(c.text for c in chunks)
+        assert "hello there" in text
+        assert chunks[-1].finished
+
+    @pytest.mark.asyncio
+    async def test_it_replies_even_with_no_user_turn(self) -> None:
+        from worker.providers.llm.echo import build
+
+        llm = build(self._config())
+        chunks = [c async for c in llm.generate([])]
+        assert "".join(c.text for c in chunks).strip()
+
+    @pytest.mark.asyncio
+    async def test_the_livekit_component_carries_connect_options(self) -> None:
+        """Regression: conn_options=None made every turn raise AttributeError.
+
+        Async because constructing the stream schedules a task, so it needs a
+        running loop.
+        """
+        from livekit.agents import llm as lk_llm
+
+        from worker.providers.llm.echo import build
+
+        component = build(self._config()).build_livekit_component()
+        stream = component.chat(chat_ctx=lk_llm.ChatContext(), tools=[])
+        try:
+            assert stream._conn_options is not None
+            assert stream._conn_options.max_retry >= 0
+        finally:
+            await stream.aclose()
+
+    def test_it_is_refused_outside_development(self, monkeypatch) -> None:
+        """A canned-response model must never answer a production call."""
+        from worker.providers.llm.echo import build
+
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        with pytest.raises(ProviderUnavailableError, match="development stand-in"):
+            build(self._config())

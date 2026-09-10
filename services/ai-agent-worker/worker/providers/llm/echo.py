@@ -37,6 +37,7 @@ class EchoLLM(LLMProvider):
         # Imported lazily so the module stays importable where the LiveKit
         # agents package is not installed, such as a unit-test-only image.
         from livekit.agents import llm as lk_llm
+        from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 
         class _EchoStream(lk_llm.LLMStream):
             async def _run(self) -> None:
@@ -65,8 +66,19 @@ class EchoLLM(LLMProvider):
                 )
 
         class _EchoLLM(lk_llm.LLM):
-            def chat(self, *, chat_ctx, tools=None, **kwargs):
-                return _EchoStream(self, chat_ctx=chat_ctx, tools=tools or [], conn_options=None)
+            def chat(self, *, chat_ctx, tools=None, conn_options=None, **kwargs):
+                # conn_options must be a real APIConnectOptions: the base
+                # LLMStream reads .max_retry from it, so None raises
+                # AttributeError on the first turn. That failed quietly for a
+                # while, because the greeting is spoken by session.say()
+                # rather than by the model — the call connected and sounded
+                # correct right up until someone actually spoke.
+                return _EchoStream(
+                    self,
+                    chat_ctx=chat_ctx,
+                    tools=tools or [],
+                    conn_options=conn_options or DEFAULT_API_CONNECT_OPTIONS,
+                )
 
         return _EchoLLM()
 

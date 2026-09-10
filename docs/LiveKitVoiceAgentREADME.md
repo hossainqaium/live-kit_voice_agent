@@ -29,6 +29,7 @@ is loaded from configuration at call start.
 8. [Connecting a PBX](#8-connecting-a-pbx)
 9. [Creating Your First Agent](#9-creating-your-first-agent)
 9a. [**Running and Testing the Voice Agent**](#9a-running-and-testing-the-voice-agent)
+9c. [**Configuring AI Providers**](#9c-configuring-ai-providers)
 10. [API Surface](#10-api-surface)
 11. [Roles and Permissions](#11-roles-and-permissions)
 12. [Observability](#12-observability)
@@ -568,18 +569,25 @@ test call:
 
 | | Value here | What it is |
 |---|---|---|
-| **Agent number (DID)** | `1001` | The number the caller **dials**. LiveKit matches it against the SIP trunk's `numbers`, and the platform resolves it to a tenant and agent through `phone_numbers`. |
-| **Caller number** | `15550001111` | The number the call appears to come **from**. Only used for caller-based routing conditions, analytics, and the transfer summary. |
+| **Agent number (DID)** | `1801` | The number the caller **dials**. LiveKit matches it against the SIP trunk's `numbers`, and the platform resolves it to a tenant and agent through `phone_numbers`. |
+| **Caller number** | `3001` (or any extension) | The number the call appears to come **from**. Only used for caller-based routing conditions, analytics, and the transfer summary. |
 
 Their LiveKit attribute names are easy to swap, so for reference:
 
 ```
-sip.trunkPhoneNumber  →  1001           the AGENT number that was dialled
-sip.phoneNumber       →  15550001111    the CALLER's number
+sip.trunkPhoneNumber  →  1801    the AGENT number that was dialled
+sip.phoneNumber       →  3001    the CALLER's number
 ```
 
-Both are configurable; nothing about `1001` is special. Change the agent number
+Both are configurable; nothing about `1801` is special. Change the agent number
 with `--did`, and the caller number per call.
+
+**Choose the agent number to avoid collisions.** A PBX numbers its extensions
+from some base — FusionPBX starts at 1000 — and an agent number that collides
+with a real extension reaches that extension instead. The symptom is reaching a
+colleague, not an error. Check the PBX's full extension list, not just the
+registered ones, before picking. `18xx` was chosen here because the entire
+range was unused.
 
 ### 9a.2 Start the platform
 
@@ -619,7 +627,7 @@ Until the configuration UI lands in Phase 4, a CLI seeds the same rows the UI
 will write. `--pbx-host` is your PBX's address; `--did` is the agent number.
 
 ```bash
-docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli seed-dev-tenant --did 1001 --pbx-host 192.168.0.113
+docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli seed-dev-tenant --did 1801 --pbx-host 192.168.0.113
 ```
 
 This creates a tenant, a PBX record, a SIP trunk, the agent number, an AI agent
@@ -646,7 +654,7 @@ the worker's agent name:
 
 ```
 LiveKit inbound trunks:
-  ST_xxxxxxxx  Development Trunk  numbers=['1001']  allowed=[]
+  ST_xxxxxxxx  Development Trunk  numbers=['1801']  allowed=[]
 
 LiveKit dispatch rules:
   SDR_xxxxxxx  Development Dispatch  trunks=['ST_xxxxxxxx']  prefix=dev-call-  agents=['voice-agent']
@@ -707,7 +715,7 @@ dialplan entry is needed — and nothing on an existing PBX is touched.
 Ring the agent and hold the call open:
 
 ```bash
-fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1001@LIVEKIT_HOST:5060 &park"
+fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060 &park"
 ```
 
 `+OK <uuid>` means the agent answered. `-ERR NO_ANSWER` means it did not — see
@@ -716,11 +724,30 @@ fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username
 To give the agent real speech to transcribe, replace `&park` with a playback:
 
 ```bash
-fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1001@LIVEKIT_HOST:5060 &playback(/usr/share/freeswitch/sounds/en/us/callie/ivr/8000/ivr-welcome_to_freeswitch.wav)"
+fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060 &playback(/usr/share/freeswitch/sounds/en/us/callie/ivr/8000/ivr-welcome_to_freeswitch.wav)"
 ```
 
 To hear the agent yourself, register a softphone to the PBX and dial the agent
-number through whatever route your dialplan already provides.
+number.
+
+#### Testing the dialplan from the CLI
+
+`originate user/<ext>@<domain> &transfer(...)` **cannot** test a
+domain-context dialplan: an originated leg *to* an extension is an outbound
+call and takes the `default` context, so a dialplan in the domain context is
+never reached. Setting `context=` on the channel or passing a context to
+`transfer` does not change it.
+
+Use a loopback channel, which does enter a chosen context:
+
+```bash
+fs_cli -x "originate {origination_caller_id_number=3001}loopback/1801/YOUR_DOMAIN/XML &park"
+```
+
+The dial string is `loopback/<destination>/<context>/<dialplan>`.
+`-ERR MANDATORY_IE_MISSING` on the loopback A-leg is **normal** and does not
+mean the test failed — judge it by the dialplan match in the FreeSWITCH log
+and by whether a call row appears.
 
 ### 9a.8b Calling the agent from a PBX extension
 
@@ -737,7 +764,7 @@ very likely an existing extension. Dialling it from a phone would reach that
 extension, not the agent, and the symptom is "my call went to a colleague"
 rather than an error.
 
-Pick a trigger number nothing else uses — `9001`, or a feature code like
+Pick a trigger number nothing else uses — `1801` here, or a feature code like
 `*8001`. It does **not** have to equal the agent number: the dialplan can map
 a free trigger onto the configured agent number, so nothing on the platform
 side changes.
@@ -754,7 +781,7 @@ Calls your phone, and bridges it to the agent when you answer. Nothing on the
 PBX is modified, so this is the right first test.
 
 ```bash
-fs_cli -x "originate user/1000@YOUR_DOMAIN &bridge({origination_caller_id_number=1000,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1001@LIVEKIT_HOST:5060)"
+fs_cli -x "originate user/1000@YOUR_DOMAIN &bridge({origination_caller_id_number=1000,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060)"
 ```
 
 Replace `1000` with your extension and `YOUR_DOMAIN` with its FusionPBX domain
@@ -774,35 +801,62 @@ domain/context:
 
 | Field | Value |
 |---|---|
-| Name | `ai-voice-agent` |
+| Name | `livekit-voice-agent-dialplan` |
 | Order | e.g. `310` — before your outbound routes, after local extensions |
-| Condition | `destination_number` matches `^9001$` |
-| Action 1 | `set` → `sip_auth_username=lkdev` |
-| Action 2 | `set` → `sip_auth_password=YOUR_PASSWORD` |
-| Action 3 | `set` → `effective_caller_id_number=${caller_id_number}` |
-| Action 4 | `bridge` → `sofia/external/sip:1001@LIVEKIT_HOST:5060` |
+| Condition | `destination_number` matches `^1801$` |
+| Action 1 | `set` → `effective_caller_id_number=${caller_id_number}` |
+| Action 2 | `set` → `effective_caller_id_name=${caller_id_name}` |
+| Action 3 | `bridge` → `{sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060` |
 
-Note the asymmetry, which is the point: the **condition** matches `9001` (what
-you dial) while the **bridge** targets `1001` (the configured agent number that
-LiveKit's trunk accepts). Action 3 passes the real extension through as the
-caller number, so `calls.caller_number` shows who rang rather than a
-placeholder.
+**The credentials belong inside the bridge dial string, in `{...}` — not as
+`set` actions.** A `set` applies to the A-leg and never reaches the outbound
+leg that `bridge` creates, so the caller never answers LiveKit's `407` and the
+call dies after a successful match. This is the single easiest way to lose an
+hour here: the dialplan matches, the bridge executes, and the call still fails.
+See [Plan §12.1](./LiveKitVoiceAgentPlan.md#121-phase-1--basic-call).
 
-Then reload and dial `9001` from the phone:
+The two `set` actions pass the real extension through as the caller identity,
+so `calls.caller_number` shows who rang rather than a placeholder.
+
+The condition and the bridge both use `1801` here because the agent number is
+free on this PBX. They do not have to match: if your chosen agent number
+collides with an extension, match a free trigger number in the condition and
+target the configured agent number in the bridge.
+
+Then reload and dial `1801` from the phone:
 
 ```bash
 fs_cli -x "reloadxml"
 ```
 
+### FusionPBX specifics
+
+Two things that will otherwise waste your afternoon:
+
+- **The dialplan lives in the database, not in files.** With `mod_xml_curl`,
+  `/etc/freeswitch/dialplan/` holds only `empty.xml` and edits there do
+  nothing. Use Dialplan Manager, or insert into `v_dialplans` and
+  `v_dialplan_details`.
+- **FusionPBX caches the generated XML** at
+  `/var/cache/fusionpbx/dialplan.<domain>` and only invalidates it on a GUI
+  save. A correct SQL insert therefore appears to do nothing until you flush
+  the cache (GUI **Advanced → Cache → Flush**, or delete the file and
+  `reloadxml`).
+
+If you insert by SQL, also set `app_uuid` to the dialplans app's own uuid
+(the first uuid in `/var/www/fusionpbx/app/dialplans/app_config.php`).
+FusionPBX's list query filters with `app_uuid <> '<inbound routes uuid>'`, and
+`NULL <> x` is NULL rather than TRUE in SQL — so a row with a null `app_uuid`
+works perfectly but is **invisible in Dialplan Manager**.
+
 Equivalent XML, if you manage dialplans as files rather than through FusionPBX:
 
 ```xml
-<extension name="ai-voice-agent">
-  <condition field="destination_number" expression="^9001$">
-    <action application="set" data="sip_auth_username=lkdev"/>
-    <action application="set" data="sip_auth_password=YOUR_PASSWORD"/>
+<extension name="livekit-voice-agent-dialplan" continue="false">
+  <condition field="destination_number" expression="^1801$">
     <action application="set" data="effective_caller_id_number=${caller_id_number}"/>
-    <action application="bridge" data="sofia/external/sip:1001@LIVEKIT_HOST:5060"/>
+    <action application="set" data="effective_caller_id_name=${caller_id_name}"/>
+    <action application="bridge" data="{sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060"/>
   </condition>
 </extension>
 ```
@@ -904,14 +958,151 @@ misread as a fault:
 
 | | Status |
 |---|---|
-| Inbound call, agent answers, speaks a greeting | Working |
-| Speech recognised, spoken reply | Working, using local STT and TTS |
-| Conversational reasoning | Needs an LLM. The seed uses a keyless development stand-in that echoes what it heard; configure a real provider for genuine conversation. |
-| Transcripts stored in `call_transcript_segments` | Not yet — Phase 2. The table stays empty; this is not an STT failure. |
-| Recording to object storage | Not yet — Phase 2. |
-| Barge-in, interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
-| Warm transfer to a human agent | Not yet — Phase 6. |
-| Configuration through the UI instead of the CLI | Not yet — Phase 4. |
+| Inbound call from a PBX extension, agent answers, speaks a greeting | Working |
+| Dedicated dialplan entry routing a chosen number to the agent | Working |
+| Call record, state machine, correlation ID across services | Working |
+| Speech to text | Working — OpenAI `gpt-4o-mini-transcribe`, or self-hosted |
+| Language model | Working — OpenAI `gpt-4o-mini`, or any OpenAI-compatible endpoint. Verified by exercising the adapter directly (§9c.5). |
+| Text to speech | Working — self-hosted Kokoro, or OpenAI |
+| Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
+| Per-turn latency metrics (STT, LLM first token, TTS first audio) | **Not yet — Phase 2.** Metric definitions exist; the pipeline does not populate them, so a slow turn is not yet measurable. |
+| Recording to object storage | Not yet — Phase 2 |
+| Barge-in and interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
+| Warm transfer to a human agent | Not yet — Phase 6 |
+| Tools, function calling, RAG | Not yet — Phase 6 |
+| Configuration through the UI instead of the CLI | Not yet — Phase 4 |
+
+Two honest caveats about interpreting a test call:
+
+- **A successful greeting does not prove the model works.** The greeting is
+  spoken by `session.say()`, not by the LLM, so a broken model still yields a
+  call that connects and greets correctly. Verify the model with §9c.5.
+- **No per-turn logging yet.** Absence of errors is not evidence a turn
+  completed. Phase 2 adds the transcript and latency instrumentation that makes
+  a conversation observable rather than inferred.
+
+---
+
+---
+
+## 9c. Configuring AI Providers
+
+Providers are **configuration, not code** (spec 9, 25). Switching a tenant
+between a self-hosted model and a hosted one is a row update; no adapter
+change, no deployment.
+
+### 9c.1 One adapter, many endpoints
+
+A single `openai_compatible` adapter serves every server that speaks the
+OpenAI API shape:
+
+| Endpoint | Works via |
+|---|---|
+| OpenAI | `https://api.openai.com/v1` |
+| Self-hosted speech (speaches, faster-whisper, Kokoro) | your own base URL |
+| ollama, vLLM, LM Studio, llama.cpp | your own base URL |
+
+The base URL is per credential, so two tenants can point the same adapter at
+different endpoints. That is what satisfies spec 25's local/self-hosted
+requirement without a second code path.
+
+### 9c.2 Storing a credential
+
+Keys are stored **encrypted** (Fernet, with key versioning) and never returned
+by the API or written to a log. The CLI reads the key from **stdin**, so it
+never appears in a process listing or a shell history file:
+
+```bash
+printf %s "$OPENAI_API_KEY" | docker compose -f deploy/docker-compose.yml --env-file .env exec -T configuration-api python -m app.cli set-credential --kind LLM --provider openai_compatible --base-url https://api.openai.com/v1
+```
+
+Repeat per kind (`STT`, `LLM`, `TTS`) — they are separate credentials, so a
+tenant can use a hosted LLM with self-hosted speech.
+
+Confirm what is stored without decrypting anything:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec postgresql psql -U voice_agent -d voice_agent -c "SELECT p.kind, p.slug, c.label, c.key_hint, c.base_url FROM provider_credentials c JOIN providers p ON p.id = c.provider_id;"
+```
+
+Only a four-character `key_hint` is kept for display. Re-running
+`set-credential` rotates the key in place and records `rotated_at`.
+
+### 9c.3 Pointing an agent at a provider
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli set-agent-provider --kind LLM --provider openai_compatible --model gpt-4o-mini
+```
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli set-agent-provider --kind STT --provider openai_compatible --model gpt-4o-mini-transcribe
+```
+
+A model not yet in the catalog is registered automatically — the catalog is
+data, and providers ship new models constantly.
+
+**Calls already in progress keep the configuration they started with**; only
+new calls pick up the change (spec 19, 45).
+
+### 9c.4 A working combination
+
+What this environment runs, and why:
+
+| | Provider | Model | Reasoning |
+|---|---|---|---|
+| STT | OpenAI | `gpt-4o-mini-transcribe` | Transcription quality dominates whether a conversation works at all. A tiny local Whisper mis-hears enough to make a correct agent look broken. |
+| LLM | OpenAI | `gpt-4o-mini` | Fast and cheap; latency matters more than raw capability for short spoken turns. |
+| TTS | Self-hosted | Kokoro via speaches | Audio is the highest-volume cost per minute, and local quality is good enough. Switch to `gpt-4o-mini-tts` if you prefer. |
+
+Mixing hosted and self-hosted like this is the point of the abstraction: the
+worker cannot tell the difference.
+
+### 9c.5 Verifying a provider actually works
+
+Logs prove a call connected; they do not prove the model replied. Exercise the
+adapter directly:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec ai-agent-worker python -c "
+import asyncio
+from worker.db import get_session_factory
+from worker.config_loader import CallConfigLoader, SipCallInfo
+from worker.providers.registry import build_llm
+from worker.providers.base import Message
+
+async def main():
+    async with get_session_factory()() as s:
+        ctx = await CallConfigLoader().load(s, call_id='probe', room_name='probe',
+            sip=SipCallInfo(None, '1801', '3001', None), worker_id='probe')
+    print(ctx.llm.redacted())
+    out = [c.text async for c in build_llm(ctx.llm).generate(
+        [Message(role='user', content='Reply with one short sentence.')]) if c.text]
+    print('reply:', ''.join(out))
+
+asyncio.run(main())"
+```
+
+A real sentence back means the credential, adapter, base URL and model all
+work. `ctx.llm.redacted()` shows `has_credential: true` and never the key
+itself.
+
+Note this writes a call row, since the loader records one — delete it
+afterwards if it would confuse your analytics.
+
+### 9c.6 The development stand-in
+
+The seed configures a keyless `echo_dev` LLM so a first call works before any
+credential exists. It repeats what it heard and is **refused outside
+development**.
+
+It is genuinely useful beyond bootstrap: Phase 8 load testing at 1,000
+concurrent calls needs the media path exercised without a million tokens of
+provider cost.
+
+A caveat worth knowing, because it cost real time here: the greeting is spoken
+by `session.say()`, not by the model. A broken LLM therefore produces a call
+that connects, greets correctly, and only fails once somebody speaks — so
+"the greeting worked" is not evidence the model works. Use §9c.5.
 
 ---
 
