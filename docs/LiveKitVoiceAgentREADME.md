@@ -665,16 +665,29 @@ Confirm the worker is registered:
 docker compose -f deploy/docker-compose.yml --env-file .env logs ai-agent-worker | grep "registered worker"
 ```
 
-### 9a.6 Set the trunk's SIP credentials
+### 9a.6 The trunk's SIP credentials
 
-The trunk authenticates inbound calls with SIP digest auth. This is preferable
-to an IP allowlist here, and **required** on Docker Desktop for macOS, which
-rewrites inbound source addresses so an allowlist can never match (see
-[Plan §12.1](./LiveKitVoiceAgentPlan.md#121-phase-1--basic-call)).
+The seed in §9a.4 provisions these automatically and **prints the password
+once**:
 
-Set a username and password on the trunk, then re-run `sync-livekit` so LiveKit
-receives them. Keep the password to hand — the calling side needs it, and the
-platform stores it encrypted and will not show it again.
+```
+  SIP trunk credentials — shown once, not recoverable:
+    username       lkdev
+    password       <generated>
+```
+
+Capture it then. The stored copy is encrypted and cannot be read back
+(spec 54), and re-running the seed will not regenerate it — inventing a new
+password would silently break a working trunk.
+
+The trunk authenticates inbound calls with SIP digest auth rather than an IP
+allowlist. That is better practice generally, and **required** on Docker
+Desktop for macOS, which rewrites inbound source addresses so an allowlist can
+never match — see
+[Plan §12.1](./LiveKitVoiceAgentPlan.md#121-phase-1--basic-call).
+
+If you lose the password, set a new one on the trunk and re-run `sync-livekit`
+so LiveKit receives it.
 
 ### 9a.7 Check reachability before calling
 

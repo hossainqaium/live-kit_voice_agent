@@ -78,9 +78,30 @@ async def cmd_seed_dev_tenant(args: argparse.Namespace) -> int:
     print(f"  agent version    {seeded.agent_version_id}")
     print(f"  sip trunk        {seeded.sip_trunk_id}")
     print(f"  dispatch rule    {seeded.dispatch_rule_id}")
-    print(f"  DID              {seeded.did}")
+    print(f"  agent number     {seeded.did}   (the number a caller dials)")
     print()
-    print("next: python -m app.cli sync-livekit")
+
+    if seeded.sip_auth_password:
+        # Printed once. The stored copy is encrypted and unreadable (spec 54),
+        # so this is the only opportunity to capture it.
+        print("  SIP trunk credentials — shown once, not recoverable:")
+        print(f"    username       {seeded.sip_auth_username}")
+        print(f"    password       {seeded.sip_auth_password}")
+    else:
+        print(
+            f"  SIP trunk username {seeded.sip_auth_username} "
+            "(password already provisioned; not recoverable)"
+        )
+    print()
+    print("next:")
+    print("  1. python -m app.cli sync-livekit")
+    print("  2. from the PBX, dial the agent number:")
+    print(
+        f'     fs_cli -x "originate {{origination_caller_id_number=15550001111,'
+        f"sip_auth_username={seeded.sip_auth_username},"
+        f"sip_auth_password=<password>}}"
+        f'sofia/external/sip:{seeded.did}@<this-host>:5060 &park"'
+    )
     return 0
 
 

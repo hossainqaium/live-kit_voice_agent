@@ -12,6 +12,7 @@ becomes code (spec 9).
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -30,10 +31,12 @@ from app.db.models import (
     Role,
     RolePermission,
     RoutingRule,
+    SipCredential,
     SipTrunk,
     Tenant,
     Voice,
 )
+from shared.crypto import CredentialCipher
 from shared.logging import get_logger
 from shared.models import (
     TENANT_ROLE_PERMISSIONS,
@@ -71,6 +74,16 @@ class DevTenantSpec:
     #: Source addresses permitted on the trunk. Empty in development because
     #: Docker Desktop rewrites the source address (see the trunk below).
     allowed_source_ips: tuple[str, ...] = ()
+
+    #: SIP digest credentials for the trunk. Authentication is what secures an
+    #: inbound trunk when IP allow-listing is unavailable, and livekit-sip
+    #: refuses calls on a trunk it cannot place (spec 15, 53).
+    sip_auth_username: str = "lkdev"
+
+    #: Generated when left empty, and printed once by the CLI. Not a default
+    #: password: a shared well-known credential in a seed is how a development
+    #: convenience becomes a production incident.
+    sip_auth_password: str = ""
 
     #: OpenAI-compatible speech endpoint. Reachable from inside the worker
     #: container, which is why it is host.docker.internal rather than
@@ -293,6 +306,11 @@ class SeededTenant:
     dispatch_rule_id: uuid.UUID
     did: str
 
+    #: The trunk's SIP password. Shown once by the CLI, because the stored copy
+    #: is encrypted and cannot be read back (spec 54).
+    sip_auth_username: str = ""
+    sip_auth_password: str = ""
+
 
 async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededTenant:
     """Create one tenant configured end to end.
@@ -368,11 +386,14 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
             # allowlist must be re-verified there rather than assumed to work
             # because it was configured.
             allowed_ips=list(spec.allowed_source_ips),
+            auth_username=spec.sip_auth_username,
             codecs=["PCMU", "PCMA", "OPUS"],
             media_encryption_required=False,
         )
         session.add(trunk)
         await session.flush()
+
+    trunk_password = await _ensure_trunk_credential(session, trunk, spec)
 
     agent = (
         await session.execute(
@@ -501,7 +522,45 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
         agent_version_id=version.id,
         dispatch_rule_id=dispatch_rule.id,
         did=spec.did,
+        sip_auth_username=trunk.auth_username or "",
+        sip_auth_password=trunk_password,
     )
+
+
+async def _ensure_trunk_credential(
+    session: AsyncSession, trunk: SipTrunk, spec: DevTenantSpec
+) -> str:
+    """Create or reuse the trunk's SIP password, returning the plaintext.
+
+    Returned so the CLI can print it exactly once. The stored copy is
+    encrypted and cannot be read back, which is the point (spec 54) — but a
+    credential nobody can use is also useless, so it is surfaced at the moment
+    of creation and never again.
+    """
+    existing = (
+        await session.execute(select(SipCredential).where(SipCredential.sip_trunk_id == trunk.id))
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        # Already provisioned. The plaintext is not recoverable from here, and
+        # inventing a new one would silently break a working trunk.
+        return ""
+
+    password = spec.sip_auth_password or secrets.token_urlsafe(18)
+    cipher = CredentialCipher.from_env()
+    encrypted = cipher.encrypt(password)
+
+    session.add(
+        SipCredential(
+            tenant_id=trunk.tenant_id,
+            sip_trunk_id=trunk.id,
+            username=trunk.auth_username or spec.sip_auth_username,
+            password_ciphertext=encrypted.ciphertext,
+            encryption_key_version=encrypted.key_version,
+        )
+    )
+    await session.flush()
+    return password
 
 
 # --------------------------------------------------------------------------- #
