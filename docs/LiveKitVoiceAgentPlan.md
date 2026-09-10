@@ -747,6 +747,77 @@ falls back to delete-and-recreate. Two consequences that are easy to miss:
   be rebuilt. A rule left pointing at a deleted trunk matches nothing and
   presents as — again — `486 flood`.
 
+#### Extension calls reach the dialplan, bridge, and then never authenticate
+
+**Symptom:** a dialplan entry matches and bridges correctly — the FreeSWITCH log
+shows `Regex (PASS)` and `EXECUTE bridge(...)` — but no call ever reaches the
+platform. livekit-sip logs `Created digest challenge`, then
+`auth challenge timed out without authenticated retry`.
+
+**Cause (defect, in the dialplan):** `sip_auth_username` and
+`sip_auth_password` were set as dialplan `set` actions. Those apply to the
+**A-leg**; they do not propagate to the outbound leg that `bridge` creates. The
+calling side therefore never answers the `407`.
+
+**Fix:** put them inside the dial string, where they belong to the new leg:
+
+```
+bridge({sip_auth_username=lkdev,sip_auth_password=...}sofia/external/sip:1801@HOST:5060)
+```
+
+This is why `originate` tests passed while the dialplan failed: the `originate`
+command carried the credentials in its own `{...}` prefix, which *is* the
+outbound leg. Two paths that look equivalent and are not.
+
+#### Testing a dialplan from the CLI lands in the wrong context
+
+**Symptom:** `originate user/3001@domain &transfer(1801 XML domain)` shows the
+dialplan being evaluated as `parsing [default->...]`, and a custom entry in the
+domain context is never reached.
+
+**Cause (environment):** an originated leg *to* an extension is an outbound
+call, so it takes the `default` context — not the extension's `user_context`.
+Setting `context=` on the channel or passing a context to `transfer` does not
+change it.
+
+**Fix:** use a loopback channel, which does enter a chosen context:
+
+```bash
+fs_cli -x "originate {origination_caller_id_number=3001}loopback/1801/DOMAIN/XML &park"
+```
+
+The dial string is `loopback/<destination>/<context>/<dialplan>`. Note that
+`-ERR MANDATORY_IE_MISSING` on the loopback A-leg is normal here and does not
+mean the test failed — check the log for the dialplan match and the resulting
+call record instead.
+
+#### FusionPBX serves a cached dialplan, so SQL inserts appear to do nothing
+
+**Symptom:** a dialplan row exists in `v_dialplans` and is correct, but
+FreeSWITCH behaves as though it does not exist. `reloadxml` changes nothing.
+
+**Cause (environment):** with `mod_xml_curl`, FusionPBX generates the dialplan
+XML and caches it at `/var/cache/fusionpbx/dialplan.<domain>`. Saving through
+the GUI invalidates that cache; **a direct database write does not.**
+
+**Fix, in order of preference:**
+
+1. Open the entry in Dialplan Manager and press **Save** — this also validates
+   that the inserted rows render correctly.
+2. **Advanced → Cache → Flush Cache** in the GUI.
+3. `rm -f /var/cache/fusionpbx/dialplan.<domain>` and `reloadxml`.
+
+Note that the cache **file** is group-writable by `www-data` while the
+**directory** is not, so a member of that group can rewrite the file in place
+but cannot delete it. Editing the cache directly is a last resort: validate
+that the result still parses as XML and that the extension count is unchanged
+before writing, because a corrupt cache costs the whole domain its dialplan
+until the next flush.
+
+Also worth knowing: `xml_locate dialplan` returns "can't find anything" for
+anything served by `mod_xml_curl`, because the XML is fetched per call rather
+than held in FreeSWITCH's static registry. It is not a useful test here.
+
 #### Orphaned LiveKit resources after a failed sync
 
 **Symptom:** LiveKit holds more dispatch rules than our records name.
