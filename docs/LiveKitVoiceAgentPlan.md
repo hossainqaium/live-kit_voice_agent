@@ -818,6 +818,41 @@ Also worth knowing: `xml_locate dialplan` returns "can't find anything" for
 anything served by `mod_xml_curl`, because the XML is fetched per call rather
 than held in FreeSWITCH's static registry. It is not a useful test here.
 
+#### A dialplan inserted by SQL does not appear in Dialplan Manager
+
+**Symptom:** the row exists in `v_dialplans`, is correct, and FreeSWITCH routes
+calls through it — but it is absent from the FusionPBX Dialplan Manager list,
+so it cannot be viewed or edited in the UI.
+
+**Cause (environment, and a SQL three-valued-logic trap):** the list query
+includes
+
+```sql
+and app_uuid <> 'c03b422e-13a8-bd1b-e42b-b6b9b4d27ce4'   -- inbound routes
+```
+
+`NULL <> 'anything'` evaluates to **NULL, not TRUE**, so any row with
+`app_uuid IS NULL` is silently filtered out. Nothing warns you: the dialplan
+works perfectly and is simply invisible.
+
+**Fix:** set `app_uuid` to the dialplans app's own uuid, which is the first
+uuid in `/var/www/fusionpbx/app/dialplans/app_config.php` and matches what
+existing manually-created entries use. Also set `dialplan_destination` to
+`'false'` to match the convention. Verify by running the app's own WHERE clause
+against the database rather than trusting the UI:
+
+```sql
+SELECT count(*) FROM v_dialplans
+WHERE (domain_uuid = '<domain uuid>' OR domain_uuid IS NULL)
+  AND app_uuid <> 'c03b422e-13a8-bd1b-e42b-b6b9b4d27ce4'
+  AND dialplan_context <> 'public'
+  AND dialplan_name = '<your dialplan>';
+```
+
+The general lesson: when inserting into an application's schema directly, the
+row has to satisfy that application's *queries*, not just its constraints. The
+database will accept a row the UI can never show.
+
 #### Orphaned LiveKit resources after a failed sync
 
 **Symptom:** LiveKit holds more dispatch rules than our records name.
