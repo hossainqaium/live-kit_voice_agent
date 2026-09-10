@@ -1,0 +1,287 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "22"
+
+jobs:
+  # ----------------------------------------------------------------------- #
+  # Secrets must never enter the repository (spec 54). This runs first and
+  # independently: if a credential has been committed, nothing else matters.
+  # ----------------------------------------------------------------------- #
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan history for credentials
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail if a real .env was committed
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked by git. Production credentials must never be committed (spec 54)."
+            exit 1
+          fi
+          echo "no tracked .env"
+
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install tools
+        run: pip install ruff==0.8.6 mypy==1.14.1
+
+      - name: Ruff check
+        run: |
+          ruff check services/configuration-api/app \
+                      services/ai-agent-worker/worker \
+                      services/shared/shared
+
+      - name: Ruff format check
+        run: |
+          ruff format --check services/configuration-api/app \
+                              services/ai-agent-worker/worker \
+                              services/shared/shared
+
+      - name: Install API dependencies for type-checking
+        run: |
+          pip install -r services/configuration-api/requirements-dev.txt
+          pip install -e services/shared
+
+      - name: Mypy
+        working-directory: services/configuration-api
+        run: mypy app
+
+  test-shared:
+    name: Unit tests — shared
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e services/shared pytest pytest-asyncio pytest-cov
+      - working-directory: services/shared
+        run: python -m pytest --cov=shared --cov-report=term-missing
+
+  test-api:
+    name: Unit tests — configuration-api
+    runs-on: ubuntu-latest
+
+    # Real PostgreSQL and Redis rather than mocks: tenant isolation and
+    # migrations cannot be verified against a fake (spec 7, 70).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: voice_agent_test
+          POSTGRES_USER: voice_agent
+          POSTGRES_PASSWORD: voice_agent
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: development
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: voice_agent_test
+      POSTGRES_USER: voice_agent
+      POSTGRES_PASSWORD: voice_agent
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-only-not-a-real-secret
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r services/configuration-api/requirements-dev.txt
+          pip install -e services/shared
+
+      - name: Create extensions
+        run: |
+          PGPASSWORD=voice_agent psql -h localhost -U voice_agent -d voice_agent_test \
+            -f scripts/postgres-init/01-extensions.sql
+
+      - name: Migrations apply cleanly
+        working-directory: services/configuration-api
+        run: alembic upgrade head
+
+      - name: Migrations are reversible
+        # A migration that cannot be rolled back is a one-way door in
+        # production. Catch it here, not during an incident.
+        working-directory: services/configuration-api
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Tests
+        working-directory: services/configuration-api
+        run: python -m pytest --cov=app --cov-report=term-missing
+
+  test-worker:
+    name: Unit tests — ai-agent-worker
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+      POSTGRES_HOST: localhost
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+          pip install -r services/ai-agent-worker/requirements-dev.txt
+          pip install -e services/shared
+
+      - name: Tests
+        working-directory: services/ai-agent-worker
+        run: python -m pytest --cov=worker --cov-report=term-missing
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/frontend/package-lock.json
+
+      - name: Install
+        working-directory: services/frontend
+        run: npm install
+
+      - name: Type-check
+        working-directory: services/frontend
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: services/frontend
+        run: npm run build
+
+  images:
+    name: Container images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Configuration API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/configuration-api/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: AI agent worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/ai-agent-worker/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Frontend (production target)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/frontend/Dockerfile
+          target: production
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  compose:
+    name: Compose stack starts healthy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 32)|" .env
+
+      - name: Start the stack
+        run: docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+
+      - name: Wait for readiness
+        # Phase 0 exit criterion: every service reaches healthy, and /health
+        # and /ready both answer (spec 59).
+        run: |
+          set -e
+          api_port=$(grep '^API_PORT=' .env | cut -d= -f2)
+          worker_port=$(grep '^WORKER_HEALTH_PORT=' .env | cut -d= -f2)
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:$api_port/ready" >/dev/null 2>&1 \
+               && curl -fsS "http://localhost:$worker_port/ready" >/dev/null 2>&1; then
+              echo "both services ready after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::services did not become ready"
+          docker compose -f deploy/docker-compose.yml --env-file .env ps
+          docker compose -f deploy/docker-compose.yml --env-file .env logs --tail 100
+          exit 1
+
+      - name: Apply migrations
+        run: |
+          docker compose -f deploy/docker-compose.yml --env-file .env \
+            exec -T configuration-api alembic upgrade head
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml --env-file .env logs --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml --env-file .env down -v

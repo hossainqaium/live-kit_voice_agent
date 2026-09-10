@@ -1,0 +1,124 @@
+"""Application settings.
+
+Every value comes from the environment. Nothing tenant-specific appears here:
+tenant configuration lives in PostgreSQL and is managed through the API
+(spec 9, 10). The variables below are infrastructure wiring only, and in
+production their secret-bearing members are injected from a secret manager
+rather than a file (spec 54).
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Annotated, Literal
+
+from pydantic import Field, PostgresDsn, SecretStr, computed_field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+Environment = Literal["development", "staging", "production"]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- Service identity ------------------------------------------------- #
+    service_name: str = "configuration-api"
+    environment: Environment = "development"
+    log_level: str = "info"
+    api_base_path: str = "/api/v1"
+
+    # --- PostgreSQL ------------------------------------------------------- #
+    postgres_host: str = "postgresql"
+    postgres_port: int = 5432
+    postgres_db: str = "voice_agent"
+    postgres_user: str = "voice_agent"
+    postgres_password: SecretStr = SecretStr("voice_agent")
+    database_url: PostgresDsn | None = None
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_echo: bool = False
+
+    # --- Redis ------------------------------------------------------------ #
+    redis_url: str = "redis://redis:6379/0"
+    redis_call_state_ttl_seconds: int = 3600
+
+    # --- Auth ------------------------------------------------------------- #
+    jwt_secret: SecretStr = SecretStr("change-me-in-every-real-environment")
+    jwt_algorithm: str = "HS256"
+    access_token_ttl_minutes: int = 30
+    refresh_token_ttl_days: int = 14
+
+    #: Envelope key for provider and SIP credentials at rest (spec 53).
+    credential_encryption_key: SecretStr = SecretStr("")
+
+    # --- LiveKit ---------------------------------------------------------- #
+    livekit_url: str = "ws://livekit:7880"
+    livekit_api_key: SecretStr = SecretStr("devkey")
+    livekit_api_secret: SecretStr = SecretStr("devsecret-at-least-32-characters-long")
+    livekit_sip_uri: str = "sip:livekit-sip:5060"
+
+    # --- Object storage --------------------------------------------------- #
+    s3_endpoint_url: str | None = "http://minio:9000"
+    s3_bucket_recordings: str = "recordings"
+    s3_access_key_id: SecretStr = SecretStr("minioadmin")
+    s3_secret_access_key: SecretStr = SecretStr("minioadmin")
+    s3_region: str = "us-east-1"
+
+    # --- CORS ------------------------------------------------------------- #
+    # NoDecode stops pydantic-settings from JSON-parsing the environment value
+    # before the validator below runs, which is what lets a plain
+    # comma-separated string work instead of requiring '["http://..."]'.
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:3000"]
+    )
+
+    # --- Readiness -------------------------------------------------------- #
+    #: A readiness probe must fail fast. A slow dependency check that outlasts
+    #: the probe timeout is indistinguishable from an outage, and worse, it
+    #: keeps the connection open while Kubernetes retries.
+    readiness_timeout_seconds: float = 2.0
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    # repr=False: the DSN embeds the password, and a settings object rendered
+    # into a traceback or log line would otherwise leak it (spec 54).
+    @computed_field(repr=False)  # type: ignore[prop-decorator]
+    @property
+    def sqlalchemy_dsn(self) -> str:
+        """Async DSN for SQLAlchemy.
+
+        ``database_url`` wins when set so a managed database can be supplied as
+        a single connection string.
+        """
+        if self.database_url is not None:
+            dsn = str(self.database_url)
+            # pydantic normalises to postgresql://; SQLAlchemy needs the driver.
+            if dsn.startswith("postgresql://"):
+                dsn = dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+            return dsn
+        password = self.postgres_password.get_secret_value()
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return the process-wide settings singleton."""
+    return Settings()

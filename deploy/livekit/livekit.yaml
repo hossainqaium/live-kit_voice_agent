@@ -1,0 +1,38 @@
+# LiveKit Server — development configuration.
+#
+# Everything in this file is infrastructure-level and therefore platform/DevOps
+# controlled (spec 13). It must never be exposed to tenant administrators.
+# Tenant-level LiveKit configuration (SIP trunks, dispatch rules, agent
+# dispatch) is created through the Configuration API instead.
+
+port: 7880
+
+rtc:
+  tcp_port: 7881
+  # The development range is deliberately small: every published port becomes a
+  # forwarding entry on Docker Desktop, and a 10,000-port range makes
+  # `compose up` take minutes. Production widens this in the Helm values.
+  port_range_start: 50100
+  port_range_end: 50149
+  # No external IP discovery locally; the PBX and LiveKit share the bridge
+  # network. A remote PBX needs use_external_ip: true and a reachable address.
+  use_external_ip: false
+
+redis:
+  address: redis:6379
+
+keys:
+  # Development credentials only. Production keys come from a secret manager
+  # (spec 54) and never from a file in the repository.
+  devkey: devsecret-at-least-32-characters-long
+
+turn:
+  enabled: false
+
+# Scraped by Prometheus (spec 57).
+prometheus:
+  port: 6789
+
+logging:
+  level: info
+  json: true

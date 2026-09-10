@@ -1,0 +1,34 @@
+# --- LiveKit Agents framework --------------------------------------------- #
+livekit-agents==1.8.1
+livekit-api==1.2.1
+
+# Provider plugins. The platform's own adapter layer (worker/providers) wraps
+# these so provider-specific code stays behind the interfaces in spec 24.
+livekit-plugins-silero==1.8.1
+livekit-plugins-deepgram==1.8.1
+livekit-plugins-openai==1.8.1
+livekit-plugins-anthropic==1.8.1
+livekit-plugins-elevenlabs==1.8.1
+livekit-plugins-cartesia==1.8.1
+
+# --- Configuration loading ------------------------------------------------ #
+# The worker reads agent configuration from PostgreSQL at call start (spec 23)
+# and caches it for the call's lifetime (spec 45).
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# --- Distributed state ---------------------------------------------------- #
+redis[hiredis]==5.2.1
+
+# --- Tools and outbound HTTP ---------------------------------------------- #
+httpx==0.28.1
+
+# --- Object storage (recordings) ------------------------------------------ #
+aioboto3==13.3.0
+
+# --- Health endpoint and telemetry ---------------------------------------- #
+aiohttp==3.11.11
+prometheus-client==0.26.0
+cryptography==44.0.0

@@ -1,0 +1,35 @@
+# Environment and secrets — never commit credentials (spec 54).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+npm-debug.log*
+
+# Local data
+deploy/**/data/
+*.sqlite3
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

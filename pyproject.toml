@@ -1,0 +1,58 @@
+# Repository-wide tooling configuration.
+#
+# Each service has its own dependency set, but lint and type-check rules are
+# shared so local runs and CI cannot disagree.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["alembic/versions", "node_modules", ".next"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "N",        # naming
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "A",        # builtin shadowing
+    "C4",       # comprehensions
+    "SIM",      # simplification
+    "RUF",      # ruff-specific
+    "ASYNC",    # async correctness
+    "S",        # security (bandit)
+]
+ignore = [
+    "E501",     # line length is handled by the formatter
+    "B008",     # FastAPI's Depends() in defaults is the framework idiom
+    "S104",     # binding 0.0.0.0 is correct inside a container
+    # Ruff selectors are prefix-matched, so "A" (flake8-builtins) also pulls in
+    # ANN (flake8-annotations). Full annotation coverage is mypy's job, and
+    # requiring it on every pytest fixture argument is noise.
+    "ANN",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Developer tooling shells out to docker and lsof by name, on purpose.
+"scripts/**" = ["S603", "S607"]
+# Tests legitimately assert on private members and use hard-coded fixtures.
+"**/tests/**" = ["S101", "S105", "S106", "SLF001", "N802"]
+# Alembic's generated scaffolding is not ours to restyle.
+"**/alembic/env.py" = ["ANN001", "ANN201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "worker", "shared"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+exclude = ["alembic/versions/", "tests/"]
+
+[[tool.mypy.overrides]]
+module = ["livekit.*", "aioboto3.*", "passlib.*"]
+ignore_missing_imports = true

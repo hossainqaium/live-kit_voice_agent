@@ -1,0 +1,50 @@
+# Alerting rules (spec 57).
+#
+# Thresholds here are development placeholders. Phase 8 replaces them with
+# values derived from measured load-test behaviour rather than guesses.
+
+groups:
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is down"
+
+  - name: voice-quality
+    rules:
+      # Time to first audio is what a caller actually experiences as lag.
+      - alert: HighTimeToFirstAudio
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(voice_time_to_first_audio_seconds_bucket[5m])) by (le)
+          ) > 1.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 time-to-first-audio above 1.5s"
+
+  - name: providers
+    rules:
+      - alert: ProviderCircuitOpen
+        expr: voice_provider_circuit_state == 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.kind }}/{{ $labels.provider }}"
+
+  - name: configuration
+    rules:
+      - alert: LiveKitConfigurationDrift
+        expr: api_livekit_drift_detected > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} {{ $labels.resource }} resource(s) drifted from LiveKit"

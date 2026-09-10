@@ -1,0 +1,337 @@
+# Development environment (spec 4).
+#
+# Contains the ten services the specification requires at minimum, plus a
+# one-shot job that creates the recordings bucket.
+#
+# Build contexts are the repository root because every Python image installs
+# the shared package from services/shared.
+#
+# Run from the repository root:
+#   docker compose -f deploy/docker-compose.yml up -d
+
+name: voice-agent-platform
+
+x-python-logging: &python-logging
+  # Structured JSON logs from the first line (spec 58).
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+
+services:
+
+  # ----------------------------------------------------------------------- #
+  # Configuration source of truth (spec 10, 79)
+  # ----------------------------------------------------------------------- #
+  postgresql:
+    # pgvector is required for knowledge base retrieval (spec 33), so the
+    # extension ships in the image rather than being installed at runtime.
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-voice_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_agent}
+      # Deterministic collation keeps index behaviour identical across machines.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-voice_agent} -d ${POSTGRES_DB:-voice_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ----------------------------------------------------------------------- #
+  # Distributed state, caching and events (spec 44, 79)
+  # ----------------------------------------------------------------------- #
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly keeps the durable keys across a restart; anything classified
+    # as disposable is recreated by the services themselves (spec 66).
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "${REDIS_PORT:-6381}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ----------------------------------------------------------------------- #
+  # Realtime media and SIP (spec 2, 79)
+  # ----------------------------------------------------------------------- #
+  livekit:
+    image: livekit/livekit-server:v1.8
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${LIVEKIT_PORT:-7980}:7880"                 # signalling / WebSocket
+      - "${LIVEKIT_TCP_PORT:-7981}:7881"             # RTC over TCP
+      - "${LIVEKIT_METRICS_PORT:-6889}:6789"         # Prometheus metrics
+      - "50100-50149:50100-50149/udp"                # RTC media (host==container: ICE advertises these)
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    healthcheck:
+      # LiveKit's own readiness endpoint; the image has no shell utilities
+      # beyond wget, hence the wget spelling here.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:7880"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  livekit-sip:
+    image: livekit/sip:latest
+    restart: unless-stopped
+    depends_on:
+      livekit:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    ports:
+      # 5060 is the SIP convention, so a PBX needs no special configuration
+      # to reach us. Verified free on this host — nothing else listens on it.
+      #
+      # 1:1 mapping: livekit-sip announces its own port in Via/Contact headers,
+      # so a host/container mismatch breaks call setup. Changing this means
+      # changing sip_port in livekit/livekit-sip.yaml at the same time.
+      - "5060:5060/udp"                              # SIP signalling
+      - "5060:5060/tcp"
+      - "10100-10149:10100-10149/udp"                # RTP media (host==container: SDP advertises these)
+    volumes:
+      # This image reads its configuration from /sip/config.yaml; it does not
+      # take a config path from the environment.
+      - ./livekit/livekit-sip.yaml:/sip/config.yaml:ro
+
+  # ----------------------------------------------------------------------- #
+  # Control Plane (spec 2, 10)
+  # ----------------------------------------------------------------------- #
+  configuration-api:
+    build:
+      context: ..
+      dockerfile: services/configuration-api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *python-logging
+      SERVICE_NAME: configuration-api
+      POSTGRES_HOST: postgresql
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-voice_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_agent}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret-at-least-32-characters-long}
+      LIVEKIT_SIP_URI: ${LIVEKIT_SIP_URI:-sip:livekit-sip:5060}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET_RECORDINGS: ${S3_BUCKET_RECORDINGS:-recordings}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      CORS_ALLOW_ORIGINS: http://localhost:${FRONTEND_PORT:-3200}
+    ports:
+      - "${API_PORT:-8200}:8000"
+    volumes:
+      # Bind mounts give reload-on-save in development. Production images are
+      # self-contained and mount nothing.
+      - ../services/configuration-api/app:/app/app
+      - ../services/configuration-api/alembic:/app/alembic
+      - ../services/configuration-api/alembic.ini:/app/alembic.ini
+      - ../services/configuration-api/tests:/app/tests
+      - ../services/configuration-api/pytest.ini:/app/pytest.ini
+      # Repository-wide lint/type-check rules, so local runs match CI.
+      - ../pyproject.toml:/opt/tooling/pyproject.toml:ro
+      # Whole project, not just the package, so `make test-shared` can see tests/.
+      - ../services/shared:/opt/shared
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+
+  # ----------------------------------------------------------------------- #
+  # Voice Execution Plane (spec 2, 23)
+  # ----------------------------------------------------------------------- #
+  ai-agent-worker:
+    build:
+      context: ..
+      dockerfile: services/ai-agent-worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    environment:
+      <<: *python-logging
+      SERVICE_NAME: ai-agent-worker
+      POSTGRES_HOST: postgresql
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-voice_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_agent}
+      REDIS_URL: redis://redis:6379/0
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret-at-least-32-characters-long}
+      WORKER_AGENT_NAME: ${WORKER_AGENT_NAME:-voice-agent}
+      WORKER_MAX_CONCURRENT_CALLS: ${WORKER_MAX_CONCURRENT_CALLS:-10}
+      WORKER_DRAIN_TIMEOUT_SECONDS: ${WORKER_DRAIN_TIMEOUT_SECONDS:-600}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET_RECORDINGS: ${S3_BUCKET_RECORDINGS:-recordings}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${WORKER_HEALTH_PORT:-8202}:8081"
+    volumes:
+      - ../services/ai-agent-worker/worker:/app/worker
+      - ../services/ai-agent-worker/tests:/app/tests
+      - ../services/ai-agent-worker/pytest.ini:/app/pytest.ini
+      # Whole project, not just the package, so `make test-shared` can see tests/.
+      - ../services/shared:/opt/shared
+    # A long stop grace period is what lets the drain in worker/main.py finish
+    # instead of being killed halfway (spec 51).
+    stop_grace_period: 620s
+
+  # ----------------------------------------------------------------------- #
+  # Administration UI (spec 60, 61)
+  # ----------------------------------------------------------------------- #
+  frontend:
+    build:
+      context: ..
+      dockerfile: services/frontend/Dockerfile
+      target: development
+    restart: unless-stopped
+    depends_on:
+      configuration-api:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      # Read by the browser, so it must be the host-visible address, not the
+      # compose service name.
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:${API_PORT:-8200}
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "${FRONTEND_PORT:-3200}:3000"
+    volumes:
+      - ../services/frontend:/app
+      - frontend-node-modules:/app/node_modules
+      - frontend-next-cache:/app/.next
+
+  # ----------------------------------------------------------------------- #
+  # Object storage — recordings never go in PostgreSQL (spec 3, 39)
+  # ----------------------------------------------------------------------- #
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9200}:9000"
+      - "${MINIO_CONSOLE_PORT:-9201}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET_RECORDINGS: ${S3_BUCKET_RECORDINGS:-recordings}
+    # Idempotent: `mb --ignore-existing` makes a restart harmless.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "local/$$S3_BUCKET_RECORDINGS" &&
+        echo "bucket ready: $$S3_BUCKET_RECORDINGS"
+    restart: "no"
+
+  # ----------------------------------------------------------------------- #
+  # Monitoring (spec 57)
+  # ----------------------------------------------------------------------- #
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9290}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    ports:
+      - "${GRAFANA_PORT:-3201}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+  frontend-node-modules:
+  frontend-next-cache:
