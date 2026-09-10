@@ -26,10 +26,17 @@ COPY services/ai-agent-worker/ /app/
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# Fetch the Silero VAD weights at build time. Downloading them on first use
+# would add seconds to the first call of every fresh pod, which is exactly the
+# latency the spec-56 budget is measured against.
+RUN python -m worker.main download-files || \
+    echo "warning: model prefetch failed; models will be fetched on first use"
+
 # Health/readiness/metrics endpoint. Realtime media does not pass through it.
-EXPOSE 8081
+# 8090, not 8081: the LiveKit Agents runtime binds 8081 for its own server.
+EXPOSE 8090
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=5 \
-    CMD curl -fsS http://localhost:8081/health || exit 1
+    CMD curl -fsS http://localhost:8090/health || exit 1
 
 CMD ["python", "-m", "worker.main"]

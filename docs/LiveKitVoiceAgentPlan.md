@@ -28,6 +28,18 @@ Each phase states:
 - **Exit criteria** — objectively checkable conditions
 - **Explicitly out of scope** — what must *not* be built yet
 
+### The troubleshooting log is part of the deliverable
+
+§12 records, per phase, every problem actually hit while building — symptom
+first, then cause, then fix. It exists so the next environment costs hours
+instead of days.
+
+**Closing a phase includes adding its entries.** Write them as the problems are
+solved, not afterwards: the symptom is the searchable part, and it is the first
+thing forgotten once the cause is understood. An entry is worth writing
+whenever the symptom did not point at the cause — which was true of nearly
+every problem in Phases 0 and 1.
+
 ### Standing rule for every phase [§80]
 
 Before implementing any major component, write down its **Architecture, Database Model,
@@ -94,6 +106,7 @@ stall on scaffolding.
 - `docker compose up` brings all ten services to healthy.
 - `curl /health` and `curl /ready` succeed on API and worker.
 - CI is green on an empty test suite; the secret scanner fails a deliberately planted fake key.
+- Every problem hit during setup is recorded in §12.0, symptom first.
 
 ---
 
@@ -125,6 +138,7 @@ Everything else in this plan is worthless until this works end to end.
 ### Deliverables
 
 - Component design docs (the seven headings) for: Configuration API, LiveKit module, AI Agent Worker.
+- Troubleshooting entries in §12 for every problem hit (done — see §12.1).
 - Initial Alembic migration containing the complete §68 schema.
 - A recorded walkthrough of one successful call, with the log trace filtered by `call_id`.
 
@@ -175,6 +189,7 @@ Ten concurrent calls that actually sound good.
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - Latency dashboard with per-stage breakdown.
 - Recording + transcript artifacts for the 10-call test.
 - Barge-in test cases in the integration suite.
@@ -224,6 +239,7 @@ feature is built on top. [§80]
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - Security model document: authentication, authorization, tenant-resolution, encryption.
 - Isolation test suite report — one case per tenant-scoped endpoint.
 - Audit log schema and event catalogue.
@@ -281,6 +297,7 @@ A non-developer tenant administrator can configure the platform entirely through
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - API contracts for every resource in §67 that this phase touches, with OpenAPI published.
 - Both console UIs, responsive and desktop-oriented.
 - Validation rule catalogue for §63.
@@ -335,6 +352,7 @@ detected automatically.
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - LiveKit integration design doc: resource lifecycle, ID mapping, reconciliation algorithm.
 - Drift-detection runbook (README §16).
 - Capacity dashboard.
@@ -387,6 +405,7 @@ and survive provider failure.
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - Tool execution design doc: sandboxing, timeouts, retry semantics, variable resolution.
 - RAG design doc: chunking, embedding model, retrieval strategy, per-tenant partitioning.
 - Provider failover matrix — which provider falls back to which, per kind.
@@ -451,6 +470,7 @@ DR.
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - Production Helm charts and `values.production.yaml`.
 - Alert catalogue with thresholds and owners.
 - DR runbook with a rehearsal record (not just a document).
@@ -500,6 +520,7 @@ actually supports. **No fake scalability.** [§75]
 
 ### Deliverables
 
+- Troubleshooting entries in §12.
 - **Capacity report**: measured calls-per-worker, required worker count with headroom,
   per-component saturation points, and the observed limits of the current architecture.
 - Per-step measurement dataset for all metrics in §71.
@@ -527,7 +548,329 @@ actually supports. **No fake scalability.** [§75]
 
 ---
 
-## 12. Milestones
+## 12. Environment Notes and Troubleshooting
+
+Everything below was hit while building this platform, not anticipated. Each
+entry names the symptom first, because that is what a future engineer will
+have, and the symptom is often nothing like the cause.
+
+Entries marked **environment** are properties of a particular host or
+dependency version. Entries marked **defect** were bugs in this codebase, kept
+here because the symptom will recur if the fix is ever reverted.
+
+### 12.0 Phase 0 — Foundations
+
+#### Host port collisions
+
+**Symptom:** `Bind for 0.0.0.0:5432 failed: port is already allocated`,
+partway through `compose up`, leaving the stack half-started.
+**Cause (environment):** 5432, 6379 and 8081 were already taken by other
+stacks on the same machine.
+**Fix:** the project owns a dedicated host-port block (see the README's
+endpoint table), and `make up` runs `scripts/preflight.py` first, which derives
+every published port from the compose file and reports what holds it. Run
+`make preflight` before blaming the application.
+
+> On any new machine, run `make preflight` **before** the first `compose up`.
+> It is the difference between a one-line message and a half-started stack.
+
+#### Dependency conflict on prometheus-client
+
+**Symptom:** `ResolutionImpossible` during the worker image build.
+**Cause (environment):** `livekit-agents` requires `prometheus-client>=0.22`;
+the pin was 0.21.1.
+**Fix:** all three components pin the same version. When bumping
+`livekit-agents`, re-check this: the shared package, the API and the worker
+must agree or the image build fails.
+
+#### LiveKit deprecation warning at startup
+
+**Symptom:** `prometheus_port is deprecated, please switch prometheus.port`.
+**Fix:** nested form in `deploy/livekit/livekit.yaml`:
+
+```yaml
+prometheus:
+  port: 6789
+```
+
+#### livekit-sip ignores the config path
+
+**Symptom:** `open /sip/config.yaml: no such file or directory`, looping.
+**Cause (environment):** the image reads `/sip/config.yaml`. It does not take
+a path from the environment, despite `SIP_CONFIG_FILE` existing.
+**Fix:** the configuration is now passed inline via `SIP_CONFIG_BODY` in the
+compose file, which also allows environment substitution — a mounted YAML file
+cannot interpolate `${SIP_NAT_IP}`.
+
+#### Settings fail to parse a list from the environment
+
+**Symptom:** `SettingsError: error parsing value for field "cors_allow_origins"`.
+**Cause (defect):** pydantic-settings JSON-decodes complex fields *before*
+field validators run, so `http://a,http://b` is rejected as invalid JSON.
+**Fix:** annotate the field `Annotated[list[str], NoDecode]`, which defers to
+the validator.
+
+#### Tooling not on PATH inside containers
+
+**Symptom:** `sh: 1: ruff: not found` after a successful `pip install`.
+**Cause (environment):** pip installs console scripts to `~/.local/bin` for the
+image's non-root user, which is not on PATH.
+**Fix:** invoke through `python -m ruff` / `python -m mypy`.
+
+#### Lint passes locally but the config is ignored
+
+**Symptom:** `ruff check` reports "All checks passed" while clearly violating
+the configured ruleset.
+**Cause (defect):** ruff discovers `pyproject.toml` by walking up from the
+target files. The service images do not contain the repository root, so ruff
+silently fell back to its defaults.
+**Fix:** `make lint` and `make fmt` run in a throwaway container with the
+repository root mounted, exactly as CI invokes them. If a lint run looks
+suspiciously clean, check which config was discovered.
+
+#### Ruff selector prefix surprise
+
+**Symptom:** 21 `ANN001` findings from a ruleset that never selected `ANN`.
+**Cause (environment):** ruff selectors are prefix-matched, so `"A"`
+(flake8-builtins) also selects `ANN` (flake8-annotations).
+**Fix:** `"ANN"` is in the ignore list, with the reason recorded there.
+
+#### Alembic revision generation fails on a post-write hook
+
+**Symptom:** `FAILED: Could not find entrypoint console_scripts.ruff`.
+**Cause:** the hook ran inside the runtime image, which has no linter.
+**Fix:** the hook is removed. Shipping a linter in a runtime image to format
+generated migrations is the wrong trade; `make fmt` covers them.
+
+#### Container-internal port collision
+
+**Symptom:** worker exits immediately with
+`[Errno 98] error while attempting to bind on address ('0.0.0.0', 8081)`.
+**Cause (environment):** the LiveKit Agents runtime binds 8081 for its own HTTP
+server — the same port the worker's health listener used.
+**Fix:** the health listener moved to 8090. This is not a host-port conflict;
+`make preflight` cannot see it, because both listeners are inside one
+container.
+
+#### Every log line emitted twice
+
+**Symptom:** each event appears once in this platform's JSON format and once in
+LiveKit's, doubling log volume.
+**Cause (environment):** the agents runtime installs its own root handler.
+**Fix:** wrap `setup_logging`, then reassert our configuration. It has to be
+patched on the module that **calls** it — `livekit.agents.cli.cli` — because
+`cli.py` does `from .log import setup_logging` and holds a direct reference.
+Patching `livekit.agents.cli.log.setup_logging` has no effect, which is a
+convincing dead end to spend an hour in.
+
+### 12.1 Phase 1 — Basic Call
+
+#### `486 Busy` with `reason: flood` — the expensive one
+
+**Symptom:** every inbound INVITE is rejected. FreeSWITCH reports
+`NO_ANSWER`; livekit-sip logs `Rejecting inbound flood` at `inbound.go:890`
+and `status: 486, reason: "flood"`.
+
+**Cause (environment):** "flood" is how livekit-sip classifies a call that
+**matches no dispatch rule**. It is not a rate limiter, and nothing about the
+message says "dispatch". The rule existed and was attached to the right trunk,
+but its `inbound_numbers` filter was set to the dialled number `1001` — and
+`inbound_numbers` on a *dispatch rule* matches the **caller's** number, not the
+number that was called. It therefore matched nothing.
+
+**Fix:** leave `inbound_numbers` empty on the dispatch rule and let the trunk's
+`numbers` field restrict which DIDs the trunk accepts. Set `inbound_numbers`
+only to filter by *calling* party.
+
+**Diagnosis that actually worked, in order:**
+
+1. `reason: "flood"` at info level says nothing useful. Set the SIP log level
+   to `debug` (`SIP_LOG_LEVEL=debug`) to get the `caller` field, which names
+   the source line and distinguishes this rejection from every other 486.
+2. Check whether the trunk matched: the debug line carries `sipTrunk`. If a
+   trunk ID is present, trunk matching is fine and the problem is downstream.
+3. Confirm the request even arrives, before suspecting configuration. A
+   throwaway UDP listener on a spare published port, plus a SIP `OPTIONS`
+   probe, separates "not arriving" from "arriving and rejected".
+
+Time was lost chasing rate limiting, IP allow-listing and authentication in
+turn, because the word "flood" implies volume. It does not.
+
+#### Docker Desktop rewrites inbound UDP source addresses
+
+**Symptom:** livekit-sip logs `fromIP: 167.82.48.223` for a call from a PBX at
+`192.168.0.113`. IP allow-listing never matches.
+**Cause (environment):** Docker Desktop for macOS rewrites the source address
+of inbound packets to a synthetic public address. Verified directly: a UDP
+packet sent from the PBX to a throwaway listener arrived with the rewritten
+source.
+
+**Consequences, both real:**
+
+- **IP allow-listing (spec 53) cannot function in this development setup.**
+  Not a design flaw, an environment property. On a Linux host, or Kubernetes
+  with `externalTrafficPolicy: Local`, the source address survives. It must be
+  re-verified there rather than assumed to work because it was configured.
+- livekit-sip flood-rejects sources outside its trusted networks, so
+  `local_net` has to be widened in development.
+
+**Fix in development:** SIP digest authentication instead of an IP allowlist —
+which is better practice regardless, and what spec 15 asks for. The trunk
+carries `auth_username` plus an encrypted password, and the calling side
+authenticates.
+
+#### No audio, or one-way audio, while signalling succeeds
+
+**Symptom:** the call connects and then nobody hears anything.
+**Cause (environment):** livekit-sip advertises its own address in SIP
+`Contact` headers and in SDP. Inside Docker that is the bridge address
+(`172.x.y.z`), which a PBX on another host cannot route to. Signalling still
+succeeds, so this presents as silence rather than an error.
+**Fix:** set `nat_1_to_1_ip` to an address the PBX can reach.
+`./scripts/lan-ip.sh` prints it; `SIP_NAT_IP` in `.env` carries it. Do **not**
+use `use_external_ip: true` on a LAN — STUN returns the internet-facing
+address, which is wrong for a PBX on the same network.
+
+#### `UpdateSIPInboundTrunk` is not implemented
+
+**Symptom:** `no handler for path "/twirp/livekit.SIP/UpdateSIPInboundTrunk"
+(code=bad_route)`.
+**Cause (environment):** the SDK exposes the call; LiveKit server 1.8.4 does
+not route it.
+**Fix:** `bad_route` maps to `LiveKitUnsupportedError`, and synchronisation
+falls back to delete-and-recreate. Two consequences that are easy to miss:
+
+- LiveKit refuses a second trunk claiming a number an existing trunk already
+  has (`Conflicting inbound SIP Trunks ... without AllowedNumbers set`), so the
+  old trunk must be deleted **before** the new one is created.
+- Recreating changes the trunk ID, so every dispatch rule referencing it must
+  be rebuilt. A rule left pointing at a deleted trunk matches nothing and
+  presents as — again — `486 flood`.
+
+#### Orphaned LiveKit resources after a failed sync
+
+**Symptom:** LiveKit holds more dispatch rules than our records name.
+**Cause (defect, partially):** interrupted delete-and-recreate cycles leave
+resources behind. Detecting them needs a list-and-compare in the
+LiveKit-to-database direction; a per-row check only finds the opposite case.
+**Fix:** `SipResourceManager.list_dispatch_rules` and `list_inbound_trunks`
+support this; wiring it into a scheduled reconciliation is Phase 5 (item 5.7).
+Until then, orphans accumulate quietly and cost nothing except confusion.
+
+#### Caller and called numbers silently swapped
+
+**Symptom:** `calls.caller_number` empty while the room name plainly contains
+the caller's number.
+**Cause (defect):** `sip.phoneNumber` was used as a fallback for the *called*
+number. It holds the **caller's** number.
+**Why it mattered more than the empty column:** on a trunk that does not set
+`sip.trunkPhoneNumber`, that fallback would have routed the call by the
+caller's number and matched the wrong DID — a silent mis-route rather than a
+visible failure.
+**Fix:** the called number comes only from `sip.trunkPhoneNumber` or
+`sip.calledNumber`, with no cross-fallback.
+
+The authoritative attribute set from LiveKit 1.8, captured from a live call:
+
+```json
+{
+  "sip.phoneNumber":      "15550001111",   // the CALLER
+  "sip.trunkPhoneNumber": "1001",          // the number DIALLED
+  "sip.trunkID":          "ST_...",
+  "sip.ruleID":           "SDR_...",
+  "sip.callID":           "SCL_..."
+}
+```
+
+The worker logs this set at debug level on every call
+(`sip_participant_attributes`). These names have changed across LiveKit
+versions, so check the log rather than trusting this table after an upgrade.
+
+#### `LOG_LEVEL=debug` has no effect in the worker
+
+**Symptom:** debug diagnostics never appear, whatever `LOG_LEVEL` is set to.
+**Cause (defect):** the logging wrapper passed LiveKit's CLI log level through
+instead of this service's configured level, so `LOG_LEVEL` was silently
+overridden. Found only while trying to debug something else — the failure mode
+of a broken debug switch is that you conclude the code path never ran.
+**Fix:** the platform's own `LOG_LEVEL` wins.
+
+#### Worker prints CLI usage and exits
+
+**Symptom:** the agents CLI help text, then exit.
+**Cause (environment):** `cli.run_app` expects a subcommand (`start`, `dev`,
+`download-files`).
+**Fix:** `start` is injected when no known subcommand is present, so the
+container command stays a plain `python -m worker.main`.
+
+#### First call on a fresh pod is slow
+
+**Cause (environment):** the Silero VAD weights download on first use.
+**Fix:** `python -m worker.main download-files` runs at image build. Worth
+keeping in mind for any model added later — a per-pod first-call download is
+invisible in development and obvious in production.
+
+#### VAD "slower than realtime" warnings
+
+**Symptom:** `VAD inference is slower than realtime` and
+`event loop blocked for ~100ms` on an 8 GB arm64 Docker Desktop.
+**Assessment:** expected on a laptop, and a capacity signal rather than a bug.
+It is exactly the kind of thing Phase 8 must measure on production-shaped
+hardware instead of extrapolating from here (spec 75).
+
+#### Testing against a real PBX without touching its configuration
+
+The development calls were placed from an existing FreeSWITCH/FusionPBX with
+**no configuration changes** — no gateway, no dialplan entry:
+
+```bash
+fs_cli -x "originate {origination_caller_id_number=15550001111,\
+sip_auth_username=lkdev,sip_auth_password=<password>}\
+sofia/external/sip:1001@<livekit-sip-host>:5060 &park"
+```
+
+`sip_auth_username` / `sip_auth_password` are per-call channel variables, so
+FreeSWITCH answers LiveKit's `407` challenge without a stored gateway.
+Replacing `&park` with
+`&playback(/usr/share/freeswitch/sounds/en/us/callie/ivr/8000/ivr-welcome_to_freeswitch.wav)`
+gives the agent real speech to transcribe.
+
+This is the right way to test a new environment: it proves the path before
+anything on the PBX is modified, and it cannot break an existing deployment.
+
+### 12.2 Bringing up a new environment
+
+The order that avoids most of the above:
+
+1. `make preflight` — settle host ports before anything starts.
+2. `make up`, then `make migrate`, then `make health`.
+3. `./scripts/lan-ip.sh` and set `SIP_NAT_IP`. Without it, calls connect and
+   have no audio.
+4. Seed the platform and a tenant, then `sync-livekit`, then `show-config` and
+   confirm LiveKit matches the records.
+5. Probe reachability from the PBX with a SIP `OPTIONS` before attempting a
+   call. A `200 OK` separates network problems from configuration problems.
+6. Place one call with `originate`. If it fails, set `SIP_LOG_LEVEL=debug`
+   first — the info-level SIP logs do not say why.
+
+### 12.3 Notes for later phases
+
+Recorded now because they will be cheaper to handle deliberately than to
+rediscover:
+
+| Phase | Watch for |
+|---|---|
+| 2 | Transcript persistence is not implemented yet; `call_transcript_segments` stays empty until item 2.7. The pipeline runs without it, so its absence is easy to mistake for an STT failure. |
+| 2 | The duplicate-log fix covers the main worker process. Job subprocesses forward records to the parent, which can re-emit them; check log volume per call before load testing. |
+| 4 | `inbound_numbers` semantics (§12.1) must be encoded in the dispatch-rule UI, or every tenant will hit the same `486 flood`. |
+| 5 | Orphan detection needs the LiveKit-to-database direction, not just per-row checks. |
+| 5 | `UpdateSIPInboundTrunk` may still be unimplemented; keep the delete-and-recreate path and the dependent-rule rebuild. |
+| 7 | IP allow-listing must be verified on real infrastructure. It cannot be validated on Docker Desktop at all. |
+| 8 | Media port ranges are 50 ports each in development, roughly two per call. Widen them in the Helm values before load testing, or concurrency caps out around 25 calls for reasons that look like LiveKit faults. |
+
+---
+
+## 13. Milestones
 
 | M | Milestone | Closes | Meaning |
 |---|---|---|---|
@@ -542,7 +885,7 @@ actually supports. **No fake scalability.** [§75]
 
 ---
 
-## 13. Cross-Phase Traceability
+## 14. Cross-Phase Traceability
 
 Every spec section maps to the phase that delivers it.
 
@@ -589,7 +932,7 @@ Every spec section maps to the phase that delivers it.
 
 ---
 
-## 14. Decisions Needed Before They Block Work
+## 15. Decisions Needed Before They Block Work
 
 Carried from PRD §21. Each is listed against the phase where it stops being deferrable.
 
@@ -608,9 +951,9 @@ Carried from PRD §21. Each is listed against the phase where it stops being def
 
 ---
 
-## 15. Definition of Done (Programme)
+## 16. Definition of Done (Programme)
 
-The platform is done when all eighteen acceptance criteria in PRD §19.2 pass, and:
+The platform is done when every acceptance criterion in PRD §19.2 passes, and:
 
 1. A tenant administrator completes the entire §77 journey through the UI — no code, no SQL,
    no SSH, no LiveKit CLI.

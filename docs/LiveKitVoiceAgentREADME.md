@@ -28,6 +28,7 @@ is loaded from configuration at call start.
 7. [Database and Migrations](#7-database-and-migrations)
 8. [Connecting a PBX](#8-connecting-a-pbx)
 9. [Creating Your First Agent](#9-creating-your-first-agent)
+9a. [**Running and Testing the Voice Agent**](#9a-running-and-testing-the-voice-agent)
 10. [API Surface](#10-api-surface)
 11. [Roles and Permissions](#11-roles-and-permissions)
 12. [Observability](#12-observability)
@@ -552,6 +553,243 @@ transcription intact — the human portion attributed to the `Human Agent` speak
 
 ---
 
+---
+
+## 9a. Running and Testing the Voice Agent
+
+This is the end-to-end path from a cold checkout to a phone call answered by
+the AI agent. Everything here is verified working against a real
+FreeSWITCH/FusionPBX.
+
+### 9a.1 Numbers used in this guide
+
+Two numbers matter, and confusing them is the most common cause of a failed
+test call:
+
+| | Value here | What it is |
+|---|---|---|
+| **Agent number (DID)** | `1001` | The number the caller **dials**. LiveKit matches it against the SIP trunk's `numbers`, and the platform resolves it to a tenant and agent through `phone_numbers`. |
+| **Caller number** | `15550001111` | The number the call appears to come **from**. Only used for caller-based routing conditions, analytics, and the transfer summary. |
+
+Their LiveKit attribute names are easy to swap, so for reference:
+
+```
+sip.trunkPhoneNumber  →  1001           the AGENT number that was dialled
+sip.phoneNumber       →  15550001111    the CALLER's number
+```
+
+Both are configurable; nothing about `1001` is special. Change the agent number
+with `--did`, and the caller number per call.
+
+### 9a.2 Start the platform
+
+```bash
+make up
+```
+
+```bash
+make migrate
+```
+
+```bash
+make health
+```
+
+All four checks must read `healthy` / `ready` before continuing. If a port is
+already taken, `make up` stops at the preflight check and names the holder.
+
+### 9a.3 Tell LiveKit which address to advertise
+
+Skip this and calls will connect with **no audio** — signalling succeeds while
+media goes to an unroutable address.
+
+```bash
+./scripts/lan-ip.sh
+```
+
+Put the result in `.env` as `SIP_NAT_IP`, then:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env up -d livekit-sip
+```
+
+### 9a.4 Seed a tenant and agent
+
+Until the configuration UI lands in Phase 4, a CLI seeds the same rows the UI
+will write. `--pbx-host` is your PBX's address; `--did` is the agent number.
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli seed-dev-tenant --did 1001 --pbx-host 192.168.0.113
+```
+
+This creates a tenant, a PBX record, a SIP trunk, the agent number, an AI agent
+with a **published** version, a routing rule, and a dispatch rule. The agent is
+configured with local STT and TTS, so no provider API key is needed to get a
+first call working.
+
+### 9a.5 Create the LiveKit resources
+
+Seeding writes the database only. Shaping LiveKit is a separate, explicit step:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli sync-livekit
+```
+
+Then confirm LiveKit agrees with the records:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli show-config
+```
+
+Expected shape — note the trunk carries the agent number, and the rule targets
+the worker's agent name:
+
+```
+LiveKit inbound trunks:
+  ST_xxxxxxxx  Development Trunk  numbers=['1001']  allowed=[]
+
+LiveKit dispatch rules:
+  SDR_xxxxxxx  Development Dispatch  trunks=['ST_xxxxxxxx']  prefix=dev-call-  agents=['voice-agent']
+
+our records:
+  trunk Development Trunk: livekit=ST_xxxxxxxx status=SYNCED
+  rule  Development Dispatch: livekit=SDR_xxxxxxx status=SYNCED agent=voice-agent
+```
+
+`agents=['voice-agent']` must match the worker's `WORKER_AGENT_NAME`. If it does
+not, calls connect to a room where nobody answers.
+
+Confirm the worker is registered:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env logs ai-agent-worker | grep "registered worker"
+```
+
+### 9a.6 Set the trunk's SIP credentials
+
+The trunk authenticates inbound calls with SIP digest auth. This is preferable
+to an IP allowlist here, and **required** on Docker Desktop for macOS, which
+rewrites inbound source addresses so an allowlist can never match (see
+[Plan §12.1](./LiveKitVoiceAgentPlan.md#121-phase-1--basic-call)).
+
+Set a username and password on the trunk, then re-run `sync-livekit` so LiveKit
+receives them. Keep the password to hand — the calling side needs it, and the
+platform stores it encrypted and will not show it again.
+
+### 9a.7 Check reachability before calling
+
+A `200 OK` here separates a network problem from a configuration problem, and
+takes seconds. Run from the PBX:
+
+```bash
+printf 'OPTIONS sip:LIVEKIT_HOST:5060 SIP/2.0\r\nVia: SIP/2.0/UDP PBX_HOST:5060;branch=z9hG4bK-probe\r\nFrom: <sip:probe@PBX_HOST>;tag=p1\r\nTo: <sip:LIVEKIT_HOST:5060>\r\nCall-ID: probe-1\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' | nc -u -w 4 LIVEKIT_HOST 5060
+```
+
+### 9a.8 Place a test call
+
+**No PBX configuration change is required.** `originate` takes a full SIP URI,
+and the credentials travel as per-call channel variables, so no gateway or
+dialplan entry is needed — and nothing on an existing PBX is touched.
+
+Ring the agent and hold the call open:
+
+```bash
+fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1001@LIVEKIT_HOST:5060 &park"
+```
+
+`+OK <uuid>` means the agent answered. `-ERR NO_ANSWER` means it did not — see
+§9a.10.
+
+To give the agent real speech to transcribe, replace `&park` with a playback:
+
+```bash
+fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1001@LIVEKIT_HOST:5060 &playback(/usr/share/freeswitch/sounds/en/us/callie/ivr/8000/ivr-welcome_to_freeswitch.wav)"
+```
+
+To hear the agent yourself, register a softphone to the PBX and dial the agent
+number through whatever route your dialplan already provides.
+
+### 9a.9 Verify what happened
+
+Follow the worker as the call runs:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env logs -f ai-agent-worker
+```
+
+The expected sequence, all sharing one `call_id`:
+
+```
+sip_participant_joined      called_number=1001  caller_number=15550001111
+call_configuration_loaded   agent_name=...  version_number=1
+call_state_changed          ANSWERED     -> AI_CONNECTED
+call_state_changed          AI_CONNECTED -> IN_PROGRESS
+conversation_started
+call_state_changed          IN_PROGRESS  -> COMPLETED
+conversation_ended
+```
+
+Then the call record:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec postgresql psql -U voice_agent -d voice_agent -x -c "SELECT call_id, state, did, caller_number, duration_seconds, hangup_reason FROM calls ORDER BY created_at DESC LIMIT 1;"
+```
+
+A healthy result: `state = COMPLETED`, `did` = the agent number,
+`caller_number` = the caller, a non-zero `duration_seconds`, and a
+`hangup_reason`.
+
+And the state transitions, which are the audit trail behind that record:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec postgresql psql -U voice_agent -d voice_agent -c "SELECT from_state, to_state, occurred_at FROM call_events ORDER BY occurred_at DESC LIMIT 5;"
+```
+
+Every investigation starts from `call_id`. It appears in every call-related log
+line in every service, and on the call, transcript and recording rows.
+
+### 9a.10 When the call does not connect
+
+Work outwards from the caller. Each step rules out everything before it.
+
+| Symptom | First thing to check |
+|---|---|
+| `-ERR NO_ANSWER`, nothing in the SIP logs | Reachability (§9a.7). If `OPTIONS` gets no reply, it is the network, not the platform. |
+| `486 Busy`, `reason: flood` | **Not rate limiting.** It means the call matched no dispatch rule. Confirm the rule's trunk is the one LiveKit currently holds, and that `inbound_numbers` is empty — that field matches the *caller's* number, not the dialled one. |
+| `407 Unauthorized`, repeatedly | The trunk's credentials and the ones in `originate` disagree. Re-run `sync-livekit` after changing them. |
+| Call answers, then silence | `SIP_NAT_IP` is unset or wrong (§9a.3). Signalling works; media has nowhere to go. |
+| Call answers, no agent joins | `agents=[...]` on the dispatch rule does not match `WORKER_AGENT_NAME`, or no worker is registered. |
+| `call_not_routable` in the worker log | No active `phone_numbers` row matches the dialled number, or its agent has no published version. |
+| `call_rejected_tenant_limit` | The tenant is at its concurrent-call limit — working as intended (spec 47). The dev seed sets it deliberately low. |
+
+Before investigating a rejected call, turn up the SIP logs. The info level does
+not say why a call was refused:
+
+```bash
+SIP_LOG_LEVEL=debug docker compose -f deploy/docker-compose.yml --env-file .env up -d livekit-sip
+```
+
+The debug line carries a `caller` field naming the source location, which is
+what distinguishes one `486` from another.
+
+### 9a.11 Current limitations
+
+Honest about what this does and does not do yet, so a test result is not
+misread as a fault:
+
+| | Status |
+|---|---|
+| Inbound call, agent answers, speaks a greeting | Working |
+| Speech recognised, spoken reply | Working, using local STT and TTS |
+| Conversational reasoning | Needs an LLM. The seed uses a keyless development stand-in that echoes what it heard; configure a real provider for genuine conversation. |
+| Transcripts stored in `call_transcript_segments` | Not yet — Phase 2. The table stays empty; this is not an STT failure. |
+| Recording to object storage | Not yet — Phase 2. |
+| Barge-in, interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
+| Warm transfer to a human agent | Not yet — Phase 6. |
+| Configuration through the UI instead of the CLI | Not yet — Phase 4. |
+
+---
+
 ## 10. API Surface
 
 Base path `/api/v1`. Full OpenAPI is generated and served at `/docs` (and `/openapi.json`).
@@ -847,6 +1085,24 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 
 Every investigation starts from the `call_id`. It is present in every call-related log line
 across every service.
+
+### Problems already solved
+
+The table above covers symptoms you might hit in normal operation.
+[`LiveKitVoiceAgentPlan.md` §12](./LiveKitVoiceAgentPlan.md#12-environment-notes-and-troubleshooting)
+is the full log of problems hit while building the platform — symptom, cause, fix — organised by
+phase, plus a short runbook for bringing up a new environment in the order that avoids most of
+them.
+
+Two worth knowing before you debug anything SIP-related:
+
+- **`486 Busy` with `reason: flood` does not mean rate limiting.** It is how livekit-sip
+  reports a call that matched no dispatch rule.
+- **A dispatch rule's `inbound_numbers` matches the *caller's* number**, not the number that was
+  dialled. Restrict which DIDs a trunk accepts with the trunk's `numbers` field instead.
+
+Set `SIP_LOG_LEVEL=debug` before investigating a rejected call. The info-level SIP logs do not
+say why.
 
 ---
 

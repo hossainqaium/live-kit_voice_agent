@@ -20,7 +20,7 @@ scrape_configs:
   - job_name: ai-agent-worker
     metrics_path: /metrics
     static_configs:
-      - targets: ["ai-agent-worker:8081"]
+      - targets: ["ai-agent-worker:8090"]
         labels:
           plane: voice
 

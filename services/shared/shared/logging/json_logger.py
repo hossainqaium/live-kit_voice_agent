@@ -112,11 +112,19 @@ def configure_logging(service: str | None = None, level: str | None = None) -> l
     root.addHandler(handler)
     root.setLevel(level)
 
-    # Uvicorn ships its own handlers; strip them so access logs are JSON too.
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-        uv = logging.getLogger(name)
-        uv.handlers.clear()
-        uv.propagate = True
+    # Third-party libraries that install their own handlers would otherwise
+    # emit every line twice: once through our formatter and once through
+    # theirs. Clearing and propagating routes them through ours instead.
+    for name in (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "livekit",
+        "livekit.agents",
+    ):
+        third_party = logging.getLogger(name)
+        third_party.handlers.clear()
+        third_party.propagate = True
 
     return root
 

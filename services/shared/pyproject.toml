@@ -5,6 +5,7 @@ description = "Shared logging, models and telemetry for the multi-tenant AI voic
 requires-python = ">=3.11"
 dependencies = [
     "prometheus-client>=0.22",  # livekit-agents 1.8 requires >=0.22; keep all three services aligned
+    "cryptography>=44",         # Fernet, for credential encryption at rest
 ]
 
 [build-system]

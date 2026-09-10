@@ -27,7 +27,10 @@ class WorkerSettings(BaseSettings):
 
     # --- Health endpoint -------------------------------------------------- #
     health_host: str = "0.0.0.0"
-    health_port: int = 8081
+
+    #: Not 8081: the LiveKit Agents runtime runs its own HTTP server there, and
+    #: two listeners on one port means the worker fails to start.
+    health_port: int = 8090
     readiness_timeout_seconds: float = 2.0
 
     # --- LiveKit ---------------------------------------------------------- #
