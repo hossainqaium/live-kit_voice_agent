@@ -722,6 +722,118 @@ fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username
 To hear the agent yourself, register a softphone to the PBX and dial the agent
 number through whatever route your dialplan already provides.
 
+### 9a.8b Calling the agent from a PBX extension
+
+`originate` bypasses the dialplan entirely, which is why it needs no PBX
+configuration. A desk phone dialling a number goes *through* the dialplan, so
+until a route exists the call never leaves the PBX.
+
+Two ways to bridge that gap, in increasing order of permanence.
+
+#### Beware the number collision
+
+FusionPBX numbers extensions from 1000 upward, so an agent number of `1001` is
+very likely an existing extension. Dialling it from a phone would reach that
+extension, not the agent, and the symptom is "my call went to a colleague"
+rather than an error.
+
+Pick a trigger number nothing else uses — `9001`, or a feature code like
+`*8001`. It does **not** have to equal the agent number: the dialplan can map
+a free trigger onto the configured agent number, so nothing on the platform
+side changes.
+
+Check first:
+
+```bash
+fs_cli -x "list_users" | grep -E "^1001|,1001,"
+```
+
+#### Option 1 — ring your extension, no dialplan change
+
+Calls your phone, and bridges it to the agent when you answer. Nothing on the
+PBX is modified, so this is the right first test.
+
+```bash
+fs_cli -x "originate user/1000@YOUR_DOMAIN &bridge({origination_caller_id_number=1000,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1001@LIVEKIT_HOST:5060)"
+```
+
+Replace `1000` with your extension and `YOUR_DOMAIN` with its FusionPBX domain
+(`fs_cli -x "sofia status profile internal" | grep -i alias` if unsure).
+
+Your phone rings first, so you hear the agent's greeting from the beginning.
+Reversing the order — calling the agent first and bridging your phone second —
+loses the greeting while your phone is still ringing.
+
+#### Option 2 — dial a number from the phone, permanent
+
+One **additive** dialplan entry. It creates a new route and touches nothing
+existing, so it is safe to add and trivial to remove.
+
+In FusionPBX: **Dialplan → Dialplan Manager → add**, in your extension's
+domain/context:
+
+| Field | Value |
+|---|---|
+| Name | `ai-voice-agent` |
+| Order | e.g. `310` — before your outbound routes, after local extensions |
+| Condition | `destination_number` matches `^9001$` |
+| Action 1 | `set` → `sip_auth_username=lkdev` |
+| Action 2 | `set` → `sip_auth_password=YOUR_PASSWORD` |
+| Action 3 | `set` → `effective_caller_id_number=${caller_id_number}` |
+| Action 4 | `bridge` → `sofia/external/sip:1001@LIVEKIT_HOST:5060` |
+
+Note the asymmetry, which is the point: the **condition** matches `9001` (what
+you dial) while the **bridge** targets `1001` (the configured agent number that
+LiveKit's trunk accepts). Action 3 passes the real extension through as the
+caller number, so `calls.caller_number` shows who rang rather than a
+placeholder.
+
+Then reload and dial `9001` from the phone:
+
+```bash
+fs_cli -x "reloadxml"
+```
+
+Equivalent XML, if you manage dialplans as files rather than through FusionPBX:
+
+```xml
+<extension name="ai-voice-agent">
+  <condition field="destination_number" expression="^9001$">
+    <action application="set" data="sip_auth_username=lkdev"/>
+    <action application="set" data="sip_auth_password=YOUR_PASSWORD"/>
+    <action application="set" data="effective_caller_id_number=${caller_id_number}"/>
+    <action application="bridge" data="sofia/external/sip:1001@LIVEKIT_HOST:5060"/>
+  </condition>
+</extension>
+```
+
+To remove it: delete the dialplan entry (or the file) and `reloadxml`. Nothing
+else was changed.
+
+#### A gateway instead of a direct bridge
+
+Tidier if several routes will point at the platform, but note that LiveKit SIP
+**does not accept SIP registrations** — the gateway must be created with
+`register` set to `false`, with the username and password used only to answer
+LiveKit's digest challenge. A registering gateway will sit in permanent retry
+and is a common way to spend an afternoon.
+
+#### If the phone dials and nothing happens
+
+| Symptom | Cause |
+|---|---|
+| Reaches a colleague's phone | The trigger number collides with a real extension. Pick another. |
+| Fast busy immediately | No dialplan match. Check the order value and the context/domain. |
+| `407` loop in the SIP logs | `sip_auth_password` does not match the trunk's. |
+| Rings then drops, `486 flood` | The dispatch rule does not match — see §9a.10. |
+| Connects but silent | `SIP_NAT_IP` unset or wrong (§9a.3). |
+
+Watch the routing decision live while you dial:
+
+```bash
+fs_cli -x "console loglevel debug" && fs_cli
+```
+
 ### 9a.9 Verify what happened
 
 Follow the worker as the call runs:
