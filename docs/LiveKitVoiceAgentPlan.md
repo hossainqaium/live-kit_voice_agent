@@ -1562,55 +1562,55 @@ participant arrives and the SIP branch resolves as it always did.
 
 A test now asserts the two waits have not become sequential again, by name.
 
-#### Browser audio works; renegotiation is what times out — partly open
+#### `NegotiationError` on every reply: the server was three versions behind
 
-Audio now plays, confirmed by the user. Two fixes got there, both measured:
+**The answer was in the server log the whole time, and I spent hours on the
+network instead of reading it.**
 
-| | before | after |
+```
+974.99  mediaTrack published        | console-...
+984.51  error reading data channel  | console-...     <- ten seconds later
+984.54  participant closing
+984.67  starting RTC session                          <- reconnect
+999.78  participant closing                           <- and again
+```
+
+Preceded, every time, by `unsupported datachannel added`.
+
+livekit-client 2.22 opens a datachannel that `livekit-server:v1.8` (protocol
+15) does not understand. The server fails reading it, drops the participant,
+and the client reconnects — every ten to fifteen seconds, forever. The agent's
+reply renegotiates, the renegotiation lands in a reconnect, and it times out.
+
+**Upgrading the server to v1.9 fixes it**, measured:
+
+| | v1.8 | v1.9 |
 |---|---|---|
-| agent joins (concurrent waits) | 15 s+ | 2.0 s |
-| room connected (no STUN) | ~7 s | 1.6 s |
-| agent audio audible | never | 2.5 s |
+| publish on an established connection | 40,622 ms | **54 ms** |
+| reconnects in 14 s | one every 10-15 s | **none** |
+| agent joins and publishes audio | 15 s+ | 1,611 ms |
 
-**No STUN.** Every participant here is on this machine or its LAN, and LiveKit's
-default STUN servers are Google's. Both ends were making round trips to the
-public internet to learn a reflexive address nothing needed — visible as
-`srflx 103.197.153.x` candidates — and that was most of the seven seconds.
-`rtc.stun_servers: []`.
+The SIP path was re-tested immediately after, because it is what the upgrade
+risked, and it is unaffected — greeting, caller speech, spoken reply, and the
+trunk and dispatch rule survived the restart as `SYNCED`.
 
-**What is still wrong is renegotiation, not connection.** With both peer
-connections established and stable, publishing a second track — pure SDP
-offer/answer over the signalling socket, no ICE — took **40,622 ms**. That is
-the `NegotiationError: negotiation timed out` the user sees when the agent
-replies: a reply renegotiates, and renegotiation on this setup takes tens of
-seconds.
+**What went wrong in the diagnosis, because it is the more useful lesson.**
+Three network theories were pursued and each was a real misconfiguration:
+a container IP in the ICE candidates, a renumbered RTC TCP port, and a
+fifty-port UDP range. Fixing all three was worth doing and fixed none of this.
+Meanwhile `unsupported datachannel added` sat in every log dump I took, and I
+read past it because it was at info level and looked like noise.
 
-The client has been saying something relevant the whole time:
+Worse, I acted on the mismatch in the wrong direction first — downgrading the
+client — on one timing sample, and shipped a regression that stopped the
+caller's microphone working. The signal that would have pointed the right way
+was also already present: the client prints *"Consider upgrading your LiveKit
+server version"*, which says which side is old.
 
-```
-v1 RTC path not found. Consider upgrading your LiveKit server version – Retrying
-```
-
-livekit-client 2.22.3 speaks protocol 17; `livekit-server:v1.8` reports
-protocol 15.
-
-**Downgrading the client to 2.15.16 was tried and reverted — it made things
-worse.** The reasoning was sound (remove a real protocol mismatch) and the one
-timing sample favoured it, 9.2 s against 12.9 s. In actual use the caller's
-microphone stopped publishing altogether: the greeting still played, and
-nothing the caller said was transcribed, where on 2.22.3 it had been. A
-regression introduced on a single measurement and a plausible argument, which
-is the third time this section records that pattern and the first time it
-reached the user.
-
-The rule this earns: **a change justified by one sample is a hypothesis, and a
-hypothesis does not get deployed to someone who is using the thing.** Measure
-it enough times to be a result, or leave it in a branch.
-
-**The next thing to try is the server, not the client**: `livekit-server:v1.8`
-against a client generation built for a newer protocol. Upgrading it touches
-the SIP path that Phase 1 depends on, so it wants a deliberate decision and a
-re-run of the PBX call afterwards rather than being slipped in.
+**The rule:** when a client and server disagree about a protocol, read which
+one says the other is out of date. And a repeated ten-second interval in a log
+is a timeout, not a coincidence — find what it belongs to before theorising
+about anything else.
 
 #### Signalling connects and media never does
 

@@ -67,7 +67,15 @@ services:
   # Realtime media and SIP (spec 2, 79)
   # ----------------------------------------------------------------------- #
   livekit:
-    image: livekit/livekit-server:v1.8
+    # v1.8 reports protocol 15. livekit-client 2.22 opens a datachannel it does
+    # not understand — "unsupported datachannel added", then "error reading data
+    # channel" about ten seconds later, then "participant closing". A browser
+    # call therefore reconnected every ten to fifteen seconds forever, and the
+    # agent's reply lost the race every time.
+    #
+    # Pinned to a version rather than latest so this cannot drift underneath the
+    # SIP path, which is what actually depends on it.
+    image: livekit/livekit-server:${LIVEKIT_IMAGE_TAG:-v1.9}
     restart: unless-stopped
     command: ["--config", "/etc/livekit.yaml"]
     environment:

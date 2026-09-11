@@ -156,6 +156,17 @@ export function BrowserCall({
       });
 
       await room.connect(issued.url, issued.token, {
+        // No STUN. The server advertises Twilio's and Google's by default —
+        // verified by reading `iceServers` out of the join response — and it
+        // keeps doing so even with `rtc.stun_servers: []`, because an empty
+        // list means "use the defaults" rather than "use none".
+        //
+        // Everything in this deployment is on this machine or its LAN, so a
+        // reflexive candidate is a round trip to the public internet to learn
+        // an address nothing needs. Gathering against them happens on **every
+        // negotiation**, not just the first, which is why the agent's reply
+        // timed out while the initial connection succeeded.
+        rtcConfig: { iceServers: [] },
         // The SDK default is 15 s, and the first measurement of this path was
         // 14,992 ms — negotiation was losing a race with its own timeout, and
         // reported it as "negotiation timed out" with no mention of time.
