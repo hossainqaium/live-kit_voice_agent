@@ -30,8 +30,8 @@ interface ServiceLink {
  */
 const SERVICES: ServiceLink[] = [
   { name: "Grafana", what: "Dashboards for the voice latency metrics", port: 3201 },
-  { name: "Prometheus", what: "The metric store the dashboards read", port: 3200 },
-  { name: "MinIO console", what: "Object storage holding recordings", port: 9290 },
+  { name: "Prometheus", what: "The metric store the dashboards read", port: 9290 },
+  { name: "MinIO console", what: "Object storage holding recordings", port: 9201 },
   { name: "API docs", what: "The Configuration API's own OpenAPI UI", port: 8200, path: "/docs" },
 ];
 

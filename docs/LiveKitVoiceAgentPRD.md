@@ -890,16 +890,102 @@ audit_logs
 
 ## 17. Administration UIs
 
+Both consoles are built. Every section named in §60 and §61 has a route that
+reads live data; none is disabled.
+
 ### 17.1 Platform Console [§60]
 
-Dashboard · Tenants · LiveKit · Infrastructure · AI Providers · Models · Voices ·
-System Users · Monitoring · Audit Logs · Settings.
+Dashboard · Tenants · LiveKit · Infrastructure · Capacity · AI Providers · Models ·
+Voices · System Users · Monitoring · Audit Logs · Settings.
+
+| Section | Route | Endpoint |
+|---|---|---|
+| Dashboard | `/platform` | `GET /platform/capacity`, `GET /platform/livekit` |
+| Tenants | `/platform/tenants` | `GET/POST /platform/tenants`, `GET/PUT /platform/tenants/{id}` |
+| LiveKit | `/platform/livekit` | `GET /platform/livekit` |
+| Infrastructure | `/platform/infrastructure` | `GET /platform/capacity`, `GET /health` |
+| Capacity [§48] | `/platform/capacity` | `GET /platform/capacity` |
+| AI Providers | `/platform/providers` | `GET/POST /platform/providers`, `PUT /platform/providers/{id}` |
+| Models | `/platform/models` | `GET/POST /platform/models`, `PUT/DELETE /platform/models/{id}` |
+| Voices [§30] | `/platform/voices` | `GET/POST /platform/voices`, `PUT /platform/voices/{id}` |
+| System Users | `/platform/system-users` | `GET/POST /platform/users`, `PUT /platform/users/{id}` |
+| Monitoring | Grafana | — (external) |
+| Audit Logs [§69] | `/platform/audit-logs` | `GET /platform/audit-logs` |
+| Settings | `/platform/settings` | `GET /platform/settings` |
+
+**Capacity is listed separately from Infrastructure** because they answer
+different questions: Infrastructure is "is each dependency answering", Capacity
+is "how much is this platform carrying against what it allows". §48 names the
+second.
+
+**Platform Settings is read-only.** The values come from the environment, so an
+editable screen would write somewhere the next restart overwrites. Secrets
+report only whether they are set, never their value [§70].
+
+**Write operations require SUPER_ADMIN**, not merely a platform account.
+Creating a tenant, or a platform account, changes what the platform will
+accept; a PLATFORM_OPERATOR able to mint a SUPER_ADMIN would make the role
+distinction in §8 decorative.
 
 ### 17.2 Tenant Console [§61]
 
 Dashboard · AI Agents · Agent Versions · PBXs · SIP Trunks · Phone Numbers · Routing ·
-Business Hours · Knowledge Bases · Tools · Calls · Recordings · Transcripts · Analytics ·
-Users · Usage · Settings.
+Business Hours · Transfer Targets · Knowledge Bases · Tools · Calls · Recordings ·
+Transcripts · Analytics · Users · Usage · Settings.
+
+| Section | Route | Endpoint | Permission [§8] |
+|---|---|---|---|
+| Dashboard | `/` | several | — |
+| AI Agents + Versions [§18, §19] | `/agents` | `/agents/**` | `agents.read` / `agents.write` / `agents.publish` |
+| PBXs [§14] | `/pbxs` | `/pbxs/**` | `pbxs.read` / `pbxs.write` |
+| SIP Trunks [§15] | `/sip-trunks` | `/sip-trunks/**` | `sip_trunks.read` / `sip_trunks.write` |
+| Phone Numbers [§17] | `/phone-numbers` | `/phone-numbers/**` | `sip_trunks.*` |
+| Routing [§20, §38] | `/routing` | `/routing-rules/**` | `agents.read` / `agents.write` |
+| Business Hours [§37] | `/business-hours` | `/business-hours/**` | `agents.read` / `agents.write` |
+| Transfer Targets [§35, CR-1] | `/transfer-destinations` | `/transfer-destinations/**` | `agents.read` / `agents.write` |
+| Knowledge Bases [§34] | `/knowledge-bases` | `/knowledge-bases/**` | `agents.read` / `agents.write` |
+| Tools [§31–33] | `/tools` | `/tools/**` | `agents.read` / `agents.write` |
+| Calls + Transcripts [§41] | `/calls` | `/calls/**` | `calls.read` |
+| Recordings [§39] | `/recordings` | `GET /recordings` | `recordings.read` |
+| Analytics [§57] | `/analytics` | `GET /analytics` | `analytics.read` |
+| Users [§8] | `/users` | `/users/**` | `users.manage` |
+| Usage [§47] | `/usage` | `GET /usage` | `billing.read` |
+| Settings | `/settings` | `GET/PUT /settings` | `agents.read` / `users.manage` |
+
+**Transfer Targets is added to the §61 list.** §35 requires transfer
+destinations and §38 requires a fallback chain that names one; without a screen
+to create them, the routing fallback and the CR-1 warm transfer are both
+unconfigurable.
+
+**Tenant Settings deliberately excludes the call limits.** They are commercial
+terms the platform sets [§47], and a tenant raising its own concurrency cap
+would make the limit meaningless. They are shown read-only and are editable
+only from the platform console.
+
+**Usage reports which limits are enforced rather than implying all are.** Only
+`max_concurrent_calls` is checked before a call is accepted; the daily and
+monthly limits read a rollup that is not yet written (Plan 1b.1).
+
+### 17.3 Sections built but not yet carrying data
+
+Two sections are complete and live, and each screen states its own position
+rather than being disabled in the navigation.
+
+| Section | Reads | Why it is empty | Blocked on |
+|---|---|---|---|
+| Recordings | `GET /recordings` | The worker starts no LiveKit egress job, so no recording is ever written. An agent version can already have recording switched on — that records the intent. | Plan 2b.3 |
+| Knowledge Bases | `/knowledge-bases`, `/knowledge-bases/{id}/documents` | Bases can be created, configured and assigned to an agent. Nothing ingests documents, so a base has no chunks and an agent retrieves nothing rather than failing. | Phase 6 |
+
+Disabling either menu entry would hide the configuration that *is* usable
+behind the feature that is not.
+
+### 17.4 The frontend never decides authorization [§8]
+
+The `permission` on a navigation entry is presentation: it prevents a confusing
+403, and the API enforces every permission independently. A test asserts that
+each section's API route requires the same permission its menu entry claims —
+the two disagreeing would either hide a section the role may use, or show one
+every request refuses.
 
 ---
 

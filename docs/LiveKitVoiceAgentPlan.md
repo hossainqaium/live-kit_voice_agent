@@ -267,6 +267,40 @@ configuration into them. Only maximum call duration needs new logic.
   property worth asserting in a test, so this class of defect cannot recur.
 - The latency dashboard renders p50 and p95 per stage.
 
+### Phase 4b — Configuration Completion
+
+**Goal:** the §77 criterion holds — a tenant administrator configures
+everything through the UI, with no CLI step left in the path.
+
+Both consoles are built and every §60/§61 section has a working screen, so what
+is left here is specific and bounded rather than "finish the UI".
+
+| # | Item | Kind | Spec |
+|---|---|---|---|
+| 4b.4 | **Tenant provider credentials through the API and console.** CLI-only today (`set-credential`), so a new tenant cannot reach a cloud provider without shell access. This is the one item blocking §77. Write-only field, Fernet at rest, never returned, key hint only — the constraints the CLI already honours. | feature | §26, §62, §77 |
+| 4b.3 | **Routing engine evaluation at call setup.** Rules, business hours and the fallback chain are all configurable and none is consulted when a call arrives; the DID's directly assigned agent answers. A tenant building a rule today gets a row, not a behaviour. | **defect** | §20, §37, §38 |
+| 4b.2 | DID form fields for routing rule, business hours and fallback. The columns exist and the API accepts them; the form does not offer them. | gap | §17 |
+| 4b.1 | SIP Configuration Wizard — the 10 steps in §16 as a guided sequence. Every field is already reachable through the trunk and DID forms, so this is onboarding ergonomics, not capability. | feature | §16 |
+| 4b.5 | Voice preview. §27 lists Test among the voice actions; needs a synthesis endpoint and a stored sample. | feature | §27 |
+| 4b.6 | ElevenLabs TTS adapter with streaming. Only the OpenAI-compatible adapter exists, and the catalog will happily offer a provider nothing can drive. | feature | §26 |
+
+**4b.3 is the most consequential and is listed as a defect for the same reason
+as 2b.1–2b.3:** the console now presents routing rules, business hours and a
+fallback chain as working configuration. A screen that writes a row nothing
+reads is worse than no screen, because the operator has no way to tell.
+
+**Exit criteria**
+
+- A tenant administrator creates PBX → trunk → DID → agent → routing rule and
+  receives a call **using only the console**, including entering the provider
+  API key.
+- A call arriving on a DID with a routing rule is answered by the agent the
+  rule selects, not the DID's default, and the `calls` row records which rule
+  matched.
+- A call arriving outside a schedule's hours follows the closed action.
+- A provider credential is never returned by any endpoint, and the audit trail
+  records that one was set without recording its value.
+
 ### Phase 3b — Isolation and Account Hardening
 
 **Goal:** the isolation guarantee holds even for a query written outside the
@@ -275,9 +309,10 @@ repository, and accounts are manageable through the API rather than the CLI.
 | # | Item | Kind | Spec |
 |---|---|---|---|
 | 3b.1 | PostgreSQL Row Level Security on every tenant-owned table, as the second layer beneath `TenantRepository`. | feature | §7 |
-| 3b.2 | User management endpoints — create, list, disable, assign roles — currently CLI-only. | feature | §8, §61 |
-| 3b.3 | Password change and reset, using the existing session-revocation path so a rotation takes effect at once. | feature | §53 |
-| 3b.4 | Audit read endpoint, so the trail is reviewable without database access. | feature | §69 |
+| ~~3b.2~~ | User management endpoints — create, list, disable, assign roles. **Done**: `/users` for tenant users, `/platform/users` for platform staff, both with a console screen. | ~~feature~~ | §8, §61 |
+| ~~3b.3~~ | Password reset. **Done**: `POST /users/{id}/password` and the platform equivalent, both revoking sessions in the same change — a reset that leaves old tokens working is not a reset. Self-service change by the signed-in user is still open (**3b.3a**). | ~~feature~~ | §53 |
+| 3b.3a | Self-service password change, for a user rotating their own password without an administrator. | feature | §53 |
+| ~~3b.4~~ | Audit read endpoint. **Done**: `GET /platform/audit-logs`, filterable, with no write or delete route anywhere in the API. | ~~feature~~ | §69 |
 | 3b.5 | Audit coverage asserted across every mutating endpoint, rather than trusting that each one remembered. | verification | §69 |
 
 **Why RLS is worth the work even with the repository in place:** the repository
@@ -308,12 +343,32 @@ complete.
 
 ### Sequencing
 
-2b.1 through 2b.4 should land **before** Phase 4 builds the agent builder UI,
-because that UI exposes exactly those fields. Shipping the form first would
-mean the platform advertises settings it ignores — and a tenant discovering
-that is a worse outcome than the feature arriving a week later.
+**The ordering constraint was not met, and that is now the position to work
+from rather than a plan to make.** 2b.1–2b.4 were meant to land before the
+agent builder exposed those fields; the builder shipped first. The same has
+since happened again with routing: the console presents rules, schedules and a
+fallback chain that nothing evaluates at call setup (4b.3).
 
-3b.1 has no such ordering constraint and can run in parallel.
+So the priority is the enforcement gap, not more screens:
+
+1. **4b.3** — routing evaluation. The largest gap between what the console
+   shows and what a call does.
+2. **2b.7 and 2b.9** — endpointing and STT latency. The agent transcribes and
+   does not reply; see §12.1. Nothing else in the product matters while that
+   holds.
+3. **2b.1–2b.4** — the agent-version settings that are loaded and ignored.
+4. **4b.4** — provider credentials in the console, which is what §77 turns on.
+5. **1b.1** — the usage rollup, so two of the three call limits stop being
+   decorative.
+
+3b.1 (Row Level Security) has no ordering constraint and can run in parallel.
+
+**The lesson worth keeping:** a form is not a feature. Each of 2b.1–2b.3 and
+4b.3 is a screen that writes a row nothing reads, and in every case the screen
+was built first because it was the visible half. The test named in Phase 2b's
+exit criteria — *no setting is loaded at runtime and then ignored* — should be
+extended to cover configuration the console writes, not only fields the worker
+loads.
 
 ## 6. Phase 3 — Multi-Tenancy [§76]
 
@@ -368,6 +423,37 @@ A non-developer tenant administrator can configure the platform entirely through
 - A tenant at its concurrent-call limit has the next call rejected before a LiveKit room is
   created.
 - Every configuration change appears in the audit log.
+
+### Status
+
+Both consoles are built and every section in §60 and §61 has a working screen.
+What remains is listed as Phase 4b in [§5b](#5b-carry-over-phases) rather than
+left as an unmarked gap.
+
+| # | Item | State |
+|---|---|---|
+| 4.1 | PBX UI + API | **done** |
+| 4.2 | SIP Trunk UI + API | **done** |
+| 4.3 | SIP Configuration Wizard (10 steps) | **4b.1** — the fields are all reachable through the trunk and DID forms; the guided sequence is not built |
+| 4.4 | Phone Number / DID UI | **partly** — number, PBX, trunk and inbound agent are editable; routing rule, business hours and fallback are not yet on the form (**4b.2**) |
+| 4.5 | Agent Builder UI | **done** |
+| 4.6 | Agent versioning | **done** |
+| 4.7 | Routing UI + engine | **UI done**; engine evaluation at call setup is **4b.3** |
+| 4.8 | Business hours | **done**, including dated exceptions and `open_now` |
+| 4.9 | Fallback routing chain | **configurable**; runtime traversal is **4b.3** |
+| 4.10 | Provider UI — providers, models, credentials | **providers and models done**; tenant credential entry is CLI-only (**4b.4**) |
+| 4.11 | Voice Library UI | **done** except voice preview (**4b.5**) |
+| 4.12 | ElevenLabs TTS adapter | **4b.6** — only the OpenAI-compatible adapter exists |
+| 4.13 | Validation before publish | **done** |
+| 4.14 | Dependency validation tree | **done** — `GET /agents/{id}/versions/{n}/validate` returns issues and dependencies separately |
+| 4.15 | Tenant call limits | **partly** — concurrency enforced; daily and monthly are Plan 1b.1 |
+| 4.16 | Tenant console — all §61 sections | **done** |
+| 4.17 | Platform console — all §60 sections | **done** |
+
+The §77 exit criterion — configure everything **using only the UI** — is not
+yet met, and 4b.4 is the reason. A tenant cannot enter its own provider API key
+through the console, so a new tenant still needs `python -m app.cli
+set-credential` before its agent can reach a cloud provider.
 
 ### Out of scope
 

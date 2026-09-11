@@ -624,7 +624,8 @@ docker compose -f deploy/docker-compose.yml --env-file .env up -d livekit-sip
 
 ### 9a.4 Seed a tenant and agent
 
-Until the configuration UI lands in Phase 4, a CLI seeds the same rows the UI
+The console now covers this (§9d.1). The CLI remains the way to do it without a
+browser, and is what seeds the same rows the UI
 will write. `--pbx-host` is your PBX's address; `--did` is the agent number.
 
 ```bash
@@ -971,7 +972,7 @@ misread as a fault:
 | Barge-in and interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
 | Tools, function calling, RAG | Not yet — Phase 6 |
-| Configuration through the UI instead of the CLI | Not yet — Phase 4 |
+| Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 
 Two honest caveats about interpreting a test call:
 
@@ -1113,34 +1114,111 @@ that connects, greets correctly, and only fails once somebody speaks — so
 
 ### 9d.1 What exists today
 
-The tenant console is real: sign in at http://localhost:3200 with one of the
-development accounts below. It covers PBX management end to end. The platform
-console has its shell but no sections yet, and most tenant sections are still
-to come — both are marked in the navigation.
+Both consoles are real. Sign in at http://localhost:3200 with one of the
+development accounts below; a platform account lands on the platform console
+and a tenant account on the tenant one, because the two have different
+navigation and a platform account has no tenant to act in.
 
 | Interface | URL | State |
 |---|---|---|
-| **Tenant console** | http://localhost:3200 | **Working** — sign-in, dashboard, PBX management |
-| Platform console | http://localhost:3200/platform | Shell and identity only; sections land in Phase 4–5 |
-| Swagger UI | http://localhost:8200/docs | Working — still the fastest way to reach an endpoint the console does not cover yet |
+| **Tenant console** | http://localhost:3200 | **Working** — every section in spec 61 |
+| **Platform console** | http://localhost:3200/platform | **Working** — every section in spec 60 |
+| Swagger UI | http://localhost:8200/docs | Working — still the fastest way to reach an endpoint with a specific payload |
 | ReDoc | http://localhost:8200/redoc | Working, read-only reference |
 | Grafana | http://localhost:3201 | Working; no voice dashboard yet (Phase 2b.6) |
 | Prometheus | http://localhost:9290 | Working, metrics scraped |
 | MinIO console | http://localhost:9201 | Working, empty until recording lands (Phase 2b.3) |
 
-**What the console covers.** Sign in, the tenant dashboard, and full PBX
-management — create, edit, delete, enable, disable and connection-test. Every
-other section appears in the navigation **greyed out with the phase that will
-build it**, rather than hidden: hiding would misrepresent how much of the
-console exists.
+#### Tenant console sections
+
+| Section | Path | What it does |
+|---|---|---|
+| Dashboard | `/` | Counts, connection-test state, API reachability |
+| PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
+| SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
+| Phone Numbers | `/phone-numbers` | DIDs, their trunk and the agent that answers |
+| Agents | `/agents` | The builder: versions, validation, publish, rollback |
+| Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |
+| Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
+| Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |
+| Tools | `/tools` | HTTP tools with schema validation and a write-only secret (spec 31–33) |
+| Knowledge Bases | `/knowledge-bases` | Create and assign a base; **ingestion is Phase 6** |
+| Calls / Transcripts | `/calls` | History, per-call detail, transcript and events |
+| Recordings | `/recordings` | Recording metadata; **empty until egress lands (Plan 2b.3)** |
+| Analytics | `/analytics` | Volume and outcomes over a window (spec 57) |
+| Users | `/users` | Tenant users and roles (spec 8) |
+| Usage | `/usage` | Standing against each limit, and which are enforced (spec 47) |
+| Settings | `/settings` | Name, timezone, default language |
+
+#### Platform console sections
+
+| Section | Path | What it does |
+|---|---|---|
+| Dashboard | `/platform` | Tenant count, live calls, LiveKit state |
+| Tenants | `/platform/tenants` | Create a tenant with its first administrator, set limits, suspend |
+| LiveKit | `/platform/livekit` | Reachability, room count, and every row whose mirror disagrees (spec 46) |
+| Infrastructure | `/platform/infrastructure` | Live dependency probes and links into Grafana, Prometheus and MinIO |
+| Capacity | `/platform/capacity` | Inventory, live load, licensed concurrency (spec 48) |
+| Providers | `/platform/providers` | The STT/LLM/TTS catalog, including `requires_credential` |
+| Models | `/platform/models` | Model slugs per provider, with one default each |
+| Voices | `/platform/voices` | Voice identifiers for TTS providers (spec 30) |
+| System Users | `/platform/system-users` | Platform staff and their two roles |
+| Audit Logs | `/platform/audit-logs` | The append-only trail, filterable (spec 69) |
+| Settings | `/platform/settings` | Effective configuration, secrets shown only as set/not-set |
+
+#### Two sections that exist but have no data yet
+
+Recordings and Knowledge Bases are **built and live**, not disabled. Their
+sidebar entries carry a small tag and each screen states the position:
+
+* **Recordings** reads `GET /api/v1/recordings`, which returns an empty page
+  because the worker does not start a LiveKit egress job (Plan 2b.3). An agent
+  version can already have recording switched on; that records the intent and
+  produces no audio.
+* **Knowledge Bases** can be created, configured and assigned to an agent. The
+  document list is live; nothing populates it until Phase 6 ingestion lands, so
+  an agent pointed at a base retrieves nothing rather than failing.
+
+Disabling either menu entry would have hidden the configuration that *is*
+usable behind the feature that is not.
+
+#### Role adaptation
 
 The navigation adapts to the signed-in role. As `viewer@dev.example.com` the
-Register button disappears, row actions reduce to Test, and sections the role
-cannot read drop out entirely. That is presentation only — the API enforces
-every permission independently, so a hidden control is not a missing check.
+write buttons disappear, row actions reduce to read-only ones, and sections the
+role cannot read drop out entirely. That is presentation only — the API
+enforces every permission independently, so a hidden control is not a missing
+check. A test asserts that each section's API route requires the same
+permission its menu entry claims, because the two disagreeing would either
+hide a usable section or show one every request refuses.
 
-Ports come from `.env`; the defaults above avoid the common collisions. Run
+Ports come from `.env`; the defaults avoid the common collisions. Run
 `python3 scripts/preflight.py` if anything refuses to bind.
+
+### 9d.1a Checking the console yourself
+
+```bash
+make typecheck-web
+```
+
+```bash
+make build-web
+```
+
+`build-web` overrides two things and both are worth knowing, because each
+produces a failure that names the wrong cause:
+
+* **`NODE_ENV`.** The compose file sets it to `development` for the dev server.
+  `next build` under that value warns about a non-standard `NODE_ENV` and then
+  fails prerendering `/404` with `<Html> should not be imported outside of
+  pages/_document`. Nothing in this project imports `next/document`.
+* **`NEXT_DIST_DIR`.** `.next` is on the bind mount the dev server writes to
+  continuously, so a build sharing it reads half-written chunks and fails the
+  same way. The build writes to `.next-build` instead, so it can run without
+  stopping the dev server.
+
+There is no ESLint configuration, so `npm run lint` prompts interactively
+rather than running. `tsc --noEmit` is the gate.
 
 ### 9d.2 Driving the API from Swagger UI
 
