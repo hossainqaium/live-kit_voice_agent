@@ -101,9 +101,27 @@ export function BrowserCall({
       const room = new Room({ adaptiveStream: true, dynacast: true });
       roomRef.current = room;
 
-      room.on(RoomEvent.TrackSubscribed, (track: { kind: string; attach(): HTMLMediaElement }) => {
+      type AttachableTrack = {
+        kind: string;
+        attach(): HTMLMediaElement;
+        detach(): HTMLMediaElement[];
+      };
+
+      room.on(RoomEvent.TrackSubscribed, (track: AttachableTrack) => {
         if (track.kind === Track.Kind.Audio && audioRef.current) {
           audioRef.current.appendChild(track.attach());
+        }
+      });
+
+      // Without this, a reconnect leaves the old element behind: LiveKit
+      // detaches the track from it, so it sits in the DOM paused with no
+      // source, and the next subscribe appends another. Five elements were
+      // observed after two reconnects, four of them dead — harmless to the
+      // ear but a leak, and it makes "is anything playing?" unanswerable when
+      // diagnosing exactly the silence this panel exists to diagnose.
+      room.on(RoomEvent.TrackUnsubscribed, (track: AttachableTrack) => {
+        if (track.kind === Track.Kind.Audio) {
+          for (const element of track.detach()) element.remove();
         }
       });
 
