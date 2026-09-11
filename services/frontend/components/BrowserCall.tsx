@@ -137,7 +137,26 @@ export function BrowserCall({
         setPhase((p) => (p === "failed" ? p : "ended"));
       });
 
-      await room.connect(issued.url, issued.token);
+      await room.connect(issued.url, issued.token, {
+        // The SDK default is 15 s, and the first measurement of this path was
+        // 14,992 ms — negotiation was losing a race with its own timeout, and
+        // reported it as "negotiation timed out" with no mention of time.
+        //
+        // Muxing LiveKit onto one UDP port brought it to ~7 s; this is the
+        // headroom, not the fix. A developer machine running a Kubernetes
+        // cluster and a second application stack is slower again, and a call
+        // that takes twelve seconds to connect is worth waiting for when the
+        // alternative is an error that explains nothing.
+        peerConnectionTimeout: 45_000,
+      });
+
+      // Development aid: lets the media path be exercised from the browser
+      // console without a microphone, which is the only way to reproduce a
+      // publish failure on a machine that has no audio input.
+      if (process.env.NODE_ENV !== "production") {
+        (window as unknown as { __voiceAgentRoom?: unknown }).__voiceAgentRoom = room;
+      }
+
       await room.localParticipant.setMicrophoneEnabled(true);
       setPhase("live");
     } catch (err) {

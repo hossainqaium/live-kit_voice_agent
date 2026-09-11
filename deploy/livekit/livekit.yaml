@@ -16,11 +16,17 @@ rtc:
   # The UDP range below has always been 1:1 for the same reason. Anything whose
   # number appears in a candidate has to match on both sides.
   tcp_port: 7981
-  # The development range is deliberately small: every published port becomes a
-  # forwarding entry on Docker Desktop, and a 10,000-port range makes
-  # `compose up` take minutes. Production widens this in the Helm values.
-  port_range_start: 50100
-  port_range_end: 50149
+  # One muxed UDP port rather than a range. A range was the obvious reading of
+  # the spec's port-range requirement, and it made browser calls fail: every
+  # port in it becomes a separate ICE candidate and a separate Docker Desktop
+  # forwarding entry, and gathering across fifty of them took about 15 seconds.
+  # livekit-client abandons negotiation at 10, so publishing a microphone
+  # failed with "negotiation timed out" — a message that points at neither
+  # ports nor Docker.
+  #
+  # Muxing is also what LiveKit recommends in production; the range was never
+  # buying anything here. Keep it 1:1 with the published port, like tcp_port.
+  udp_port: 50100
   # No external IP discovery locally; the PBX and LiveKit share the bridge
   # network. A remote PBX needs use_external_ip: true and a reachable address.
   use_external_ip: false

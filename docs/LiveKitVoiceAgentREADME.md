@@ -1539,6 +1539,14 @@ says nothing about addresses. Set it to this machine's LAN address:
 Loopback does not work: `127.0.0.1` means "myself" inside every other
 container, which breaks the worker and SIP paths.
 
+**Media is on one muxed UDP port, not a range.** `rtc.udp_port: 50100`. A
+fifty-port range makes ICE gathering take about 15 seconds through Docker
+Desktop, and livekit-client abandons negotiation at 15 — publishing a
+microphone failed with `NegotiationError: negotiation timed out` by a margin of
+milliseconds. One port brings it to ~7 s; the console also raises
+`peerConnectionTimeout` to 45 s as headroom. Muxing is what LiveKit recommends
+in production anyway.
+
 **Ports that appear in ICE candidates must not be renumbered.** LiveKit
 advertises its RTC TCP port as a candidate, so `rtc.tcp_port` in
 `livekit.yaml` and the published host port have to be the same number — they

@@ -1444,28 +1444,53 @@ for it.
 
 #### `NegotiationError: negotiation timed out` in the browser
 
-Symptom: the console's **Call Test** panel connects, then fails with
-`NegotiationError: negotiation timed out`. Distinct from the candidate failure
-below: signalling and the initial connection succeed, and it is *publishing*
-the microphone that never completes.
+Symptom: **Call Test** connects, the agent joins, and publishing the microphone
+fails with `NegotiationError: negotiation timed out`. Nothing in the message
+mentions ports, addresses or time.
 
-Cause: LiveKit advertises its RTC TCP port number in an ICE candidate, and the
-compose file mapped `7981 -> 7881`. So the candidate read
-`192.168.103.15:7881` while the host was listening on `7981`. A browser whose
-UDP path does not come up — which is common with Docker Desktop's forwarding of
-a fifty-port UDP range — falls back to TCP, dials a closed port, and waits until
-negotiation times out.
+**The first two explanations were wrong, and both were plausible.** The RTC TCP
+port was genuinely mismatched — `livekit.yaml` said `7881` while compose
+published `7981` — so a browser falling back to TCP dialled a closed port. That
+was a real bug and fixing it did not fix this one. Guessing twice cost more than
+measuring once would have.
 
-Fix: `rtc.tcp_port` and the published port must be the same number.
-`livekit.yaml` now sets `7981` and compose publishes `7981:7981`. The UDP range
-was always 1:1 for exactly this reason, with a comment saying so; the TCP port
-was the one that was not.
+**Measuring it.** Exposing the `Room` on `window` in development made the
+publish path reproducible without a microphone, using a WebAudio oscillator as
+the track:
 
-**The general rule, which cost two separate failures in one afternoon:** any
-port number that appears in an ICE candidate must be identical on both sides of
-the mapping, and the advertised address must be one the browser can route to.
-Renumbering it, or advertising a Docker bridge address, produces a timeout that
-names neither.
+```js
+const ctx = new AudioContext(), osc = ctx.createOscillator();
+const dst = ctx.createMediaStreamDestination();
+osc.connect(dst); osc.start();
+await room.localParticipant.publishTrack(dst.stream.getAudioTracks()[0],
+                                         { source: 'microphone' });
+```
+
+It **succeeded, in 14,992 ms**. livekit-client's `peerConnectionTimeout`
+defaults to 15,000 ms. Negotiation was losing a race with its own timeout by
+eight milliseconds, which is why it looked like a hard failure rather than a
+slow one.
+
+**Cause:** fifty UDP media ports. Each becomes its own ICE candidate and its own
+Docker Desktop forwarding entry, and gathering across all of them is what took
+the time. The range was chosen to satisfy the port-range requirement in §11 and
+was never needed here.
+
+| | publish time |
+|---|---|
+| 50-port range | 14,992 ms |
+| one muxed port (`rtc.udp_port`) | **7,206 ms** |
+
+Muxing is also what LiveKit recommends in production, so the range was costing
+something and buying nothing. `peerConnectionTimeout` is then raised to 45 s as
+headroom rather than as the fix — this machine also runs a Kubernetes control
+plane and a second application stack, and 7 s is not a number to leave three
+seconds of margin against.
+
+**The lesson is the one that keeps recurring in this section**: an aggregate
+symptom with a plausible cause is not evidence. Two ports were misconfigured
+and neither was the problem; the problem was a duration, and it took ten
+seconds to measure once the path was reproducible.
 
 #### Signalling connects and media never does
 
