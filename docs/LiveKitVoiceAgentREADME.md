@@ -30,6 +30,7 @@ is loaded from configuration at call start.
 9. [Creating Your First Agent](#9-creating-your-first-agent)
 9a. [**Running and Testing the Voice Agent**](#9a-running-and-testing-the-voice-agent)
 9c. [**Configuring AI Providers**](#9c-configuring-ai-providers)
+9d. [**Loading and Testing the Interfaces**](#9d-loading-and-testing-the-interfaces)
 10. [API Surface](#10-api-surface)
 11. [Roles and Permissions](#11-roles-and-permissions)
 12. [Observability](#12-observability)
@@ -1105,6 +1106,122 @@ that connects, greets correctly, and only fails once somebody speaks — so
 "the greeting worked" is not evidence the model works. Use §9c.5.
 
 ---
+
+---
+
+## 9d. Loading and Testing the Interfaces
+
+### 9d.1 What exists today
+
+Be clear about this before opening a browser: **the administration consoles are
+not built yet.** They are Phase 4 work (spec 60, 61) and the frontend currently
+serves only a landing page. What is testable today is the API, and the API is
+fully testable.
+
+| Interface | URL | State |
+|---|---|---|
+| **Swagger UI** | http://localhost:8200/docs | **Working — the real way to drive the platform today** |
+| ReDoc | http://localhost:8200/redoc | Working, read-only reference |
+| Frontend | http://localhost:3200 | Landing page only; shows API reachability |
+| Grafana | http://localhost:3201 | Working; no voice dashboard yet (Phase 2b.6) |
+| Prometheus | http://localhost:9290 | Working, metrics scraped |
+| MinIO console | http://localhost:9201 | Working, empty until recording lands (Phase 2b.3) |
+| Platform console | — | Not built (spec 60, Phase 4) |
+| Tenant console | — | Not built (spec 61, Phase 4) |
+
+Ports come from `.env`; the defaults above avoid the common collisions. Run
+`python3 scripts/preflight.py` if anything refuses to bind.
+
+### 9d.2 Driving the API from Swagger UI
+
+Open http://localhost:8200/docs. Every endpoint is there with its schema,
+permissions and error cases.
+
+To authenticate, get a token:
+
+```bash
+./scripts/api-token.sh
+```
+
+Then click **Authorize** in Swagger, paste the token, and every endpoint
+becomes callable as that user.
+
+The script takes an email, which is how the authorization model is best
+explored:
+
+```bash
+./scripts/api-token.sh viewer@dev.example.com
+```
+
+```bash
+./scripts/api-token.sh admin@acme.example.com
+```
+
+The password comes from `API_PASSWORD` when set, so it need not be typed or
+left in shell history.
+
+### 9d.3 Seeing the guarantees for yourself
+
+These are worth running once, because they are the properties the whole
+tenancy model rests on and they are more convincing performed than described.
+
+**RBAC is enforced by the backend, not the UI.** As `viewer@dev.example.com`,
+`POST /api/v1/pbxs` returns **403** naming the missing permission:
+
+```bash
+curl -s -X POST http://localhost:8200/api/v1/pbxs -H "Authorization: Bearer $(./scripts/api-token.sh viewer@dev.example.com)" -H 'Content-Type: application/json' -d '{"name":"Test","pbx_type":"ASTERISK","host":"10.0.0.1"}'
+```
+
+**Tenant isolation returns 404, not 403.** Fetch a `dev` PBX as
+`admin@acme.example.com` and the row reads as absent — a 403 would confirm it
+exists, and cross-tenant existence is itself information spec 7 protects.
+
+**A client-supplied tenant ID is refused, not ignored:**
+
+```bash
+curl -s "http://localhost:8200/api/v1/auth/me?tenant_id=00000000-0000-0000-0000-000000000000" -H "Authorization: Bearer $(./scripts/api-token.sh)"
+```
+
+That returns **400**. The same applies to an `X-Tenant-Id` header and to a
+`tenant_id` field in a JSON body.
+
+**The audit trail records every change:**
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env exec postgresql psql -U voice_agent -d voice_agent -c "SELECT occurred_at, action, user_email, resource_type, ip_address FROM audit_logs ORDER BY occurred_at DESC LIMIT 10;"
+```
+
+### 9d.4 Development accounts
+
+Created by `python -m app.cli create-user`. All use `DevPassword123!` in this
+environment and exist only to exercise the authorization model.
+
+| Email | Role | Tenant |
+|---|---|---|
+| `super@platform.example.com` | `SUPER_ADMIN` | none — platform staff |
+| `admin@dev.example.com` | `TENANT_ADMIN` | dev |
+| `viewer@dev.example.com` | `VIEWER` | dev |
+| `admin@acme.example.com` | `TENANT_ADMIN` | acme |
+
+Two tenants exist deliberately: isolation cannot be tested with one.
+
+Note that **reserved TLDs are refused** — `.test`, `.invalid` and `.localhost`
+are rejected by email validation, so an account using one could be created by
+an earlier version of the CLI and then never sign in. The CLI now validates
+with the same rules as the API.
+
+### 9d.5 Working on the frontend
+
+The container runs `next dev` with the source bind-mounted, so an edit to
+`services/frontend/app` reloads in the browser without a rebuild:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env logs -f frontend
+```
+
+`services/frontend/lib/api.ts` is the API client. It deliberately has **no way
+to pass a tenant ID** — tenant identity comes from the session, and leaving it
+off the client means no call site can supply one by accident.
 
 ## 10. API Surface
 

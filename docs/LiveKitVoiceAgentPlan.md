@@ -220,84 +220,106 @@ Multi-tenancy, tools, RAG, transfer, autoscaling.
 
 ---
 
+---
+
+## 5b. Carry-Over Phases
+
+Work left behind when a phase moved on. Collected here as real phases with
+their own scope and exit criteria, rather than as notes inside the phase that
+dropped them, so that nothing depends on someone remembering a paragraph.
+
+Two of these items are **not missing features**. They are settings that exist
+in the schema, are loaded at runtime, and then do nothing. That is worse than
+not offering them, because the agent builder will present them and a tenant
+will believe them. They are marked **defect** below and should be treated as
+correctness work.
+
+### Phase 2b — Realtime Quality Completion
+
+**Goal:** the call policies the data model already advertises actually take
+effect, and a call's audio is retrievable afterwards.
+
+| # | Item | Kind | Spec |
+|---|---|---|---|
+| 2b.1 | Enforce `silence_timeout_seconds`. Loaded from the agent version today and ignored. | **defect** | §18, §29 |
+| 2b.2 | Enforce `max_call_duration_seconds`. Same: loaded and ignored. Needs a watchdog, since no session option covers it. | **defect** | §18 |
+| 2b.3 | Honour `recording_enabled` — start LiveKit egress to object storage, write `call_recordings` metadata, leave the audio out of PostgreSQL. Loaded and ignored today, so a tenant enabling recording gets nothing. | **defect** | §39 |
+| 2b.4 | Map `interruption_enabled` and `interruption_min_words` onto the session's own options rather than reimplementing them. | mapping | §29 |
+| 2b.5 | Conversation summarisation into `call_transcripts.summary`, which is also what the warm-transfer whisper reads. | feature | §34, §36 |
+| 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
+| 2b.7 | Barge-in verified against real speech, not synthetic audio. | verification | §29 |
+| 2b.8 | 10-concurrent-call harness. | feature | §76 |
+
+**Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
+accepts `user_away_timeout`, `min_interruption_duration`,
+`min_interruption_words` and `allow_interruptions`; the work is passing
+configuration into them. Only maximum call duration needs new logic.
+
+**Exit criteria**
+
+- A call with a 10-second silence timeout ends by itself after 10 seconds of
+  silence, with `hangup_reason = SILENCE_TIMEOUT`.
+- A call exceeding its maximum duration ends with `hangup_reason = MAX_DURATION`.
+- An agent with recording enabled produces an object in storage and a
+  `call_recordings` row; PostgreSQL holds no audio.
+- No setting in `agent_versions` is loaded at runtime and then ignored — the
+  property worth asserting in a test, so this class of defect cannot recur.
+- The latency dashboard renders p50 and p95 per stage.
+
+### Phase 3b — Isolation and Account Hardening
+
+**Goal:** the isolation guarantee holds even for a query written outside the
+repository, and accounts are manageable through the API rather than the CLI.
+
+| # | Item | Kind | Spec |
+|---|---|---|---|
+| 3b.1 | PostgreSQL Row Level Security on every tenant-owned table, as the second layer beneath `TenantRepository`. | feature | §7 |
+| 3b.2 | User management endpoints — create, list, disable, assign roles — currently CLI-only. | feature | §8, §61 |
+| 3b.3 | Password change and reset, using the existing session-revocation path so a rotation takes effect at once. | feature | §53 |
+| 3b.4 | Audit read endpoint, so the trail is reviewable without database access. | feature | §69 |
+| 3b.5 | Audit coverage asserted across every mutating endpoint, rather than trusting that each one remembered. | verification | §69 |
+
+**Why RLS is worth the work even with the repository in place:** the repository
+is the first layer and covers every path written through it. RLS covers the
+paths that are not — an ad-hoc query, a future report, a migration script. The
+two together mean a mistake has to be made twice to become a leak.
+
+**Exit criteria**
+
+- With RLS enabled, a raw `SELECT * FROM agents` under a tenant role returns
+  only that tenant's rows.
+- A test asserts every mutating endpoint writes an audit row.
+- A tenant administrator can create and disable a user through the API, and a
+  disabled user's existing token stops working immediately.
+
+### Phase 1b — Call Policy Enforcement Debt
+
+One item, recorded separately because it belongs to Phase 1's own goal rather
+than to realtime quality:
+
+| # | Item | Kind | Spec |
+|---|---|---|---|
+| 1b.1 | Tenant call limits are enforced at call acceptance, but `max_daily_calls` and `max_monthly_minutes` rely on the `usage` rollup, which nothing writes yet. Only `max_concurrent_calls` is genuinely enforced. | **defect** | §47 |
+
+**Exit criteria:** a tenant at its daily call limit has the next call rejected
+before a LiveKit room is created, and the `usage` table is populated as calls
+complete.
+
+### Sequencing
+
+2b.1 through 2b.4 should land **before** Phase 4 builds the agent builder UI,
+because that UI exposes exactly those fields. Shipping the form first would
+mean the platform advertises settings it ignores — and a tenant discovering
+that is a worse outcome than the feature arriving a week later.
+
+3b.1 has no such ordering constraint and can run in parallel.
+
 ## 6. Phase 3 — Multi-Tenancy [§76]
 
 ### 6.1 Phase 2 carry-over
 
-Phase 2 was left partially complete when work moved to Phase 3. Delivered: the
-observability half — transcript persistence (2.7) and the six spec-56 latency
-measurements (2.5), plus the turn event that makes a conversation visible.
-
-Outstanding, and now debt rather than plan:
-
-| # | Item | Note |
-|---|---|---|
-| 2.1, 2.2 | Barge-in tuning and verification | VAD-driven interruption runs, but has never been verified against real speech |
-| 2.3 | Streaming confirmed end to end | Adapters stream; not measured under load |
-| 2.4 | Silence timeout and max call duration | **`silence_timeout_seconds` and `max_call_duration_seconds` are loaded from the agent version and never used.** The settings appear configurable in the data model and are silently ignored at runtime, which is worse than not offering them. `AgentSession` accepts `user_away_timeout`, `min_interruption_duration`, `min_interruption_words` and `allow_interruptions`, so most of this is a mapping from configuration onto session options rather than new logic; only maximum call duration needs a watchdog. |
-| 2.6 | Recording to object storage | Not started. `recording_enabled` is loaded and likewise unused, so a tenant enabling recording currently gets nothing. |
-| 2.8 | Conversation summarisation | Transcript headers exist; `summary` is never populated |
-| 2.9 | Grafana dashboard for voice latency | Metrics are exposed and scraped; no dashboard yet |
-| 2.10 | 10-concurrent-call harness | Not started |
-
-Two of these — 2.4 and 2.6 — are **configuration that exists in the schema and
-does nothing at runtime.** That is a correctness problem, not a missing
-feature: an agent builder will offer the settings and a tenant will believe
-them. They should be closed before Phase 4 exposes those fields in the UI.
-
-The Phase 2 exit criterion that needs a person rather than code — verifying
-that a real caller is heard and understood — also remains open.
-
-
-### Goal
-
-Tenants, users, RBAC, and **provably enforced** tenant isolation — before any tenant-facing
-feature is built on top. [§80]
-
-### Scope
-
-| # | Work item | Spec |
-|---|---|---|
-| 3.1 | `tenants`, `users`, `roles`, `permissions`, `user_roles` implemented and seeded | §68 |
-| 3.2 | JWT authentication; tenant identity derived **only** from the token | §7, §53 |
-| 3.3 | Platform roles `SUPER_ADMIN`, `PLATFORM_OPERATOR`; tenant roles `TENANT_ADMIN`, `MANAGER`, `AGENT_MANAGER`, `ANALYST`, `VIEWER` | §8 |
-| 3.4 | Granular permissions: `agents.*`, `pbxs.*`, `sip_trunks.*`, `calls.read`, `recordings.read`, `analytics.read`, `users.manage`, `billing.read` | §8 |
-| 3.5 | RBAC enforced at the API layer, independent of the frontend | §8, §80 |
-| 3.6 | Tenant-scoping in a shared repository layer so no endpoint can forget it; PostgreSQL RLS as defense in depth | §7 |
-| 3.7 | Reject any request that carries a client-supplied tenant ID | §7 |
-| 3.8 | Explicit cross-tenant isolation test suite over every tenant-scoped endpoint | §7 |
-| 3.9 | Audit logging: user, tenant, timestamp, action, resource, resource ID, old value, new value, IP | §69 |
-| 3.10 | Credential encryption at rest for provider and SIP credentials | §53 |
-
-### Deliverables
-
-- Troubleshooting entries in §12.
-- Security model document: authentication, authorization, tenant-resolution, encryption.
-- Isolation test suite report — one case per tenant-scoped endpoint.
-- Audit log schema and event catalogue.
-
-### Exit criteria
-
-- Every tenant-scoped endpoint has a passing test proving Tenant A cannot read or mutate a
-  Tenant B resource, for all resource types listed in §7.
-- A forged/injected `tenant_id` in a request body or query string is ignored or rejected — never
-  honored.
-- Every mutating endpoint writes an audit record with old and new values.
-- Permission checks are exercised by unit tests, with the frontend absent.
-- No provider or SIP credential is readable in plaintext from the database.
-
-### Out of scope
-
-The full configuration UI (Phase 4), LiveKit resource management UI (Phase 5).
-
-### Risks
-
-| Risk | Mitigation |
-|---|---|
-| A single forgotten `WHERE tenant_id = ...` breaks the whole isolation guarantee | Make scoping structural (3.6) rather than per-query discipline; add RLS as a second layer |
-| RBAC checks drift as endpoints are added | Permission declaration lives on the route; a test asserts every route declares one |
-
----
+Moved to [§5b Carry-Over Phases](#5b-carry-over-phases), where the outstanding
+work is defined as Phase 2b with its own exit criteria.
 
 ## 7. Phase 4 — Configuration Platform [§76]
 
