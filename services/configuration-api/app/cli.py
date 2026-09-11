@@ -16,22 +16,29 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from app.core.security import hash_password
 from app.core.settings import get_settings
 from app.db.models import (
     Agent,
     AgentVersion,
     LiveKitDispatchRule,
     Model,
+    Permission,
     PhoneNumber,
     Provider,
     ProviderCredential,
+    Role,
+    RolePermission,
     SipCredential,
     SipTrunk,
     Tenant,
+    User,
+    UserRole,
 )
 from app.db.session import dispose_engine, get_session_factory
 from app.livekit import LiveKitError, LiveKitUnsupportedError, SipResourceManager
@@ -43,7 +50,7 @@ from app.services.seed import (
 )
 from shared.crypto import CredentialCipher, CredentialEncryptionError
 from shared.logging import configure_logging, get_logger
-from shared.models import ProviderKind, SyncStatus
+from shared.models import PlatformRole, ProviderKind, SyncStatus, TenantRole
 
 settings = get_settings()
 configure_logging(service="configuration-api-cli", level=settings.log_level)
@@ -503,6 +510,140 @@ async def cmd_set_agent_provider(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_seed_rbac(args: argparse.Namespace) -> int:
+    """Create the spec-8 roles and permissions (Phase 3 item 3.1).
+
+    Reports the resulting totals rather than a delta, because the operation is
+    idempotent and "what exists now" is the useful answer either way.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        await seed_roles_and_permissions(session)
+        await session.commit()
+
+        permissions = (
+            await session.execute(select(func.count()).select_from(Permission))
+        ).scalar_one()
+        roles = (await session.execute(select(func.count()).select_from(Role))).scalar_one()
+        grants = (
+            await session.execute(select(func.count()).select_from(RolePermission))
+        ).scalar_one()
+
+        print(f"rbac: {permissions} permissions, {roles} roles, {grants} grants")
+        for name, scope in (
+            await session.execute(select(Role.name, Role.scope).order_by(Role.scope, Role.name))
+        ).all():
+            held = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(RolePermission)
+                    .join(Role, Role.id == RolePermission.role_id)
+                    .where(Role.name == name)
+                )
+            ).scalar_one()
+            print(f"  {scope:<8} {name:<18} permissions={held}")
+    return 0
+
+
+async def cmd_create_user(args: argparse.Namespace) -> int:
+    """Create a user and assign a role.
+
+    The password is read from stdin so it never reaches a process listing or a
+    shell history file.
+    """
+    import sys as _sys
+
+    password = _sys.stdin.read().strip()
+    if not password:
+        print(
+            "no password on stdin; pipe it in, e.g. "
+            'printf %s "$PW" | ... create-user --email a@b.c --role TENANT_ADMIN',
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        password_hash = hash_password(password)
+    except ValueError as exc:
+        print(f"password rejected: {exc}", file=sys.stderr)
+        return 2
+
+    # Validate with exactly the rules the API's login schema uses. Without
+    # this the CLI happily creates an account whose address the API will later
+    # refuse, producing a user who exists and can never sign in.
+    try:
+        from pydantic import TypeAdapter
+        from pydantic.networks import EmailStr
+
+        TypeAdapter(EmailStr).validate_python(args.email)
+    except Exception as exc:
+        reason = str(exc).splitlines()[-1].strip() if str(exc) else "invalid address"
+        print(f"email rejected: {reason}", file=sys.stderr)
+        print(
+            "  note: reserved TLDs such as .test, .invalid and .localhost are refused, "
+            "so an account using one could never sign in",
+            file=sys.stderr,
+        )
+        return 2
+
+    is_platform = args.role in {r.value for r in PlatformRole}
+
+    factory = get_session_factory()
+    async with factory() as session:
+        role = (
+            await session.execute(select(Role).where(Role.name == args.role))
+        ).scalar_one_or_none()
+        if role is None:
+            print(
+                f"no role named {args.role!r}; run seed-rbac first",
+                file=sys.stderr,
+            )
+            return 2
+
+        # Carry the id rather than the row: a platform user has no tenant, and
+        # threading an Optional row through the inserts below makes every use
+        # site need a None check.
+        tenant_id: uuid.UUID | None = None
+        if not is_platform:
+            tenant = (
+                await session.execute(select(Tenant).where(Tenant.slug == args.tenant))
+            ).scalar_one_or_none()
+            if tenant is None:
+                print(f"no tenant with slug {args.tenant!r}", file=sys.stderr)
+                return 2
+            tenant_id = tenant.id
+
+        existing = (
+            await session.execute(select(User).where(User.email == args.email))
+        ).scalar_one_or_none()
+        if existing is not None:
+            print(f"a user with email {args.email!r} already exists", file=sys.stderr)
+            return 2
+
+        user = User(
+            tenant_id=tenant_id,
+            is_platform_user=is_platform,
+            email=args.email,
+            full_name=args.name or args.email.split("@")[0],
+            password_hash=password_hash,
+        )
+        session.add(user)
+        await session.flush()
+
+        session.add(
+            UserRole(
+                user_id=user.id,
+                role_id=role.id,
+                tenant_id=tenant_id,
+            )
+        )
+        await session.commit()
+
+        scope = "platform" if is_platform else f"tenant={args.tenant}"
+        print(f"user created: {args.email} role={args.role} {scope}")
+    return 0
+
+
 async def cmd_show_config() -> int:
     """Print what LiveKit currently holds, next to what we recorded."""
     manager = SipResourceManager()
@@ -567,6 +708,20 @@ def main() -> int:
     sub.add_parser("sync-livekit", help="create or verify LiveKit SIP resources")
     sub.add_parser("show-config", help="compare LiveKit against our records")
 
+    sub.add_parser("seed-rbac", help="create the spec-8 roles and permissions")
+
+    mkuser = sub.add_parser(
+        "create-user", help="create a user and assign a role; password read from stdin"
+    )
+    mkuser.add_argument("--email", required=True)
+    mkuser.add_argument("--name", default=None, help="full name")
+    mkuser.add_argument(
+        "--role",
+        required=True,
+        choices=[r.value for r in PlatformRole] + [r.value for r in TenantRole],
+    )
+    mkuser.add_argument("--tenant", default="dev", help="tenant slug; ignored for platform roles")
+
     cred = sub.add_parser(
         "set-credential",
         help="store a provider API key, encrypted; the key is read from stdin",
@@ -598,6 +753,10 @@ def main() -> int:
                 return await cmd_sync_livekit()
             if args.command == "show-config":
                 return await cmd_show_config()
+            if args.command == "seed-rbac":
+                return await cmd_seed_rbac(args)
+            if args.command == "create-user":
+                return await cmd_create_user(args)
             if args.command == "set-credential":
                 return await cmd_set_credential(args)
             if args.command == "set-agent-provider":

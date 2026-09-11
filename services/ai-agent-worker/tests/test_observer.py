@@ -154,7 +154,9 @@ class TestTranscriptCapture:
         observer = make_observer()
         observer._on_conversation_item(
             FakeItemEvent(
-                FakeChatMessage(role="user", content=["what are your hours"], transcript_confidence=0.94)
+                FakeChatMessage(
+                    role="user", content=["what are your hours"], transcript_confidence=0.94
+                )
             )
         )
         items = queued(observer)
@@ -194,7 +196,9 @@ class TestTranscriptCapture:
         """An image part has no place in a spoken transcript."""
         observer = make_observer()
         observer._on_conversation_item(
-            FakeItemEvent(FakeChatMessage(role="user", content=["hello", {"image": "..."}, "there"]))
+            FakeItemEvent(
+                FakeChatMessage(role="user", content=["hello", {"image": "..."}, "there"])
+            )
         )
         assert queued(observer)[0][1]["text"] == "hello there"
 
