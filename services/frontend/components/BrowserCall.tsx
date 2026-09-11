@@ -88,6 +88,44 @@ export function BrowserCall({
   }, []);
 
   useEffect(() => {
+    // Filter exactly one message, by its text, for as long as this panel is
+    // open.
+    //
+    //   publisher data channel 'DATA_TRACK_LOSSY' closed unexpectedly
+    //
+    // livekit-client logs it at error level about a second into a call that
+    // then works: measured alongside it, publish in 63 ms, agent present,
+    // audio both ways, no reconnects. The SDK creates the publisher's data
+    // channels before the publisher connection exists and replaces them once
+    // it does, reporting the first closing as an error. Next.js's development
+    // overlay promotes any console error to a full-screen banner, so a working
+    // call presented as a failure.
+    //
+    // Filtered here rather than through the SDK's own controls because those
+    // were tried and measured: `setLogExtension` is additive and leaves the
+    // console output in place, and `setLogLevel(silent, LoggerNames.DataTracks)`
+    // did not cover it — the message comes from a different logger, and
+    // guessing which one is fragile in a way an exact string is not.
+    //
+    // The filter is deliberately narrow: one substring, error level only,
+    // scoped to this component's lifetime. Everything else reaches the console
+    // untouched, because a silenced error channel is how this project lost an
+    // afternoon to a message nobody read.
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      const first = args[0];
+      if (typeof first === "string" && first.includes("DATA_TRACK_LOSSY")) {
+        console.debug("livekit (benign, see BrowserCall.tsx):", ...args);
+        return;
+      }
+      original(...args);
+    };
+    return () => {
+      console.error = original;
+    };
+  }, []);
+
+  useEffect(() => {
     // Hanging up on unmount matters more than it looks: without it, closing
     // the dialog leaves a participant in the room and the agent talking to
     // nobody until its own timeout.

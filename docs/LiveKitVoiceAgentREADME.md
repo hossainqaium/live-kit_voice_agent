@@ -1560,25 +1560,31 @@ Services use `ws://livekit:7880`; a browser needs `ws://localhost:7980`. The
 API returns the right one to the console, which is why `LIVEKIT_PUBLIC_URL`
 exists as a separate setting.
 
-#### One console message that is not a fault
+#### One console message that is not a fault, and is filtered
 
 ```
 publisher data channel 'DATA_TRACK_LOSSY' closed unexpectedly
 ```
 
-livekit-client logs this at **error** level about a second into a call, and
-Next.js's development overlay promotes any console error to a full-screen
-banner — so a call that works looks broken. Measured on a healthy call while
-that message was on screen: track published in 63 ms, agent present, audio in
-both directions, no reconnects.
+livekit-client logs this at **error** level about a second into a call that
+then works, and Next.js's development overlay promotes any console error to a
+full-screen banner — so a healthy call presented as a failure. Measured
+alongside the message: track published in 63 ms, agent present, audio in both
+directions, no reconnects.
 
 The SDK creates the publisher's data channels before the publisher connection
 exists and replaces them once it does, reporting the first closing as an error.
-It cannot be filtered cleanly: `setLogExtension` is additive and leaves the
-console output in place, and `setLogLevel` has no per-message granularity.
-Silencing the SDK's error channel wholesale would hide the next real fault, so
-it is left visible and explained instead. It does not appear in a production
-build.
+
+`BrowserCall.tsx` filters **that one message, by substring, at error level,
+for as long as the panel is open**. Everything else reaches the console
+untouched. Two tidier routes were tried and measured first: `setLogExtension`
+is additive and leaves the console output in place, and
+`setLogLevel(silent, LoggerNames.DataTracks)` did not cover it — the message
+comes from another logger, and guessing which is fragile where an exact string
+is not.
+
+The narrowness is the point. A silenced error channel is how this project lost
+an afternoon to `unsupported datachannel added` sitting unread in a log.
 
 #### What it does not replace
 
