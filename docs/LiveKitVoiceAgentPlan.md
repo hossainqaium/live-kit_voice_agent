@@ -1592,10 +1592,20 @@ v1 RTC path not found. Consider upgrading your LiveKit server version – Retryi
 ```
 
 livekit-client 2.22.3 speaks protocol 17; `livekit-server:v1.8` reports
-protocol 15. The client is pinned to **2.15.16** on that basis — the version
-mismatch is a real correctness argument on its own. The timing difference
-measured with it (9.2 s against 12.9 s for one publish) is **a single sample
-each and not evidence**; it is recorded as an observation, not a result.
+protocol 15.
+
+**Downgrading the client to 2.15.16 was tried and reverted — it made things
+worse.** The reasoning was sound (remove a real protocol mismatch) and the one
+timing sample favoured it, 9.2 s against 12.9 s. In actual use the caller's
+microphone stopped publishing altogether: the greeting still played, and
+nothing the caller said was transcribed, where on 2.22.3 it had been. A
+regression introduced on a single measurement and a plausible argument, which
+is the third time this section records that pattern and the first time it
+reached the user.
+
+The rule this earns: **a change justified by one sample is a hypothesis, and a
+hypothesis does not get deployed to someone who is using the thing.** Measure
+it enough times to be a result, or leave it in a branch.
 
 **The next thing to try is the server, not the client**: `livekit-server:v1.8`
 against a client generation built for a newer protocol. Upgrading it touches
