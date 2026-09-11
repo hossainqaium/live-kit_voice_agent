@@ -93,14 +93,17 @@ type BadgeTone = "ok" | "warn" | "err" | "info" | "neutral";
 export function Badge({
   tone = "neutral",
   dot = false,
+  title,
   children,
 }: {
   tone?: BadgeTone;
   dot?: boolean;
+  /** Hover text. A one-word status often cannot carry its own reason. */
+  title?: string;
   children: React.ReactNode;
 }) {
   return (
-    <span className={`badge badge-${tone}`}>
+    <span className={`badge badge-${tone}`} title={title}>
       {dot && <span className="dot" aria-hidden />}
       {children}
     </span>

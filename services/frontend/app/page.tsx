@@ -60,8 +60,7 @@ export default function TenantDashboard() {
         <div>
           <h1>Dashboard</h1>
           <p className="page-subtitle">
-            Telephony and agent configuration for your tenant. Calls, analytics
-            and the agent builder arrive later in Phase 4.
+            Telephony, agents, routing and call history for your tenant.
           </p>
         </div>
       </div>

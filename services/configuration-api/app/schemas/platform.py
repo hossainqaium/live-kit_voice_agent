@@ -10,10 +10,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, IPvAnyAddress, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, IPvAnyAddress, field_validator
 
 from app.schemas.common import TimestampedResponse
-from shared.models import ProviderKind, ResourceStatus, TenantStatus
+from shared.models import PlatformRole, ProviderKind, ResourceStatus, TenantStatus
 
 _SLUG_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 
@@ -312,3 +312,120 @@ class CapacityResponse(BaseModel):
 
     livekit_rooms: int | None = None
     components: list[ComponentHealth] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# LiveKit administration (spec 12, 46)
+# --------------------------------------------------------------------------- #
+
+
+class DriftedResource(BaseModel):
+    """A row whose LiveKit mirror does not match PostgreSQL (spec 46)."""
+
+    kind: str
+    id: uuid.UUID
+    tenant_id: uuid.UUID | None
+    tenant_name: str | None
+    name: str
+    sync_status: str
+    livekit_resource_id: str | None
+    sync_error: str | None
+    sync_attempts: int
+    last_synced_at: datetime | None
+
+
+class LiveKitOverview(BaseModel):
+    """LiveKit's state as the Control Plane sees it.
+
+    PostgreSQL is the source of truth and LiveKit is the mirror (spec 12), so
+    this reports the mirror's agreement with it rather than reading LiveKit's
+    own view as authoritative. The interesting number is the disagreement.
+    """
+
+    url: str
+    sip_uri: str
+    reachable: bool
+    room_count: int | None = None
+    detail: str | None = None
+
+    #: Counts by ``sync_status`` across every tenant, per resource kind.
+    trunk_sync: dict[str, int] = Field(default_factory=dict)
+    dispatch_rule_sync: dict[str, int] = Field(default_factory=dict)
+
+    #: Only the rows that need attention. A fully synced platform returns an
+    #: empty list, which is the answer worth seeing at a glance.
+    needs_attention: list[DriftedResource] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Platform staff (spec 8, 60)
+# --------------------------------------------------------------------------- #
+
+
+class PlatformUserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=12, max_length=72)
+
+    #: Platform roles only. A platform account with a tenant role would hold
+    #: permissions inside a tenant it does not belong to.
+    role: PlatformRole
+
+
+class PlatformUserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=255)
+    role: PlatformRole | None = None
+    is_active: bool | None = None
+    password: str | None = Field(default=None, min_length=12, max_length=72)
+
+
+class PlatformUserResponse(TimestampedResponse):
+    email: str
+    full_name: str
+    is_active: bool
+    last_login_at: datetime | None
+    roles: list[str] = Field(default_factory=list)
+    sessions_revoked: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# Effective configuration (spec 60 "Settings")
+# --------------------------------------------------------------------------- #
+
+
+class SettingEntry(BaseModel):
+    """One effective configuration value.
+
+    ``value`` is null for a secret. The name and the fact that it is set are
+    useful — "is CREDENTIAL_ENCRYPTION_KEY configured?" is a real question —
+    but the value itself must never leave the process (spec 70).
+    """
+
+    name: str
+    value: str | None
+    is_secret: bool = False
+    #: True when a secret is configured, so the console can distinguish a
+    #: redacted value from an unset one.
+    is_set: bool = True
+    note: str | None = None
+
+
+class PlatformSettingsResponse(BaseModel):
+    """What the running process is actually configured with.
+
+    Read-only, and it says why: these come from the environment, so changing
+    one means changing ``.env`` or the compose file and restarting. An editable
+    screen here would write somewhere that the next restart overwrites.
+    """
+
+    environment: str
+    editable: bool = False
+    source: str = (
+        "Environment variables read at process start. "
+        "Change .env or the compose file and restart the service."
+    )
+    groups: dict[str, list[SettingEntry]] = Field(default_factory=dict)

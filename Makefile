@@ -18,6 +18,7 @@ GRAFANA_PORT  ?= $(shell grep -E '^GRAFANA_PORT=' .env 2>/dev/null | cut -d= -f2
 .DEFAULT_GOAL := help
 .PHONY: help env preflight build up down restart logs ps urls health \
         migrate migration downgrade psql redis \
+        typecheck-web build-web check-web \
         test test-unit test-api test-worker test-shared test-integration test-e2e \
         lint fmt fmt-check typecheck check load-test clean nuke
 
@@ -152,6 +153,28 @@ fmt-check: ## Verify formatting without rewriting files
 
 typecheck: ## Type-check the Python sources
 	$(API_RUN) sh -c 'pip install -q -r requirements-dev.txt && python -m mypy --config-file /opt/tooling/pyproject.toml app'
+
+# --------------------------------------------------------------------------- #
+# Frontend
+# --------------------------------------------------------------------------- #
+
+FRONTEND_RUN := $(COMPOSE) run --rm --no-deps -T
+WEB_RUN      := $(FRONTEND_RUN) frontend
+
+typecheck-web: ## Type-check the console
+	$(WEB_RUN) npm run typecheck
+
+# Two things are overridden so a build can run while the dev server is up.
+# NODE_ENV, because the compose file sets it to development for the dev server
+# and `next build` warns about a non-standard value and then misbehaves; and
+# NEXT_DIST_DIR, because `.next` is on the bind mount the dev server is
+# actively writing to. Sharing either one produces a failure that names the
+# wrong cause (see the comment in next.config.ts).
+build-web: ## Production build of the console
+	$(FRONTEND_RUN) -e NODE_ENV=production -e NEXT_DIST_DIR=.next-build \
+		frontend npm run build
+
+check-web: typecheck-web build-web ## Console checks
 
 check: lint typecheck test ## Everything CI runs
 

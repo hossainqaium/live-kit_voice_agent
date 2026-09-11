@@ -16,6 +16,15 @@
     "plugins": [{ "name": "next" }],
     "paths": { "@/*": ["./*"] }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  // ".next-build/types" is the alternate dist dir `make build-web` uses so a
+  // production build does not fight the dev server over ".next". Listing both
+  // keeps `next build` from rewriting this file on every run.
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next-build/types/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }

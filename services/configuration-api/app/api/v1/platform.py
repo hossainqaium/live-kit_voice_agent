@@ -23,6 +23,7 @@ from sqlalchemy import Select, func, select, text
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from app.core.dependencies import (
     ClientIp,
@@ -31,10 +32,12 @@ from app.core.dependencies import (
     require_super_admin,
 )
 from app.core.security import hash_password
+from app.core.settings import get_settings
 from app.db.models import (
     Agent,
     AuditLog,
     Call,
+    LiveKitDispatchRule,
     Model,
     Pbx,
     PhoneNumber,
@@ -55,12 +58,19 @@ from app.schemas.platform import (
     AuditLogResponse,
     CapacityResponse,
     ComponentHealth,
+    DriftedResource,
+    LiveKitOverview,
     ModelCreate,
     ModelResponse,
     ModelUpdate,
+    PlatformSettingsResponse,
+    PlatformUserCreate,
+    PlatformUserResponse,
+    PlatformUserUpdate,
     ProviderCreate,
     ProviderResponse,
     ProviderUpdate,
+    SettingEntry,
     TenantCreate,
     TenantSummary,
     TenantUpdate,
@@ -72,9 +82,11 @@ from app.services import audit
 from shared.logging import get_logger
 from shared.models import (
     CallState,
+    PlatformRole,
     ProviderKind,
     ResourceStatus,
     RoleScope,
+    SyncStatus,
     TenantRole,
     TenantStatus,
 )
@@ -1175,8 +1187,6 @@ async def _probe_livekit() -> tuple[ComponentHealth, int | None]:
 
 
 async def _probe_redis() -> ComponentHealth:
-    from app.core.settings import get_settings
-
     settings = get_settings()
     started = time.perf_counter()
     try:
@@ -1270,4 +1280,424 @@ async def capacity(session: SessionDep) -> CapacityResponse:
         licensed_concurrent_calls=licensed,
         livekit_rooms=rooms,
         components=[postgres, livekit, redis],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# LiveKit administration (spec 12, 46)
+# --------------------------------------------------------------------------- #
+
+
+@router.get(
+    "/livekit",
+    response_model=LiveKitOverview,
+    summary="LiveKit reachability and mirror agreement",
+    dependencies=[Depends(require_platform_user())],
+)
+async def livekit_overview(session: SessionDep) -> LiveKitOverview:
+    """How far LiveKit has drifted from PostgreSQL.
+
+    PostgreSQL is written first and LiveKit second (spec 12), so a row can be
+    ``PENDING`` or ``FAILED`` while the database is already correct. Listing
+    only those rows is the point: a healthy platform shows an empty list, and
+    anything here is something a retry or a re-sync has to fix.
+    """
+    settings = get_settings()
+    health, rooms = await _probe_livekit()
+
+    async def counts(column: InstrumentedAttribute[SyncStatus]) -> dict[str, int]:
+        """Group by sync status.
+
+        Takes the column rather than the model: the two models share it only
+        through ``LiveKitSyncMixin``, and a bare ``type`` parameter hides that
+        from the type checker.
+        """
+        rows = (
+            await session.execute(
+                # Cross-tenant on purpose: drift is a platform-level concern
+                # and a per-tenant view would hide the pattern.
+                select(column, func.count()).group_by(column)
+            )
+        ).all()
+        return {status_value.value: int(count) for status_value, count in rows}
+
+    trunk_counts = await counts(SipTrunk.sync_status)
+    rule_counts = await counts(LiveKitDispatchRule.sync_status)
+
+    attention: list[DriftedResource] = []
+    unhealthy = (SyncStatus.PENDING, SyncStatus.FAILED, SyncStatus.DRIFTED)
+
+    for kind, model, label_column in (
+        ("sip_trunk", SipTrunk, SipTrunk.name),
+        ("dispatch_rule", LiveKitDispatchRule, LiveKitDispatchRule.name),
+    ):
+        rows = (
+            await session.execute(
+                select(model, label_column, Tenant.name)
+                .join(Tenant, Tenant.id == model.tenant_id)
+                .where(model.sync_status.in_(unhealthy))
+                .order_by(model.sync_attempts.desc())
+                .limit(50)
+            )
+        ).all()
+        for row, name, tenant_name in rows:
+            attention.append(
+                DriftedResource(
+                    kind=kind,
+                    id=row.id,
+                    tenant_id=row.tenant_id,
+                    tenant_name=tenant_name,
+                    name=name,
+                    sync_status=row.sync_status.value,
+                    livekit_resource_id=row.livekit_resource_id,
+                    sync_error=row.sync_error,
+                    sync_attempts=row.sync_attempts,
+                    last_synced_at=row.last_synced_at,
+                )
+            )
+
+    return LiveKitOverview(
+        url=settings.livekit_url,
+        sip_uri=settings.livekit_sip_uri,
+        reachable=health.reachable,
+        room_count=rooms,
+        detail=health.detail,
+        trunk_sync=trunk_counts,
+        dispatch_rule_sync=rule_counts,
+        needs_attention=attention,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Platform staff (spec 8, 60)
+# --------------------------------------------------------------------------- #
+
+
+async def _platform_roles(
+    session: AsyncSession, user_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[str]]:
+    if not user_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(UserRole.user_id, Role.name)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id.in_(user_ids), UserRole.tenant_id.is_(None))
+        )
+    ).all()
+    grouped: dict[uuid.UUID, list[str]] = {}
+    for user_id, role_name in rows:
+        grouped.setdefault(user_id, []).append(role_name)
+    return grouped
+
+
+@router.get(
+    "/users",
+    response_model=Page[PlatformUserResponse],
+    summary="List platform staff",
+    dependencies=[Depends(require_platform_user())],
+)
+async def list_platform_users(session: SessionDep) -> Page[PlatformUserResponse]:
+    """Platform accounts only.
+
+    Tenant users are listed by the tenant's own endpoint. Mixing them here
+    would put every customer's user list in front of platform staff for no
+    operational reason.
+    """
+    rows = list(
+        (
+            await session.execute(
+                select(User).where(User.is_platform_user.is_(True)).order_by(User.email)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    roles = await _platform_roles(session, [r.id for r in rows])
+    items = [
+        PlatformUserResponse.model_validate(row, from_attributes=True).model_copy(
+            update={
+                "roles": sorted(roles.get(row.id, [])),
+                "sessions_revoked": row.tokens_valid_from is not None,
+            }
+        )
+        for row in rows
+    ]
+    return Page(items=items, total=len(items), limit=len(items), offset=0)
+
+
+@router.post(
+    "/users",
+    response_model=PlatformUserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a platform account",
+    dependencies=[Depends(require_super_admin())],
+)
+async def create_platform_user(
+    payload: PlatformUserCreate,
+    session: SessionDep,
+    principal: CurrentPrincipal,
+    request: Request,
+    client_ip: ClientIp,
+) -> PlatformUserResponse:
+    """Create platform staff.
+
+    Restricted to SUPER_ADMIN even though listing is not: a PLATFORM_OPERATOR
+    being able to mint a SUPER_ADMIN would make the role distinction
+    decorative.
+    """
+    email = str(payload.email).strip().lower()
+    taken = (await session.execute(select(User.id).where(User.email == email))).scalar_one_or_none()
+    if taken is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="an account with that email already exists",
+        )
+
+    role = (
+        await session.execute(
+            select(Role).where(Role.name == payload.role.value, Role.scope == RoleScope.PLATFORM)
+        )
+    ).scalar_one_or_none()
+    if role is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"the role {payload.role.value!r} is not configured; run seed-rbac",
+        )
+
+    try:
+        password_hash = hash_password(payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    user = User(
+        tenant_id=None,
+        is_platform_user=True,
+        email=email,
+        full_name=payload.full_name,
+        password_hash=password_hash,
+    )
+    session.add(user)
+    await session.flush()
+    # A platform role assignment has no tenant, which is why user_roles carries
+    # a nullable tenant_id.
+    session.add(UserRole(user_id=user.id, role_id=role.id, tenant_id=None))
+
+    await audit.record(
+        session,
+        principal=principal,
+        action="platform_user.created",
+        resource_type="user",
+        resource_id=user.id,
+        new_value={"email": email, "role": payload.role.value},
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await session.commit()
+
+    logger.info("platform_user_created", extra={"created_user_id": str(user.id)})
+    return PlatformUserResponse.model_validate(user, from_attributes=True).model_copy(
+        update={"roles": [payload.role.value]}
+    )
+
+
+@router.put(
+    "/users/{user_id}",
+    response_model=PlatformUserResponse,
+    summary="Update a platform account",
+    dependencies=[Depends(require_super_admin())],
+)
+async def update_platform_user(
+    user_id: uuid.UUID,
+    payload: PlatformUserUpdate,
+    session: SessionDep,
+    principal: CurrentPrincipal,
+    request: Request,
+    client_ip: ClientIp,
+) -> PlatformUserResponse:
+    """Update platform staff.
+
+    Both disabling an account and changing its password revoke its sessions,
+    so neither takes effect only after the access token expires.
+    """
+    user = (
+        await session.execute(
+            select(User).where(User.id == user_id, User.is_platform_user.is_(True))
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail=f"no platform account with id {user_id}")
+
+    before = {"full_name": user.full_name, "is_active": user.is_active}
+    revoked = False
+
+    if payload.full_name is not None:
+        user.full_name = payload.full_name
+
+    if payload.password is not None:
+        try:
+            user.password_hash = hash_password(payload.password)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        revoked = True
+
+    if payload.role is not None:
+        role = (
+            await session.execute(
+                select(Role).where(
+                    Role.name == payload.role.value, Role.scope == RoleScope.PLATFORM
+                )
+            )
+        ).scalar_one_or_none()
+        if role is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"the role {payload.role.value!r} is not configured",
+            )
+        if user.id == principal.user_id and payload.role is not PlatformRole.SUPER_ADMIN:
+            # Demoting yourself out of SUPER_ADMIN can leave the platform with
+            # nobody able to promote anyone back.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="you cannot remove your own SUPER_ADMIN role",
+            )
+        await session.execute(
+            sql_delete(UserRole).where(UserRole.user_id == user_id, UserRole.tenant_id.is_(None))
+        )
+        session.add(UserRole(user_id=user_id, role_id=role.id, tenant_id=None))
+
+    if payload.is_active is not None and payload.is_active != user.is_active:
+        if not payload.is_active and user.id == principal.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="you cannot disable your own account",
+            )
+        user.is_active = payload.is_active
+        revoked = revoked or not payload.is_active
+
+    if revoked:
+        user.tokens_valid_from = datetime.now(UTC)
+
+    await audit.record(
+        session,
+        principal=principal,
+        action="platform_user.updated",
+        resource_type="user",
+        resource_id=user.id,
+        old_value=before,
+        new_value={
+            "full_name": user.full_name,
+            "is_active": user.is_active,
+            "role": payload.role.value if payload.role else None,
+            "sessions_revoked": revoked,
+        },
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await session.commit()
+
+    roles = await _platform_roles(session, [user.id])
+    return PlatformUserResponse.model_validate(user, from_attributes=True).model_copy(
+        update={
+            "roles": sorted(roles.get(user.id, [])),
+            "sessions_revoked": user.tokens_valid_from is not None,
+        }
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Effective configuration (spec 60)
+# --------------------------------------------------------------------------- #
+
+
+@router.get(
+    "/settings",
+    response_model=PlatformSettingsResponse,
+    summary="What the running process is configured with",
+    dependencies=[Depends(require_platform_user())],
+)
+async def platform_settings() -> PlatformSettingsResponse:
+    """Report the effective configuration, with secrets withheld.
+
+    Read-only on purpose: these values come from the environment, so an
+    editable screen would write somewhere the next restart overwrites. Secrets
+    report only whether they are set — that is a real operational question,
+    and the value itself must not leave the process (spec 70).
+    """
+    settings = get_settings()
+
+    def secret(name: str, value: object, *, note: str | None = None) -> SettingEntry:
+        raw = value.get_secret_value() if hasattr(value, "get_secret_value") else str(value or "")
+        return SettingEntry(name=name, value=None, is_secret=True, is_set=bool(raw), note=note)
+
+    def plain(name: str, value: object, *, note: str | None = None) -> SettingEntry:
+        return SettingEntry(name=name, value=str(value), note=note)
+
+    weak_jwt = settings.jwt_secret.get_secret_value().startswith("change-me")
+
+    return PlatformSettingsResponse(
+        environment=str(settings.environment),
+        groups={
+            "Service": [
+                plain("SERVICE_NAME", settings.service_name),
+                plain("ENVIRONMENT", settings.environment),
+                plain("LOG_LEVEL", settings.log_level),
+                plain("API_BASE_PATH", settings.api_base_path),
+                plain("CORS_ALLOW_ORIGINS", ", ".join(settings.cors_allow_origins)),
+            ],
+            "PostgreSQL": [
+                plain("POSTGRES_HOST", settings.postgres_host),
+                plain("POSTGRES_PORT", settings.postgres_port),
+                plain("POSTGRES_DB", settings.postgres_db),
+                plain("POSTGRES_USER", settings.postgres_user),
+                secret("POSTGRES_PASSWORD", settings.postgres_password),
+                plain("DB_POOL_SIZE", settings.db_pool_size),
+                plain("DB_MAX_OVERFLOW", settings.db_max_overflow),
+            ],
+            "Redis": [
+                plain("REDIS_URL", settings.redis_url),
+                plain(
+                    "REDIS_CALL_STATE_TTL_SECONDS",
+                    settings.redis_call_state_ttl_seconds,
+                    note="How long live call state survives a worker restart.",
+                ),
+            ],
+            "Authentication": [
+                plain("JWT_ALGORITHM", settings.jwt_algorithm),
+                plain("ACCESS_TOKEN_TTL_MINUTES", settings.access_token_ttl_minutes),
+                plain("REFRESH_TOKEN_TTL_DAYS", settings.refresh_token_ttl_days),
+                secret(
+                    "JWT_SECRET",
+                    settings.jwt_secret,
+                    note=(
+                        "Still the built-in development value — every token this "
+                        "platform issues is forgeable until it is replaced."
+                        if weak_jwt
+                        else None
+                    ),
+                ),
+                secret(
+                    "CREDENTIAL_ENCRYPTION_KEY",
+                    settings.credential_encryption_key,
+                    note=(
+                        "Provider keys cannot be stored or read until this is set."
+                        if not settings.credential_encryption_key.get_secret_value()
+                        else "Fernet key that encrypts every stored provider credential."
+                    ),
+                ),
+            ],
+            "LiveKit": [
+                plain("LIVEKIT_URL", settings.livekit_url),
+                plain("LIVEKIT_SIP_URI", settings.livekit_sip_uri),
+                secret("LIVEKIT_API_KEY", settings.livekit_api_key),
+                secret("LIVEKIT_API_SECRET", settings.livekit_api_secret),
+            ],
+            "Object storage": [
+                plain("S3_ENDPOINT_URL", settings.s3_endpoint_url or "(AWS default)"),
+                plain("S3_BUCKET_RECORDINGS", settings.s3_bucket_recordings),
+                plain("S3_REGION", settings.s3_region),
+                secret("S3_ACCESS_KEY_ID", settings.s3_access_key_id),
+                secret("S3_SECRET_ACCESS_KEY", settings.s3_secret_access_key),
+            ],
+        },
     )

@@ -683,3 +683,125 @@ input[aria-invalid="true"] {
     animation-duration: 2s;
   }
 }
+
+/* --- Additions for the routing, catalog and analytics screens ----------- */
+
+/**
+ * A labelled divider inside a long form. The routing and tool dialogs have
+ * several distinct groups of fields, and without a break they read as one
+ * undifferentiated list.
+ */
+.form-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 18px 0 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.form-section-label:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* Two columns where the fields are short, collapsing on a narrow viewport. */
+.form-grid {
+  display: grid;
+  gap: 0 14px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+/* A definition list used for read-only detail panels. */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+.kv dt {
+  color: var(--text-muted);
+}
+.kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/**
+ * A horizontal bar for a proportion. Deliberately plain: these are counts
+ * against a limit, and a chart library for one bar would be indirection.
+ */
+.bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.bar-warn > span {
+  background: var(--warn);
+}
+.bar-err > span {
+  background: var(--err);
+}
+
+/* Day-by-day call volume: one column per day, heights scaled by the caller. */
+.spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 72px;
+}
+.spark > div {
+  flex: 1;
+  min-width: 3px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  min-height: 1px;
+}
+
+/* Tabs for the platform catalog, where providers/models/voices are one topic. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 500;
+}
+
+/* A monospace block for a JSON value in a dialog. */
+.code-block {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0;
+}

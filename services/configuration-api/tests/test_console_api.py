@@ -233,9 +233,9 @@ class TestEveryConsoleSectionIsReachable:
 
     @pytest.mark.parametrize("path", TENANT_PATHS + PLATFORM_PATHS)
     def test_the_section_has_a_route(self, app, path: str) -> None:
-        assert any(route.path == path for route in _console_routes(app)), (
-            f"{path} is missing, so its console section cannot work"
-        )
+        assert any(
+            route.path == path for route in _console_routes(app)
+        ), f"{path} is missing, so its console section cannot work"
 
     def test_every_versioned_route_requires_a_token(self, app) -> None:
         """Only login and refresh may be reached unauthenticated."""
@@ -266,9 +266,7 @@ class TestEveryConsoleSectionIsReachable:
     )
     def test_catalog_writes_require_super_admin(self, app, path: str, method: str) -> None:
         """Spec 8 puts platform-wide changes behind SUPER_ADMIN."""
-        route = next(
-            r for r in _console_routes(app) if r.path == path and method in r.methods
-        )
+        route = next(r for r in _console_routes(app) if r.path == path and method in r.methods)
         flat = " ".join(str(dependency.call) for dependency in route.dependant.dependencies)
         assert "super_admin" in flat, f"{method} {path} is not restricted to SUPER_ADMIN"
 
@@ -323,9 +321,7 @@ class TestBusinessHours:
         from app.api.v1.routing import _is_open_now
 
         today = datetime.now(UTC).date().isoformat()
-        every_day = [
-            self.interval(day, time(0, 0), time(23, 59)) for day in DayOfWeek
-        ]
+        every_day = [self.interval(day, time(0, 0), time(23, 59)) for day in DayOfWeek]
         assert _is_open_now(every_day, "UTC", [{"date": today, "closed": True}]) is False
 
     def test_a_holiday_can_declare_a_day_open(self) -> None:
@@ -381,9 +377,7 @@ class TestToolValidation:
         """A placeholder in a header is as much an input as one in the path."""
         from app.api.v1.tools import _variables
 
-        found = _variables(
-            self.tool("https://api.example.com/x", {"X-Room": "{{room_number}}"})
-        )
+        found = _variables(self.tool("https://api.example.com/x", {"X-Room": "{{room_number}}"}))
         assert found == ["room_number"]
 
     def test_a_url_with_no_variables_yields_none(self) -> None:

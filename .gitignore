@@ -22,6 +22,10 @@ build/
 # Node
 node_modules/
 .next/
+# make build-web writes here so a production build does not fight the dev
+# server over .next on the bind mount.
+.next-build/
+tsconfig.tsbuildinfo
 out/
 npm-debug.log*
 

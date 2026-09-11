@@ -3,10 +3,16 @@
 /**
  * Console shell: sidebar navigation, top bar, signed-in identity.
  *
- * The navigation lists the full section set from spec 61 (tenant) and spec 60
- * (platform), with unbuilt sections shown as disabled rather than hidden.
- * Hiding them would misrepresent how much of the console exists; showing them
- * greyed out with a phase note is honest about what is and is not ready.
+ * The navigation covers the full section set from spec 61 (tenant) and spec 60
+ * (platform), and every entry now leads somewhere real. Two sections depend on
+ * machinery that is not finished — recordings need worker egress (Plan 2b.3)
+ * and knowledge-base ingestion is Phase 6 — so their screens exist, read live
+ * data, and say so on the page. A disabled menu entry would hide the
+ * configuration that *is* usable behind a feature that is not.
+ *
+ * The `permission` on an entry is presentation only. The API enforces RBAC
+ * independently (spec 8); hiding a section prevents a confusing 403, it does
+ * not prevent the request.
  */
 
 import Link from "next/link";
@@ -17,11 +23,11 @@ import { useAuth } from "@/lib/auth";
 
 interface NavEntry {
   label: string;
-  href?: string;
+  href: string;
   /** Permission needed to see it at all. Cosmetic; the API enforces. */
   permission?: string;
-  /** Set when the section is not built yet, and why. */
-  pending?: string;
+  /** Shown as a small tag, for a section whose backing work is incomplete. */
+  note?: string;
 }
 
 interface NavGroup {
@@ -47,27 +53,36 @@ const TENANT_NAV: NavGroup[] = [
     label: "AI Agents",
     entries: [
       { label: "Agents", href: "/agents", permission: "agents.read" },
-      { label: "Routing", permission: "agents.read", pending: "Phase 4" },
-      { label: "Business Hours", permission: "agents.read", pending: "Phase 4" },
-      { label: "Tools", permission: "agents.read", pending: "Phase 6" },
-      { label: "Knowledge Bases", permission: "agents.read", pending: "Phase 6" },
+      { label: "Routing", href: "/routing", permission: "agents.read" },
+      { label: "Business Hours", href: "/business-hours", permission: "agents.read" },
+      { label: "Transfer Targets", href: "/transfer-destinations", permission: "agents.read" },
+      { label: "Tools", href: "/tools", permission: "agents.read" },
+      {
+        label: "Knowledge Bases",
+        href: "/knowledge-bases",
+        permission: "agents.read",
+        // Bases are configurable and assignable now; document ingestion is
+        // Phase 6, which the screen itself explains.
+        note: "no ingest",
+      },
     ],
   },
   {
     label: "Activity",
     entries: [
       { label: "Calls", href: "/calls", permission: "calls.read" },
-      { label: "Recordings", permission: "recordings.read", pending: "Phase 2b" },
       { label: "Transcripts", href: "/calls", permission: "calls.read" },
-      { label: "Analytics", permission: "analytics.read", pending: "Phase 4" },
+      // Live, and empty until the worker starts egress (Plan 2b.3).
+      { label: "Recordings", href: "/recordings", permission: "recordings.read", note: "no egress" },
+      { label: "Analytics", href: "/analytics", permission: "analytics.read" },
     ],
   },
   {
     label: "Administration",
     entries: [
-      { label: "Users", permission: "users.manage", pending: "Phase 3b" },
-      { label: "Usage", permission: "billing.read", pending: "Phase 4" },
-      { label: "Settings", pending: "Phase 4" },
+      { label: "Users", href: "/users", permission: "users.manage" },
+      { label: "Usage", href: "/usage", permission: "billing.read" },
+      { label: "Settings", href: "/settings" },
     ],
   },
 ];
@@ -81,27 +96,27 @@ const PLATFORM_NAV: NavGroup[] = [
   {
     label: "Platform",
     entries: [
-      { label: "Tenants", pending: "Phase 4" },
-      { label: "LiveKit", pending: "Phase 5" },
-      { label: "Infrastructure", pending: "Phase 5" },
-      { label: "Capacity", pending: "Phase 5" },
+      { label: "Tenants", href: "/platform/tenants" },
+      { label: "LiveKit", href: "/platform/livekit" },
+      { label: "Infrastructure", href: "/platform/infrastructure" },
+      { label: "Capacity", href: "/platform/capacity" },
     ],
   },
   {
     label: "AI Catalog",
     entries: [
-      { label: "Providers", pending: "Phase 4" },
-      { label: "Models", pending: "Phase 4" },
-      { label: "Voices", pending: "Phase 4" },
+      { label: "Providers", href: "/platform/providers" },
+      { label: "Models", href: "/platform/models" },
+      { label: "Voices", href: "/platform/voices" },
     ],
   },
   {
     label: "Operations",
     entries: [
-      { label: "System Users", pending: "Phase 3b" },
+      { label: "System Users", href: "/platform/system-users" },
+      { label: "Audit Logs", href: "/platform/audit-logs" },
       { label: "Monitoring", href: "http://localhost:3201" },
-      { label: "Audit Logs", pending: "Phase 3b" },
-      { label: "Settings", pending: "Phase 4" },
+      { label: "Settings", href: "/platform/settings" },
     ],
   },
 ];
@@ -135,37 +150,30 @@ export function Shell({ children }: { children: React.ReactNode }) {
             return (
               <div key={group.label}>
                 <div className="nav-group-label">{group.label}</div>
-                {visible.map((entry) =>
-                  entry.href ? (
+                {visible.map((entry) => {
+                  const external = entry.href.startsWith("http");
+                  return (
                     <Link
-                      key={entry.label}
+                      key={`${entry.label}-${entry.href}`}
                       href={entry.href}
                       className="nav-item"
                       aria-current={pathname === entry.href ? "page" : undefined}
-                      {...(entry.href.startsWith("http")
-                        ? { target: "_blank", rel: "noreferrer" }
-                        : {})}
+                      {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
                     >
                       <span>{entry.label}</span>
-                      {entry.href.startsWith("http") && (
+                      {external && (
                         <span className="subtle" aria-hidden>
                           ↗
                         </span>
                       )}
+                      {entry.note && (
+                        <span className="badge badge-neutral" style={{ fontSize: 10 }}>
+                          {entry.note}
+                        </span>
+                      )}
                     </Link>
-                  ) : (
-                    <span
-                      key={entry.label}
-                      className="nav-item is-disabled"
-                      title={`Not built yet — ${entry.pending}`}
-                    >
-                      <span>{entry.label}</span>
-                      <span className="badge badge-neutral" style={{ fontSize: 10 }}>
-                        {entry.pending}
-                      </span>
-                    </span>
-                  ),
-                )}
+                  );
+                })}
               </div>
             );
           })}
