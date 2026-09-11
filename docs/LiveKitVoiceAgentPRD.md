@@ -274,6 +274,12 @@ be exposed to normal tenant administrators: Redis, RTC ports, TCP ports, RTP por
 external IP, TLS certificates, load balancers, Kubernetes, networking, firewall, cluster
 topology.
 
+Two of these turned out to be load-bearing in a way worth recording, because both broke calls
+while looking like application faults. **The advertised external IP** must be an address the
+*client* can route to — a container address satisfies the configuration and fails every call.
+And **any port whose number appears in an ICE candidate** must not be renumbered by a port
+mapping. Neither failure names a port or an address in its error.
+
 Tenant-level LiveKit configuration **must** be UI/API managed. [§13]
 
 ### 7.5 LiveKit's own administration surfaces [§11]
@@ -903,6 +909,12 @@ plaintext configuration, or agent prompts. [§54]
 
 Secrets must never be exposed to the frontend. [§80]
 
+**The LiveKit API key pair is a signing secret, not just an admin credential.** Join tokens are
+signed with it, so anyone holding it can mint a token for any room and join any call in
+progress. It therefore comes from the environment (`LIVEKIT_KEYS`) and never from a file in the
+repository — the development config previously carried the pair from LiveKit's own published
+examples, which is the worst possible default for a value with that property.
+
 ### 15.3 Import / Export [§65]
 
 Allow tenant configuration export/import covering Agents, Agent Versions, Tools, Routing,
@@ -1069,11 +1081,14 @@ every request refuses.
 | Integration | PBX → SIP → LiveKit → AI Agent → STT → LLM → TTS |
 | End-to-end | actual SIP/phone calls through the complete system |
 
-The integration row is deliberately the whole chain. A browser-based test client (LiveKit's
-Agents Playground, §9d.7 of the README) bypasses SIP and is a **diagnostic, not a substitute**:
-its value is separating a telephony fault from a pipeline fault, which the end-to-end path
-cannot do. It does not work against the current worker, which requires a SIP participant in
-order to resolve a tenant at all — Plan item 2b.10.
+The integration row is deliberately the whole chain. The console's **Call Test** button
+(§9d.7 of the README) bypasses SIP and is a **diagnostic, not a substitute**: its value is
+separating a telephony fault from a pipeline fault, which the end-to-end path cannot do.
+
+It is not a replacement for the end-to-end row, and the reason is measured rather than
+cautionary. A browser sends wideband audio; a phone sends 8 kHz. On a real call
+`faster-whisper-tiny` rendered *"the future of telephony"* as *"the future up to Lafini"* —
+a failure the browser path cannot reproduce and would never have surfaced.
 
 ### 18.2 Load Testing [§71]
 

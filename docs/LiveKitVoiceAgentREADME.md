@@ -146,7 +146,9 @@ The intended structure. Do **not** collapse this into a monolith.
 ├── services/
 │   ├── configuration-api/          # Control Plane — FastAPI
 │   │   ├── app/
-│   │   │   ├── api/v1/             # routers: tenants, pbxs, sip_trunks, agents, ...
+│   │   │   ├── api/v1/             # routers: pbxs, sip_trunks, agents, routing, catalog,
+│   │   │   │                     #   admin, platform, browser_test (the one that
+│   │   │   │                     #   issues a credential — see §9d.7)
 │   │   │   ├── core/               # settings, security, JWT, RBAC, tenant context
 │   │   │   ├── db/                 # SQLAlchemy models, session, repositories
 │   │   │   ├── schemas/            # Pydantic request/response models
@@ -169,13 +171,20 @@ The intended structure. Do **not** collapse this into a monolith.
 │   │   │   ├── tools/              # HTTP tool executor, variable substitution
 │   │   │   ├── rag/                # pgvector retrieval
 │   │   │   ├── transfer/           # summary generation, destination handling
-│   │   │   └── resilience/         # timeout, retry, backoff, circuit breaker, fallback
+│   │   │   └── resilience/         # spec 55. Fallback is done — the provider chain
+│   │   │                         #   becomes a LiveKit FallbackAdapter. Timeout,
+│   │   │                         #   retry, backoff and circuit breaker are NOT:
+│   │   │                         #   this package is still only a docstring (4b.10)
 │   │   └── tests/
 │   │
 │   ├── frontend/                   # Next.js — platform console + tenant console
-│   │   ├── app/
+│   │   ├── app/                    # one directory per console section
 │   │   ├── components/
-│   │   └── lib/
+│   │   │   ├── Shell.tsx           # sidebar, navigation, identity
+│   │   │   ├── ProviderChain.tsx   # STT/LLM/TTS per tier, keys, connection test
+│   │   │   ├── BrowserCall.tsx     # the Call Test panel (livekit-client)
+│   │   │   └── ui.tsx              # buttons, fields, dialogs, badges, toasts
+│   │   └── lib/                    # typed API client; no tenant ID anywhere in it
 │   │
 │   └── shared/                     # cross-service Python package (pip-installable)
 │       ├── pyproject.toml
@@ -291,16 +300,25 @@ advertises them and a host/container mismatch breaks calls rather than erroring 
 |---|---|
 | SIP `5060/udp` + `5060/tcp` | `livekit-sip` announces its own port in SIP `Via`/`Contact` headers |
 | RTP `10100-10149/udp` | advertised in SDP |
-| RTC `50100-50149/udp` | advertised in ICE candidates |
+| RTC `50100/udp` | advertised in ICE candidates |
+| RTC `7981/tcp` | advertised in ICE candidates |
 
 To change one of those, change it in `deploy/docker-compose.yml` **and** the matching LiveKit
 config (`deploy/livekit/livekit-sip.yaml` `sip_port` / `rtp_port`, or
-`deploy/livekit/livekit.yaml` `rtc.port_range_*`) together.
+`deploy/livekit/livekit.yaml` `rtc.udp_port` / `rtc.tcp_port`) together. A mapping that
+renumbers one of these — `7981:7881`, say — points a browser at a closed port and the call
+fails with `NegotiationError: negotiation timed out`, naming neither the port nor the time.
 
-The development media ranges are deliberately narrow — 50 ports each. Every published port
-becomes a forwarding entry on Docker Desktop, and a 10,000-port range makes `compose up` take
-minutes. Roughly two ports per concurrent call, so this supports a handful of simultaneous
-calls: enough for Phases 1–2, widened in the Helm values for load testing.
+**RTC media is one muxed UDP port, not a range.** It was a 50-port range, and that turned out
+to cost real latency: every port becomes its own ICE candidate and its own Docker Desktop
+forwarding entry, and gathering across fifty of them took about 15 seconds — past
+livekit-client's negotiation timeout. Muxing brought it to ~7 s and is what LiveKit recommends
+in production anyway. Spec 11's port-range administration belongs in the Helm values, where
+the range actually buys something.
+
+RTP for SIP is still a range (`10100-10149/udp`), roughly two ports per concurrent call, so
+this supports a handful of simultaneous calls: enough for Phases 1–2, widened in the Helm
+values for load testing.
 
 ### Health checks
 
@@ -357,10 +375,15 @@ see [§17](#17-security-notes).
 
 | Variable | Purpose |
 |---|---|
-| `LIVEKIT_URL` | e.g. `ws://livekit:7880` |
-| `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | admin API credentials |
+| `LIVEKIT_URL` | How *services* reach LiveKit: `ws://livekit:7880` |
+| `LIVEKIT_PUBLIC_URL` | How a *browser* reaches it: `ws://localhost:7980`. Not the same value, and the API hands this one to the console — see §9d.7 |
+| `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Admin API credentials, and what join tokens are signed with. Compose builds `LIVEKIT_KEYS` from them, so no key lives in `livekit.yaml` — generate the secret with `openssl rand -hex 32` |
+| `LIVEKIT_NODE_IP` | The address LiveKit advertises in ICE candidates. **Defaults to `SIP_NAT_IP`**, because they are the same fact and two variables holding it means one goes stale. `make refresh-ip` updates it |
+| `LIVEKIT_IMAGE_TAG` | Server version, pinned (`v1.9`). v1.8 answers protocol 15 and the current browser SDK opens a datachannel it rejects — see §12.1 of the Plan |
 | `LIVEKIT_SIP_URI` | SIP entry point advertised to PBXs |
-| `LIVEKIT_RTP_PORT_RANGE` | infrastructure-controlled; not tenant-visible |
+| `LIVEKIT_RTP_PORT_RANGE` | Infrastructure-controlled; not tenant-visible |
+| `ALLOW_BROWSER_TEST_SESSIONS` | Lets the console mint a join token for a test call (§9d.7). Development only |
+| `ALLOW_BROWSER_TEST_PARTICIPANT` | Lets the worker answer a browser caller. Development only |
 
 ### Object storage
 
@@ -723,11 +746,39 @@ fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username
 `+OK <uuid>` means the agent answered. `-ERR NO_ANSWER` means it did not — see
 §9a.10.
 
-To give the agent real speech to transcribe, replace `&park` with a playback:
+To give the agent real speech to transcribe, **keep `&park` and broadcast into
+the live call** once the greeting has finished:
 
 ```bash
-fs_cli -x "originate {origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060 &playback(/usr/share/freeswitch/sounds/en/us/callie/ivr/8000/ivr-welcome_to_freeswitch.wav)"
+UUID=$(uuidgen | tr 'A-Z' 'a-z')
+fs_cli -x "originate {origination_uuid=$UUID,origination_caller_id_number=15550001111,sip_auth_username=lkdev,sip_auth_password=YOUR_PASSWORD}sofia/external/sip:1801@LIVEKIT_HOST:5060 &park"
+sleep 12   # let the greeting play out
+fs_cli -x "uuid_broadcast $UUID /usr/share/freeswitch/sounds/en/us/callie/ivr/8000/ivr-welcome_to_freeswitch.wav aleg"
+sleep 20   # give the agent time to answer
+fs_cli -x "uuid_kill $UUID"
 ```
+
+**Do not use `originate … &playback(...)` instead.** FreeSWITCH hangs up as
+soon as the file ends — 2.6 s for that clip — which is before the agent's
+greeting finishes. The result is a call with audio flowing in both directions,
+a `COMPLETED` row, and **zero transcript segments**: indistinguishable from a
+broken pipeline, and this document recommended it for some time.
+
+Speaking over the greeting has the same effect for a different reason: the
+greeting is agent speech, so the caller's audio arrives as barge-in and the
+turn is discarded. That is what the `sleep 12` is for.
+
+A successful run looks like this:
+
+```
+AI     : Hello. You are through to the development voice agent…
+CALLER : Welcome to FreeSwitch, the future up to Lafini.
+AI     : Thank you! How can I assist you today?
+```
+
+Note the transcript. The recording says *"the future of telephony"* — that is
+`faster-whisper-tiny` on 8 kHz telephony audio, and it is why Plan 2b.9 is
+still open.
 
 To hear the agent yourself, register a softphone to the PBX and dial the agent
 number.
@@ -978,7 +1029,7 @@ misread as a fault:
 | Entering a provider API key and testing it in the UI | Working — §9c.2. The last CLI-only tenant step is gone. |
 | Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
 | Provider timeout, retry, backoff, circuit breaker | **Not yet — Plan 4b.10.** A *slow* provider does not trigger fallover. |
-| Testing the agent from a browser instead of a phone | **Not yet.** The worker requires a SIP participant, so LiveKit's Agents Playground connects and is ignored — §9d.7, Plan 2b.10. |
+| Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
 
@@ -1244,7 +1295,7 @@ navigation and a platform account has no tenant to act in.
 | Prometheus | http://localhost:9290 | Working, metrics scraped |
 | MinIO console | http://localhost:9201 | Working, empty until recording lands (Phase 2b.3) |
 | LiveKit admin UI | — | **None exists** for self-hosted LiveKit. The platform console is the configuration surface, by design — §9d.6 |
-| Agents Playground | — | Not deployed, and blocked on Plan 2b.10 — §9d.7 |
+| **Call Test** (browser call) | in the console, per number | **Working** — §9d.7. Replaced LiveKit's Agents Playground, which cannot declare which DID it is calling |
 
 #### Tenant console sections
 
@@ -1472,8 +1523,10 @@ The useful question about LiveKit here is "does it still match the records",
 not "what does it contain".
 
 The one genuinely UI-less piece is infrastructure configuration:
-`deploy/livekit/livekit.yaml` holds the RTC port range, TURN, Redis address and
-API keys. That is platform/DevOps controlled under §13 and must never reach a
+`deploy/livekit/livekit.yaml` holds the RTC ports, TURN and the Redis address.
+It holds **no API key**: the pair arrives as `LIVEKIT_KEYS` from the
+environment, because the file used to carry `devkey`/`devsecret-…` — the values
+from LiveKit's own examples — committed to this repository. That is platform/DevOps controlled under §13 and must never reach a
 tenant administrator — the file's own header says so. Its runtime behaviour is
 observed through Grafana (§12), not edited through a console.
 
@@ -1497,8 +1550,20 @@ ALLOW_BROWSER_TEST_SESSIONS=true      # the console endpoint
 ALLOW_BROWSER_TEST_PARTICIPANT=true   # the worker accepting a browser caller
 ```
 
-Both are already set in the development `.env`. Both are refused outside
-`environment=development` whatever they say.
+Both are already set in the development `.env`, and both are refused outside
+`environment=development` whatever they say. Nothing else is needed — no
+separate client, no room to create by hand.
+
+`make test-room DID=1801` still exists for driving a client of your own: it
+creates the room with the DID in its metadata *and* dispatches the agent, which
+the console endpoint also does. Both are needed — the worker registers under an
+explicit agent name, so LiveKit will not dispatch it into a room on its own,
+and a room without the dispatch gets a participant, no agent, and silence.
+
+LiveKit's own Agents Playground was tried and dropped: it mints its own token
+and cannot declare which DID it is calling, so it only reaches an agent through
+a pre-created room, and the button does that better. It is not in the compose
+file.
 
 #### Why it needs two gates and a credential
 
@@ -1911,6 +1976,24 @@ Two worth knowing before you debug anything SIP-related:
 
 Set `SIP_LOG_LEVEL=debug` before investigating a rejected call. The info-level SIP logs do not
 say why.
+
+Three more from getting browser calls working, because each one presented as something else:
+
+- **A call that connects and then reconnects every ten seconds** was
+  `livekit-server:v1.8` rejecting a datachannel the current browser SDK opens.
+  `unsupported datachannel added` then `error reading data channel` sit in the *server* log at
+  info level; the browser only ever says `NegotiationError: negotiation timed out`. Pinned to
+  `v1.9`.
+- **`LIVEKIT_NODE_IP` going stale** when the machine changes network. LiveKit then advertises an
+  address that no longer exists, media never flows, and the error mentions neither addresses nor
+  networks. It now defaults to `SIP_NAT_IP`; `make refresh-ip` updates both.
+- **Any port that appears in an ICE candidate must not be renumbered by the port mapping.**
+  `7981:7881` made a browser dial a closed port. `livekit.yaml` and the published port have to
+  agree.
+
+A general rule earned expensively here: **a repeating interval in a log is a timeout, not a
+coincidence.** Three plausible network misconfigurations were found and fixed before anyone
+asked what the recurring ten seconds belonged to, and none of them was the fault.
 
 ---
 

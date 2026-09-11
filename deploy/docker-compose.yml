@@ -314,31 +314,6 @@ services:
       - frontend-next-cache:/app/.next
 
   # ----------------------------------------------------------------------- #
-  # Browser test client (Plan 2b.10) — development only
-  #
-  # Behind a profile, so `make up` does not start it: it is a measuring
-  # instrument, not part of the platform. It also only reaches an agent when
-  # the worker's ALLOW_BROWSER_TEST_PARTICIPANT is on and the room carries a
-  # DID — see `make test-room`.
-  # ----------------------------------------------------------------------- #
-  playground:
-    profiles: ["testing"]
-    build:
-      context: playground
-      args:
-        PLAYGROUND_REF: ${PLAYGROUND_REF:-main}
-    restart: unless-stopped
-    environment:
-      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
-      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret-at-least-32-characters-long}
-      # Read by the browser, so it must be the host-visible address rather
-      # than the compose service name — the same trap as the frontend's
-      # NEXT_PUBLIC_API_BASE_URL.
-      NEXT_PUBLIC_LIVEKIT_URL: ${PLAYGROUND_LIVEKIT_URL:-ws://localhost:${LIVEKIT_PORT:-7980}}
-    ports:
-      - "${PLAYGROUND_PORT:-3202}:3000"
-
-  # ----------------------------------------------------------------------- #
   # Object storage — recordings never go in PostgreSQL (spec 3, 39)
   # ----------------------------------------------------------------------- #
   minio:

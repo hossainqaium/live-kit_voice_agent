@@ -249,8 +249,8 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
 | 2b.9 | STT latency. **Reopened on evidence**: self-hosted `faster-whisper-tiny` on this host gives p50 773 ms but p95 2655 ms sequentially, and a realtime factor below 1 at two concurrent calls — it cannot hold a conversation. Hosted measured 1103 ms with a flat tail. The work is no longer "move it local" but "decide per deployment, on measured numbers, and give self-hosted the hardware it needs". See §12.1. | **defect** | §25, §56 |
-| ~~2b.10~~ | **Browser test call from the console.** **Done**: a green-handset **Call Test** button on any active number with an agent behind it. `POST /browser-test/session` mints a scoped join token — the only endpoint in the platform that issues a credential, so its four guards are asserted rather than reviewed. Needed `LIVEKIT_NODE_IP` and a separate `LIVEKIT_PUBLIC_URL`; see §12.1. | ~~tooling~~ | §70 |
-| 2b.11 | **Synchronous work on the agent event loop.** One block per call between configuration load and session start, 1020 ms. **Partly fixed**: loading Silero in `prewarm_fnc` brings it to 628 ms; the remainder is inside `AgentSession.start` and needs a profiler, the provider constructors having been measured and ruled out. It delays the greeting, not the turn metrics. | **defect** (partly) | §28, §56 |
+| ~~2b.10~~ | **Browser test call from the console.** **Done**: a green-handset **Call Test** button on Phone Numbers, for any active number with an agent. `POST /browser-test/session` mints a scoped join token — the only endpoint in the platform that issues a credential, so its four guards are asserted rather than reviewed. Getting audio working took a stale `NODE_IP`, concurrent participant waits, no STUN, and a server upgrade; see §12.1. | ~~tooling~~ | §70 |
+| 2b.11 | **Synchronous work on the agent event loop.** One block per call between configuration load and session start, 1020 ms, from loading Silero per call. **Mostly fixed**: `prewarm_fnc` brings it to 628 ms. The remainder is inside `AgentSession.start`; the provider constructors were measured and ruled out at 3-34 ms. It delays the greeting, not the turn metrics. | **defect** (partly) | §28, §56 |
 | 2b.8 | Repeated-measurement harness, then the 10-concurrent-call one. Must report **realtime factor** per stage and not only latency: it is what says whether a configuration can hold a conversation, and it is what exposed the STT ceiling. Now a prerequisite for 2b.7 rather than a later nicety. | feature | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
@@ -1645,24 +1645,31 @@ Rewritten to parse the function with `ast` and read the keywords actually
 passed to `VideoGrants`. Any test that greps source text is really testing the
 prose around it.
 
-#### The Agents Playground connects but no agent ever joins
+#### A browser client joins and no agent ever answers
 
-Symptom: the browser client joins the room and appears as a participant, nothing
-ever speaks, and the worker logs `no_sip_participant` once the participant
-timeout expires. No call row is written, so the attempt leaves no trace in the
-database either.
+Applies to any client of your own — the console's **Call Test** button handles
+this itself.
 
-Cause: `_await_sip_participant` in `worker/entrypoint.py` matches only
-`PARTICIPANT_KIND_SIP`. A browser participant is `PARTICIPANT_KIND_STANDARD`, so
-the job is abandoned — deliberately, because without SIP attributes there is no
-DID, without a DID there is no tenant, and a call attributed to no tenant would
-violate §6.
+Symptom: the client joins the room and appears as a participant, nothing ever
+speaks, and the worker logs `no_caller` once the participant timeout expires.
+No call row is written, so the attempt leaves no trace in the database either.
 
-No configuration changes this; the hosted playground cannot work against this
-worker as written. A browser test path needs the development-only branch recorded
-as item 2b.10. Worth knowing *before* reaching for the playground to debug audio,
-because its symptom — silence — is indistinguishable from the endpointing defect
-above, and mistaking one for the other costs an afternoon.
+Two independent causes, either of which produces exactly this:
+
+1. **The participant declared no DID.** The worker accepts a non-SIP caller
+   only when one arrives in a participant attribute or the room's metadata
+   (`did`, `test.did`, `sip.trunkPhoneNumber`). Without it there is no tenant
+   to attribute the call to, and a call row with a null tenant would violate
+   §6 — so it is refused, exactly as a SIP-less call is.
+2. **No agent was dispatched into the room.** The worker registers under an
+   explicit agent name, and LiveKit only auto-dispatches agents registered
+   *without* one. A room created by hand therefore gets a participant, no
+   agent, and silence. `make test-room` creates the room *and* the dispatch for
+   this reason, and the console endpoint does both too.
+
+LiveKit's own Agents Playground was evaluated and dropped: it mints its own
+token and cannot declare which DID it is calling, so it only reaches an agent
+through a room someone else prepared. It is not in the compose file.
 
 #### Testing against a real PBX without touching its configuration
 
@@ -1714,7 +1721,7 @@ rediscover:
 | 5 | Orphan detection needs the LiveKit-to-database direction, not just per-row checks. |
 | 5 | `UpdateSIPInboundTrunk` may still be unimplemented; keep the delete-and-recreate path and the dependent-rule rebuild. |
 | 7 | IP allow-listing must be verified on real infrastructure. It cannot be validated on Docker Desktop at all. |
-| 8 | Media port ranges are 50 ports each in development, roughly two per call. Widen them in the Helm values before load testing, or concurrency caps out around 25 calls for reasons that look like LiveKit faults. |
+| 8 | **RTC media is one muxed UDP port** in development, not a range — a range cost 15 s of ICE gathering per call through Docker Desktop (§12.1). Muxing is also LiveKit's production advice, so the Helm values should mux too rather than widening a range. SIP's RTP range is still 50 ports, roughly two per call, and does need widening before load testing or concurrency caps near 25 calls for reasons that look like LiveKit faults. |
 
 ---
 

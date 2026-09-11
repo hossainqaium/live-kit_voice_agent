@@ -14,12 +14,11 @@ API_PORT      ?= $(shell grep -E '^API_PORT=' .env 2>/dev/null | cut -d= -f2)
 FRONTEND_PORT ?= $(shell grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d= -f2)
 WORKER_PORT   ?= $(shell grep -E '^WORKER_HEALTH_PORT=' .env 2>/dev/null | cut -d= -f2)
 GRAFANA_PORT  ?= $(shell grep -E '^GRAFANA_PORT=' .env 2>/dev/null | cut -d= -f2)
-PLAYGROUND_PORT ?= $(shell grep -E '^PLAYGROUND_PORT=' .env 2>/dev/null | cut -d= -f2)
 
 .DEFAULT_GOAL := help
 .PHONY: help env preflight build up down restart logs ps urls health \
         migrate migration downgrade psql redis  \
-        test-room playground playground-down browser-test \
+        test-room browser-test refresh-ip \
         typecheck-web build-web check-web \
         test test-unit test-api test-worker test-shared test-integration test-e2e \
         lint fmt fmt-check typecheck check load-test clean nuke
@@ -206,17 +205,9 @@ nuke: ## Remove containers AND volumes — destroys local data
 # endpointing measurable in seconds instead of one phone call at a time. The
 # worker gate is off by default and refused outside development.
 # --------------------------------------------------------------------------- #
-test-room: ## Create a LiveKit room carrying a DID (make test-room DID=1001)
+test-room: ## Create a room + agent dispatch for a DID, for a client of your own
 	@test -n "$(DID)" || (echo "usage: make test-room DID=1001" && exit 2)
 	$(API) python -m app.cli create-test-room --did "$(DID)" --room "$(or $(ROOM),browser-test)"
-
-playground: ## Start the browser test client (first run builds it, a few minutes)
-	$(COMPOSE) --profile testing up -d playground
-	@echo "playground  http://localhost:$(PLAYGROUND_PORT)"
-	@echo "connect it to the room from 'make test-room', and publish a microphone"
-
-playground-down: ## Stop the browser test client
-	$(COMPOSE) --profile testing stop playground
 
 browser-test: ## Turn the worker gate on, restart it, and print what to do next
 	@grep -q '^ALLOW_BROWSER_TEST_PARTICIPANT=true' .env \
