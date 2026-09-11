@@ -11,7 +11,18 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.api.v1 import agents, auth, calls, pbxs, phone_numbers, sip_trunks
+from app.api.v1 import (
+    admin,
+    agents,
+    auth,
+    calls,
+    pbxs,
+    phone_numbers,
+    platform,
+    routing,
+    sip_trunks,
+    tools,
+)
 from app.core.dependencies import reject_client_tenant_id
 
 api_router = APIRouter(dependencies=[Depends(reject_client_tenant_id)])
@@ -22,6 +33,10 @@ api_router.include_router(sip_trunks.router)
 api_router.include_router(phone_numbers.router)
 api_router.include_router(agents.router)
 api_router.include_router(calls.router)
+api_router.include_router(routing.router)
+api_router.include_router(tools.router)
+api_router.include_router(admin.router)
 
-# Still to come: tenants, providers, voices, tools, knowledge-bases,
-# routing-rules, business-hours, users, analytics, usage.
+# Platform console last, and under its own /platform prefix, so a tenant route
+# can never be shadowed by a platform one added later.
+api_router.include_router(platform.router)

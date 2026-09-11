@@ -125,6 +125,17 @@ class LiveKitAdminClient:
             except aiohttp.ClientError as exc:
                 raise LiveKitUnavailableError(f"{operation}: {exc}") from exc
 
+    async def room_count(self) -> int:
+        """How many rooms LiveKit currently holds.
+
+        The closest thing LiveKit will report to live concurrency, and what the
+        capacity dashboard (spec 48) shows next to the database's own count of
+        in-flight calls. A disagreement between the two is the useful signal:
+        it means a call ended without the worker writing its terminal state.
+        """
+        rooms = await self.call("room_count", lambda api: api.room.list_rooms(ListRoomsRequest()))
+        return len(getattr(rooms, "rooms", None) or [])
+
     async def health(self) -> bool:
         """Whether the LiveKit admin API is answering.
 

@@ -1,0 +1,314 @@
+"""Platform console schemas (spec 60).
+
+Tenants, the AI provider catalog, audit history and capacity. Everything here
+is platform-scoped: no request body carries a tenant ID for the caller to
+choose, except the tenant resource itself, which *is* the thing being created.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field, IPvAnyAddress, field_validator
+
+from app.schemas.common import TimestampedResponse
+from shared.models import ProviderKind, ResourceStatus, TenantStatus
+
+_SLUG_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+
+
+def _validate_slug(value: str) -> str:
+    """A slug ends up in URLs and LiveKit metadata, so keep it boring."""
+    lowered = value.strip().lower()
+    if not lowered:
+        raise ValueError("a slug cannot be empty")
+    if set(lowered) - _SLUG_ALLOWED:
+        raise ValueError("a slug may contain only lowercase letters, digits and hyphens")
+    if lowered.startswith("-") or lowered.endswith("-"):
+        raise ValueError("a slug cannot start or end with a hyphen")
+    return lowered
+
+
+# --------------------------------------------------------------------------- #
+# Tenants
+# --------------------------------------------------------------------------- #
+
+
+class TenantCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    slug: str = Field(min_length=2, max_length=100)
+
+    timezone: str = Field(default="UTC", max_length=64)
+    default_language: str = Field(default="en", max_length=16)
+
+    #: Null means no limit. Spec 47 makes these the platform's lever, which is
+    #: why they are settable here and not in the tenant's own settings.
+    max_concurrent_calls: int | None = Field(default=None, ge=1, le=10000)
+    max_daily_calls: int | None = Field(default=None, ge=1)
+    max_monthly_minutes: int | None = Field(default=None, ge=1)
+
+    notes: str | None = Field(default=None, max_length=4000)
+
+    #: The first administrator. Creating a tenant with no way to sign in would
+    #: leave the platform operator to do it in two steps, and the second step
+    #: is the one that gets forgotten.
+    admin_email: str | None = None
+    admin_full_name: str | None = Field(default=None, max_length=255)
+    admin_password: str | None = Field(default=None, min_length=12, max_length=72)
+
+    @field_validator("slug")
+    @classmethod
+    def _slug(cls, value: str) -> str:
+        return _validate_slug(value)
+
+
+class TenantUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    status: TenantStatus | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+    default_language: str | None = Field(default=None, max_length=16)
+    max_concurrent_calls: int | None = Field(default=None, ge=1, le=10000)
+    max_daily_calls: int | None = Field(default=None, ge=1)
+    max_monthly_minutes: int | None = Field(default=None, ge=1)
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+class TenantSummary(TimestampedResponse):
+    """A tenant plus the counts the platform list view needs."""
+
+    name: str
+    slug: str
+    status: TenantStatus
+    timezone: str
+    default_language: str
+
+    max_concurrent_calls: int | None
+    max_daily_calls: int | None
+    max_monthly_minutes: int | None
+    notes: str | None
+
+    user_count: int = 0
+    agent_count: int = 0
+    pbx_count: int = 0
+    phone_number_count: int = 0
+    calls_last_30_days: int = 0
+    active_calls: int = 0
+
+    #: Present only in the create response, and only when an administrator was
+    #: requested. Never a password — just the address to hand over.
+    admin_email: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Provider catalog
+# --------------------------------------------------------------------------- #
+
+
+class ProviderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ProviderKind
+    slug: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=1, max_length=128)
+
+    supports_streaming: bool = True
+    default_base_url: str | None = Field(default=None, max_length=512)
+
+    #: False for a self-hosted provider reached over the LAN (spec 25). The
+    #: agent validator reads this, so getting it wrong either blocks a valid
+    #: self-hosted setup or lets a cloud provider be selected with no key.
+    requires_credential: bool = True
+
+    notes: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("slug")
+    @classmethod
+    def _slug(cls, value: str) -> str:
+        return _validate_slug(value)
+
+
+class ProviderUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    status: ResourceStatus | None = None
+    supports_streaming: bool | None = None
+    default_base_url: str | None = Field(default=None, max_length=512)
+    requires_credential: bool | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+class ProviderResponse(TimestampedResponse):
+    kind: ProviderKind
+    slug: str
+    display_name: str
+    status: ResourceStatus
+    supports_streaming: bool
+    default_base_url: str | None
+    requires_credential: bool
+    notes: str | None
+
+    model_count: int = 0
+    voice_count: int = 0
+
+    #: How many tenants hold a credential for it. Platform staff never see the
+    #: keys themselves — spec 26 keeps those write-only — but knowing a
+    #: provider is in use is what stops it being retired by accident.
+    credential_count: int = 0
+
+
+class ModelCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: uuid.UUID
+    slug: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(min_length=1, max_length=128)
+    languages: list[str] = Field(default_factory=list)
+    is_default: bool = False
+
+
+class ModelUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    languages: list[str] | None = None
+    status: ResourceStatus | None = None
+    is_default: bool | None = None
+
+
+class ModelResponse(TimestampedResponse):
+    provider_id: uuid.UUID
+    provider_slug: str | None = None
+    provider_kind: ProviderKind | None = None
+    slug: str
+    display_name: str
+    languages: list[str]
+    status: ResourceStatus
+    is_default: bool
+
+
+class VoiceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: uuid.UUID
+
+    #: The provider's own identifier, passed through to the TTS call verbatim.
+    voice_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+
+    language: str | None = Field(default=None, max_length=16)
+    accent: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=4000)
+    is_default: bool = False
+
+
+class VoiceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    language: str | None = Field(default=None, max_length=16)
+    accent: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=4000)
+    status: ResourceStatus | None = None
+    is_default: bool | None = None
+
+
+class VoiceResponse(TimestampedResponse):
+    provider_id: uuid.UUID
+    provider_slug: str | None = None
+    voice_id: str
+    name: str
+    language: str | None
+    accent: str | None
+    description: str | None
+    status: ResourceStatus
+    is_default: bool
+    sample_object_key: str | None
+
+
+# --------------------------------------------------------------------------- #
+# Audit history (spec 69)
+# --------------------------------------------------------------------------- #
+
+
+class AuditLogResponse(BaseModel):
+    """One audit entry.
+
+    ``old_value``/``new_value`` are already redacted on write, so this returns
+    them as stored rather than redacting again at read time — redacting twice
+    would hide the fact that something was not redacted on the way in.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    occurred_at: datetime
+    tenant_id: uuid.UUID | None
+    user_id: uuid.UUID | None
+    user_email: str | None
+    action: str
+    resource_type: str
+    resource_id: str | None
+    old_value: dict | None
+    new_value: dict | None
+
+    #: The column is PostgreSQL ``INET``, so the driver hands back an
+    #: ``IPv4Address``/``IPv6Address`` object, not a string. Typing this ``str``
+    #: made every read of the trail fail validation.
+    ip_address: IPvAnyAddress | None
+    request_id: str | None
+
+    #: Resolved for display. Null when the tenant was deleted after the fact,
+    #: which is exactly when an audit row matters most.
+    tenant_name: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Capacity and infrastructure (spec 48)
+# --------------------------------------------------------------------------- #
+
+
+class ComponentHealth(BaseModel):
+    """One dependency's state, as actually probed."""
+
+    name: str
+    reachable: bool
+
+    #: Round trip in milliseconds. Null when the probe failed, rather than 0,
+    #: which would read as "instant".
+    latency_ms: float | None = None
+    detail: str | None = None
+
+
+class CapacityResponse(BaseModel):
+    """Platform capacity (spec 48).
+
+    Counts come from PostgreSQL and LiveKit. Worker headroom is reported as
+    the number of LiveKit rooms against the configured concurrency sum rather
+    than as a guess at CPU: the plan's autoscaling signal is Phase 5, and
+    inventing a utilisation percentage now would be a number nobody can act
+    on.
+    """
+
+    tenant_count: int
+    active_tenant_count: int
+    agent_count: int
+    published_agent_count: int
+    phone_number_count: int
+    sip_trunk_count: int
+
+    active_calls: int
+    calls_last_24h: int
+
+    #: Sum of every tenant's ``max_concurrent_calls``. Null when at least one
+    #: tenant is uncapped, because the sum would then be a floor presented as
+    #: a ceiling.
+    licensed_concurrent_calls: int | None = None
+
+    livekit_rooms: int | None = None
+    components: list[ComponentHealth] = Field(default_factory=list)

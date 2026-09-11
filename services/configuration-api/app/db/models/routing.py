@@ -7,6 +7,7 @@ destinations).
 from __future__ import annotations
 
 import uuid
+from datetime import time
 
 from sqlalchemy import (
     Boolean,
@@ -75,8 +76,10 @@ class BusinessHoursInterval(Base, UUIDPrimaryKeyMixin, TenantOwnedMixin, Timesta
         index=True,
     )
     day_of_week: Mapped[DayOfWeek] = enum_column(DayOfWeek, nullable=False, index=True)
-    opens_at: Mapped[object] = mapped_column(Time, nullable=False)
-    closes_at: Mapped[object] = mapped_column(Time, nullable=False)
+    #: Local wall-clock times in the schedule's own timezone, which is why
+    #: they are ``Time`` and not ``DateTime``: business hours recur.
+    opens_at: Mapped[time] = mapped_column(Time, nullable=False)
+    closes_at: Mapped[time] = mapped_column(Time, nullable=False)
 
 
 class RoutingRule(Base, UUIDPrimaryKeyMixin, TenantOwnedMixin, TimestampMixin):
