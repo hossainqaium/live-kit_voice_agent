@@ -248,10 +248,10 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.5 | Conversation summarisation into `call_transcripts.summary`, which is also what the warm-transfer whisper reads. | feature | §34, §36 |
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
-| 2b.9 | Move STT to the self-hosted endpoint and re-measure. **Configuration done and measured at the provider** (see §12.1): warm p50 548 ms against 1103 ms on OpenAI. Re-measurement *on a call* is still open, and so is the cold-start cost. | **defect** (partly) | §25, §56 |
+| 2b.9 | STT latency. **Reopened on evidence**: self-hosted `faster-whisper-tiny` on this host gives p50 773 ms but p95 2655 ms sequentially, and a realtime factor below 1 at two concurrent calls — it cannot hold a conversation. Hosted measured 1103 ms with a flat tail. The work is no longer "move it local" but "decide per deployment, on measured numbers, and give self-hosted the hardware it needs". See §12.1. | **defect** | §25, §56 |
 | ~~2b.10~~ | **Browser-based test client.** **Done**: `ALLOW_BROWSER_TEST_PARTICIPANT` (off by default, refused outside development) lets the worker accept a non-SIP participant that declares a DID, in a participant attribute or the room's metadata. `make test-room DID=…` creates the room *and* the agent dispatch; `make playground` starts the client. The DID still resolves the tenant, so isolation holds. | ~~tooling~~ | §70 |
 | 2b.11 | **Synchronous work on the agent event loop.** One block per call between configuration load and session start, 1020 ms. **Partly fixed**: loading Silero in `prewarm_fnc` brings it to 628 ms; the remainder is inside `AgentSession.start` and needs a profiler, the provider constructors having been measured and ruled out. It delays the greeting, not the turn metrics. | **defect** (partly) | §28, §56 |
-| 2b.8 | 10-concurrent-call harness. | feature | §76 |
+| 2b.8 | Repeated-measurement harness, then the 10-concurrent-call one. Must report **realtime factor** per stage and not only latency: it is what says whether a configuration can hold a conversation, and it is what exposed the STT ceiling. Now a prerequisite for 2b.7 rather than a later nicety. | feature | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
 accepts `user_away_timeout`, `min_interruption_duration`,
@@ -1169,6 +1169,59 @@ suspect was the three provider constructors building HTTP clients and SSL
 contexts, and that was measured and ruled out: 34 ms cold for STT, 3-4 ms for
 LLM and TTS, 3 ms each warm. Finding the rest needs a profiler on the hot path,
 not another guess.
+
+#### Self-hosted Whisper on this host cannot support a conversation
+
+Measured against `hos_speaches` (`ghcr.io/speaches-ai/speaches:latest-cpu`),
+`faster-whisper-tiny`, one fixed 3.6 s utterance:
+
+| | p50 | p95 | max | realtime× |
+|---|---|---|---|---|
+| sequential | 773 ms | 2655 ms | 3024 ms | 4.6 |
+| 2 concurrent | 3964 ms | 4311 ms | 4465 ms | **0.9** |
+| 4 concurrent | 7571 ms | 9141 ms | 9286 ms | **0.5** |
+
+*realtime×* is the audio's own duration over the transcription time. Below 1
+the server transcribes slower than a caller can speak, so a conversation falls
+progressively further behind.
+
+Three conclusions, in order of how much they matter:
+
+1. **It saturates at roughly 1.7 transcriptions per second and stays there.**
+   Wall time is linear in request count across all three runs, and the
+   container draws 170-375 % CPU on a *single* request — ONNX is already using
+   every core it can get. This is a compute ceiling, not a queueing artefact,
+   so more concurrency buys nothing.
+2. **Two concurrent calls is already past the limit.** At ×2 the realtime
+   factor is 0.9. The platform's own soft cap is ten concurrent calls
+   (`worker_max_concurrent_calls`), and STT alone cannot serve two.
+3. **Even uncontended, p95 is 2655 ms.** A single call with nothing else
+   running has a tail four times its median. That alone is too slow.
+
+**This reverses the conclusion of 2b.9 for this host.** Hosted
+`gpt-4o-mini-transcribe` measured 1103 ms on a real call — slower than local's
+*best* case and far faster than its p95, with none of the local CPU cost. The
+548 ms figure that justified the switch was p50 against a completely idle
+server with no call in progress, which is not a state that occurs while the
+platform is running. Measuring a shared resource in isolation measures the
+wrong thing.
+
+The architecture is not wrong — §25 requires self-hosted models to be usable,
+and they are. What is wrong is the hardware: this is a laptop with 7.75 GiB of
+Docker memory also running a Kubernetes control plane and a second application
+stack. Self-hosted STT needs a GPU or a dedicated box, and a larger Whisper
+model on this host would be worse, not better.
+
+**What follows for the plan:**
+
+- Endpointing (2b.7) must not be tuned against local STT on this host. The
+  input to the tuning would vary by 4x at p95 on an idle machine and 10x under
+  any load.
+- The repeated-measurement harness (2b.8) should report the realtime factor,
+  not just latency. It is the figure that says whether a configuration can hold
+  a conversation at all, and it is the one that made this obvious.
+- Tenant choice of hosted or self-hosted STT is now a real decision with
+  measured numbers behind it, which is what the catalog split in 4b.9 was for.
 
 #### Latency on this host is dominated by variance, not by the pipeline
 
