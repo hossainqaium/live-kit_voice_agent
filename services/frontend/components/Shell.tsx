@@ -53,6 +53,7 @@ const TENANT_NAV: NavGroup[] = [
     label: "AI Agents",
     entries: [
       { label: "Agents", href: "/agents", permission: "agents.read" },
+      { label: "AI Setup", href: "/ai-setup", permission: "agents.read" },
       { label: "Routing", href: "/routing", permission: "agents.read" },
       { label: "Business Hours", href: "/business-hours", permission: "agents.read" },
       { label: "Transfer Targets", href: "/transfer-destinations", permission: "agents.read" },

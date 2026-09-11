@@ -253,6 +253,16 @@ class AgentVersion(Base, UUIDPrimaryKeyMixin, TenantOwnedMixin, TimestampMixin):
         postgresql.UUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="SET NULL")
     )
 
+    #: Embedding provider and model for RAG retrieval (Phase 6 / AI Setup).
+    #: Added by migration 20260911_2331. Run ``alembic upgrade head`` before
+    #: starting the application with this code.
+    embedding_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("providers.id", ondelete="RESTRICT")
+    )
+    embedding_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("models.id", ondelete="RESTRICT")
+    )
+
     # --- Publication trail (spec 19, 69) ---------------------------------- #
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_by_user_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -636,6 +636,22 @@ async def _validate_references(
             detail="that knowledge base does not exist in this tenant",
         )
 
+    for emb_field, emb_model in (
+        ("embedding_provider_id", Provider),
+        ("embedding_model_id", Model),
+    ):
+        value = changes.get(emb_field)
+        if value is None:
+            continue
+        exists = (
+            await tenant.session.execute(select(emb_model.id).where(emb_model.id == value))
+        ).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{emb_field}: no such record in the platform catalog",
+            )
+
 
 # --------------------------------------------------------------------------- #
 # Validation (spec 63, 64)
@@ -806,6 +822,22 @@ async def _validate_version(
                 ValidationIssue(
                     field="knowledge_base_id",
                     message=f"the knowledge base {base.name!r} is disabled",
+                )
+            )
+        # When a knowledge base is set, an embedding provider is needed for RAG
+        # retrieval. Missing one is a warning rather than a hard block in Phase
+        # 4c, because ingestion is not yet active (Phase 6). Agents already
+        # published without it must not be broken by a new strict rule.
+        if version.embedding_provider_id is None:
+            issues.append(
+                ValidationIssue(
+                    field="embedding_provider_id",
+                    message=(
+                        "a knowledge base is set but no embedding provider is chosen; "
+                        "retrieval will not work until one is configured in AI Setup "
+                        "and selected here (Phase 6)"
+                    ),
+                    severity="warning",
                 )
             )
 

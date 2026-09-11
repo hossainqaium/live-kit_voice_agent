@@ -25,6 +25,7 @@ from app.schemas.catalog import (
     CatalogProvider,
     CatalogResponse,
     CatalogVoice,
+    CredentialDraftVerify,
     CredentialResponse,
     CredentialUpsert,
     CredentialVerifyResponse,
@@ -46,7 +47,46 @@ _PROBE_TIMEOUT_SECONDS = 10.0
 #: Hostname fragments that mean "somebody else's cloud". Used only to label a
 #: provider in the catalog, never to allow or block one: a wrong guess here
 #: mislabels a row, it does not change what a call does.
-_PUBLIC_API_HOSTS = ("api.openai.com", "api.elevenlabs.io", "api.deepgram.com", "api.anthropic.com")
+#:
+#: This list covers the popular providers seeded in seed.py so that they are
+#: correctly shown as cloud (not self-hosted) in the AI Setup dropdown.
+_PUBLIC_API_HOSTS = (
+    # OpenAI & compatible
+    "api.openai.com",
+    # Anthropic
+    "api.anthropic.com",
+    # Groq
+    "api.groq.com",
+    # Mistral AI
+    "api.mistral.ai",
+    # Google (Gemini / STT / Embedding)
+    "generativelanguage.googleapis.com",
+    "speech.googleapis.com",
+    # Together AI
+    "api.together.xyz",
+    # DeepSeek
+    "api.deepseek.com",
+    # Deepgram (STT + TTS)
+    "api.deepgram.com",
+    # ElevenLabs
+    "api.elevenlabs.io",
+    # Cartesia
+    "api.cartesia.ai",
+    # PlayHT
+    "api.play.ht",
+    # LMNT
+    "api.lmnt.com",
+    # AssemblyAI
+    "api.assemblyai.com",
+    # Speechmatics
+    "asr.api.speechmatics.com",
+    # Gladia
+    "api.gladia.io",
+    # Cohere
+    "api.cohere.ai",
+    # Voyage AI
+    "api.voyageai.com",
+)
 
 
 def _is_self_hosted(default_base_url: str | None) -> bool:
@@ -441,6 +481,81 @@ async def verify_credential(
         checked_url=url,
         latency_ms=latency_ms,
         verified_at=row.last_verified_at if ok else None,
+    )
+
+
+@router.post(
+    "/catalog/credentials/verify-draft",
+    response_model=CredentialVerifyResponse,
+    summary="Verify a key before storing it",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def verify_draft_credential(
+    payload: CredentialDraftVerify,
+    tenant: CurrentTenant,
+) -> CredentialVerifyResponse:
+    """Make one real request to the provider with a key that has not been saved.
+
+    The Add modal in AI Setup calls this so it can enforce *test before save*:
+    the Add button stays disabled until this returns ``ok: true``.
+
+    The plaintext key is used for the HTTP probe and then discarded. It is not
+    logged, not audited, and not present in any response (spec 54). The audit
+    trail records only that a verification was attempted, without the key.
+    """
+    provider = (
+        await tenant.session.execute(
+            select(Provider).where(Provider.id == payload.provider_id)
+        )
+    ).scalar_one_or_none()
+    if provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="no such provider in the platform catalog",
+        )
+
+    base_url = (payload.base_url or provider.default_base_url or "").rstrip("/")
+    if not base_url:
+        return CredentialVerifyResponse(
+            ok=False,
+            detail=(
+                "no endpoint to check: no base URL supplied and the provider "
+                "has no default"
+            ),
+            checked_url="",
+        )
+
+    url = f"{base_url}/models"
+    api_key = payload.api_key.strip()
+
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+    except httpx.HTTPError as exc:
+        return CredentialVerifyResponse(
+            ok=False,
+            detail=f"could not reach the provider: {type(exc).__name__}",
+            checked_url=url,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    ok = response.status_code < 400
+
+    if ok:
+        detail = "the provider accepted this key"
+    elif response.status_code in (401, 403):
+        detail = "the provider rejected this key"
+    else:
+        detail = f"the provider answered {response.status_code}"
+
+    return CredentialVerifyResponse(
+        ok=ok,
+        status_code=response.status_code,
+        detail=detail,
+        checked_url=url,
+        latency_ms=latency_ms,
     )
 
 

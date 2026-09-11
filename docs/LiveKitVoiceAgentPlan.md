@@ -10,7 +10,8 @@
 | **Phase structure** | Fixed by spec §76 (Phases 1–8) |
 
 **Companion documents:** [`LiveKitVoiceAgentPRD.md`](./LiveKitVoiceAgentPRD.md) ·
-[`LiveKitVoiceAgentREADME.md`](./LiveKitVoiceAgentREADME.md)
+[`LiveKitVoiceAgentREADME.md`](./LiveKitVoiceAgentREADME.md) ·
+[`AIProviders.md`](./AIProviders.md)
 
 ---
 
@@ -341,6 +342,42 @@ resilience §55 asks for.
   the console. **Met.**
 - An agent with a fallback tier keeps talking when its primary provider returns
   errors. Fallover on *error* is met; fallover on *latency* is 4b.10.
+
+### Phase 4c — AI Setup Section (CR-2) ✓ **COMPLETE**
+
+**Goal:** a dedicated, first-class home for AI provider credentials, decoupled
+from the agent builder, with all acceptance criteria in
+[`AIProviders.md`](./AIProviders.md) met.
+
+| # | Item | Kind | Spec |
+|---|---|---|---|
+| ~~4c.1~~ | ~~Add `EMBEDDING` to `ProviderKind` enum and run the Alembic migration.~~ **Done.** `shared/models/enums.py`; migration `a3f8c2e91d47` (no-op: `providers.kind` is VARCHAR, no native enum exists). | feature | §33, CR-2 |
+| ~~4c.2~~ | ~~Seed `providers` rows for the `EMBEDDING` kind.~~ **Done.** Expanded to 29 providers across all 4 kinds (10 LLM · 7 STT · 7 TTS · 5 Embedding), all popular cloud and self-hosted providers included. | feature | §25, CR-2 |
+| ~~4c.3~~ | ~~Implement `POST /catalog/credentials/verify-draft`.~~ **Done.** Key used for probe only, discarded immediately, not logged or audited. | feature | §54, CR-2 |
+| ~~4c.4~~ | ~~Build the `/ai-setup` page with four tabs.~~ **Done.** Grouped dropdown (Cloud / Self-hosted), per-provider key hints and docs links, verify-before-save enforced. | feature | §62, CR-2 |
+| ~~4c.5~~ | ~~Update the agent builder — filter to credentialed providers.~~ **Done.** Inline key-entry removed from `ProviderChain.tsx`; link to AI Setup shown when list is empty. | feature | §18, §62, CR-2 |
+| ~~4c.6~~ | ~~Add `embedding_provider_id` / `embedding_model_id` to `agent_versions`.~~ **Done.** Migration `b7d4f1a02c58`; `EmbeddingPicker` in agent builder Capability tab (visible only when KB is selected). | feature | §33, CR-2 |
+| ~~4c.7~~ | ~~Extend pre-publish validation for embedding fields.~~ **Done.** `_validate_version()` emits `severity=warning` when `knowledge_base_id` is set but `embedding_provider_id` is null. | feature | §63, CR-2 |
+
+**Implementation order:** 4c.1 → 4c.2 → 4c.3 (in parallel with 4c.1–4c.2) →
+4c.4 → 4c.5 (depends on 4c.4) → 4c.6 → 4c.7 (depends on 4c.6).
+
+**Exit criteria — all met**
+
+- The AI Setup sidebar entry appears for roles with `agents.read`; all four
+  tabs render with correct tables and empty states. **Met.**
+- Adding a credential via the modal requires a successful Test Connection
+  before the Add button becomes active. The credential appears in the table
+  with a green verified tick immediately after saving. **Met.**
+- Rotating a key clears `last_verified_at`; the row shows "Unverified" until
+  tested again. **Met.**
+- Deleting a credential succeeds immediately; the audit trail records the
+  deletion with the key hint but not the key itself. **Met.**
+- The agent builder's provider dropdowns show only credentialed or keyless
+  providers; a link to AI Setup is shown when the list is empty. **Met.**
+- A full API key is never returned by any endpoint, present in any log, or
+  visible in the browser's network tab. **Met.**
+- The Embedding tab is visible and states its Phase 6 dependency honestly. **Met.**
 
 ### Phase 3b — Isolation and Account Hardening
 
@@ -1690,6 +1727,35 @@ gives the agent real speech to transcribe.
 
 This is the right way to test a new environment: it proves the path before
 anything on the PBX is modified, and it cannot break an existing deployment.
+
+### 12.4 Phase 4c — AI Setup
+
+#### AI Setup dropdown empty + "Failed to fetch" on agent configure
+
+**Symptom:**
+1. AI Setup page → click "Add LLM/STT/TTS/Embedding" → the provider dropdown inside the modal shows no options for any tab.
+2. Agents page → click **Configure** on an existing agent → `TypeError: Failed to fetch` at `api.agents.versions()`.
+
+**Cause (defect):** Migration `20260911_2330` was written with `ALTER TYPE providerkind ADD VALUE IF NOT EXISTS 'EMBEDDING'`, assuming a native PostgreSQL enum named `providerkind`. In this codebase, `enum_column()` uses `native_enum=False` throughout — `providers.kind` is a plain VARCHAR(64) column, not a native enum. PostgreSQL has no type named `providerkind` to alter.
+
+When `make migrate` was run, the migration did `op.execute("COMMIT")` (which committed Alembic's own transaction mid-flight) and then `ALTER TYPE providerkind ...` failed with `type "providerkind" does not exist`. Because the transaction was already committed before the failure, Alembic could not record the migration as applied. The migration stayed in a permanent retry-fail loop, blocking migration `20260911_2331` from ever running.
+
+Migration `20260911_2331` adds `embedding_provider_id` and `embedding_model_id` columns to `agent_versions`. Without those columns, the SQLAlchemy model includes them in every `SELECT agent_versions.*` — PostgreSQL rejects every such query with `column "embedding_provider_id" does not exist`. That crash propagates as "Failed to fetch" on the Configure dialog (Next.js in dev mode renders some server-side failures at the network level when the response body is malformed).
+
+Because the catalog seeder runs separately and is idempotent, the new popular providers also did not exist in the database yet — hence the empty dropdowns.
+
+**Fix (defect):**
+1. Rewrote `20260911_2330` as a true no-op with an explanatory comment. The providers table needs no schema change; VARCHAR accepts any Python enum value without modification.
+2. Ran `make migrate` — both revisions now applied successfully in one pass.
+3. Ran `python -m app.cli seed-platform` — 29 providers seeded across all 4 kinds.
+
+**Checklist for future enum additions to ProviderKind:**
+- Add the Python value to `shared/models/enums.py`.
+- Add seed entries to `app/services/seed.py` (the DB accepts them immediately — no migration needed for the providers table).
+- Only add an Alembic migration if a *different* table gains a column or constraint referencing the new kind.
+- Never write `ALTER TYPE providerkind ...` — there is no such type.
+
+---
 
 ### 12.2 Bringing up a new environment
 

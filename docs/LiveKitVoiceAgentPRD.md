@@ -19,6 +19,7 @@
 > | Tag | Clarification | Extends |
 > |---|---|---|
 > | `CR-1` | Human transfer is a **warm transfer back to the PBX**: the caller hears a "transferring you to a human agent, please wait" announcement while the receiving human agent first hears the AI conversation summary, and only then are the legs bridged. | §35, §36, §38, §40, §42 |
+> | `CR-2` | **AI Setup** — a dedicated tenant console section with four tabs (LLM, Embedding, STT, TTS) for managing provider credentials centrally. The agent builder's provider dropdowns are populated from what is configured here. Full specification in [`AIProviders.md`](./AIProviders.md). | §9, §11, §24–§27, §62 |
 
 ---
 
@@ -1009,9 +1010,11 @@ distinction in §8 decorative.
 
 ### 17.2 Tenant Console [§61]
 
-Dashboard · AI Agents · Agent Versions · PBXs · SIP Trunks · Phone Numbers · Routing ·
+Dashboard · AI Agents · **AI Setup** · Agent Versions · PBXs · SIP Trunks · Phone Numbers · Routing ·
 Business Hours · Transfer Targets · Knowledge Bases · Tools · Calls · Recordings ·
 Transcripts · Analytics · Users · Usage · Settings.
+
+**AI Setup** (`/ai-setup`) is a dedicated section for managing AI provider credentials, added by `CR-2`. It has four tabs — LLM, Embedding, STT, TTS — and replaces the inline key-entry flow that was embedded inside the agent builder. See [`AIProviders.md`](./AIProviders.md) for the full specification.
 
 | Section | Route | Endpoint | Permission [§8] |
 |---|---|---|---|

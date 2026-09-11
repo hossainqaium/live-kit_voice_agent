@@ -83,7 +83,7 @@ export function Button({
 
 interface FieldProps {
   label: string;
-  hint?: string;
+  hint?: React.ReactNode;
   error?: string | null;
   required?: boolean;
   children: (id: string) => React.ReactNode;

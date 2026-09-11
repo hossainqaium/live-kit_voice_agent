@@ -402,6 +402,8 @@ export interface AgentVersion {
   transfer_summary_max_seconds: number;
   transfer_skip_dtmf: string | null;
   knowledge_base_id: string | null;
+  embedding_provider_id: string | null;
+  embedding_model_id: string | null;
   published_at: string | null;
   change_note: string | null;
   validation_errors: ValidationIssue[];
@@ -916,7 +918,7 @@ export interface TenantInput {
   admin_password?: string | null;
 }
 
-export type ProviderKind = "STT" | "LLM" | "TTS";
+export type ProviderKind = "STT" | "LLM" | "TTS" | "EMBEDDING";
 
 export interface Provider {
   id: string;
@@ -1245,6 +1247,22 @@ export const api = {
     verifyCredential(id: string): Promise<CredentialVerifyResult> {
       return request<CredentialVerifyResult>(`/catalog/credentials/${id}/verify`, {
         method: "POST",
+      });
+    },
+    /**
+     * Verify a key before saving it (AI Setup add modal).
+     *
+     * The plaintext key is sent to the API, used for one probe, and discarded.
+     * It never appears in a response or a log. Resolves even when the key is bad.
+     */
+    verifyDraft(input: {
+      provider_id: string;
+      api_key: string;
+      base_url?: string | null;
+    }): Promise<CredentialVerifyResult> {
+      return request<CredentialVerifyResult>("/catalog/credentials/verify-draft", {
+        method: "POST",
+        body: input,
       });
     },
     removeCredential(id: string): Promise<void> {

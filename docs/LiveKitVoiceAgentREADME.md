@@ -14,6 +14,7 @@ is loaded from configuration at call start.
 **Related documents**
 - [`LiveKitVoiceAgentPRD.md`](./LiveKitVoiceAgentPRD.md) — requirements, acceptance criteria, traceability to the Master Requirements Specification
 - [`LiveKitVoiceAgentPlan.md`](./LiveKitVoiceAgentPlan.md) — phased implementation plan
+- [`AIProviders.md`](./AIProviders.md) — AI Setup section design: LLM / Embedding / STT / TTS credential management and agent builder integration
 
 ---
 
@@ -624,11 +625,20 @@ make migrate
 ```
 
 ```bash
+# Seed the platform catalog — 29 AI providers across LLM / STT / TTS / Embedding
+docker compose -f deploy/docker-compose.yml --env-file .env exec -T configuration-api python -m app.cli seed-platform
+```
+
+```bash
 make health
 ```
 
 All four checks must read `healthy` / `ready` before continuing. If a port is
 already taken, `make up` stops at the preflight check and names the holder.
+
+> **After any `git pull` that includes new migrations,** always run `make migrate`
+> followed by `seed-platform` before restarting the API. Skipping this is the most
+> common cause of empty provider dropdowns and "Failed to fetch" on the agent builder.
 
 ### 9a.3 Tell LiveKit which address to advertise
 
@@ -1026,7 +1036,7 @@ misread as a fault:
 | Tools, function calling, RAG | Not yet — Phase 6 |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
-| Entering a provider API key and testing it in the UI | Working — §9c.2. The last CLI-only tenant step is gone. |
+| Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 29 providers across LLM/STT/TTS/Embedding. See [`AIProviders.md`](./AIProviders.md). |
 | Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
 | Provider timeout, retry, backoff, circuit breaker | **Not yet — Plan 4b.10.** A *slow* provider does not trigger fallover. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
@@ -1080,37 +1090,65 @@ fallback tier (§9c.7) had nothing distinct to point at. `adapter` is nullable
 and falls back to the slug, so a row registered before the split resolves
 exactly as it always did.
 
-The development seed now registers both for speech:
+The development seed now registers 29 providers across all four kinds (run `python -m app.cli seed-platform` to populate them):
 
-| Kind | Slug | Endpoint | Key |
+| Kind | Slug | Display name | Key required |
 |---|---|---|---|
-| STT | `openai_compatible` | speaches, self-hosted | none needed |
-| STT | `openai_hosted` | `https://api.openai.com/v1` | required |
-| TTS | `openai_compatible` | Kokoro, self-hosted | none needed |
-| TTS | `openai_hosted` | `https://api.openai.com/v1` | required |
+| **LLM** | `openai_compatible` | Self-Hosted LLM | — |
+| LLM | `echo_dev` | Echo (dev/test) | — |
+| LLM | `openai_hosted` | OpenAI | ✓ |
+| LLM | `anthropic` | Anthropic | ✓ |
+| LLM | `groq` | Groq | ✓ |
+| LLM | `mistral` | Mistral AI | ✓ |
+| LLM | `google_gemini` | Google Gemini | ✓ |
+| LLM | `together` | Together AI | ✓ |
+| LLM | `deepseek` | DeepSeek | ✓ |
+| LLM | `ollama` | Ollama (local) | — |
+| **STT** | `openai_compatible` | Self-Hosted STT (speaches) | — |
+| STT | `openai_hosted` | OpenAI Whisper | ✓ |
+| STT | `deepgram` | Deepgram | ✓ |
+| STT | `assemblyai` | AssemblyAI | ✓ |
+| STT | `google_stt` | Google STT | ✓ |
+| STT | `speechmatics` | Speechmatics | ✓ |
+| STT | `gladia` | Gladia | ✓ |
+| **TTS** | `openai_compatible` | Self-Hosted TTS (Kokoro) | — |
+| TTS | `openai_hosted` | OpenAI TTS | ✓ |
+| TTS | `elevenlabs` | ElevenLabs | ✓ |
+| TTS | `cartesia` | Cartesia | ✓ |
+| TTS | `playht` | PlayHT | ✓ |
+| TTS | `lmnt` | LMNT | ✓ |
+| TTS | `deepgram_tts` | Deepgram TTS | ✓ |
+| **Embedding** | `openai_compatible` | Self-Hosted Embedding | — |
+| Embedding | `openai_hosted` | OpenAI Embeddings | ✓ |
+| Embedding | `cohere` | Cohere | ✓ |
+| Embedding | `voyage` | Voyage AI | ✓ |
+| Embedding | `google_embedding` | Google Embedding | ✓ |
 
 ### 9c.2 Storing a credential
 
 Keys are stored **encrypted** (Fernet, with key versioning) and never returned
 by the API or written to a log.
 
-**From the console**, which is now the normal path: open an agent, and beside
-whichever provider needs one, use **Set key**. Then **Test connection** —
-it makes one real request (`GET {base_url}/models`) with the stored key and
-reports the status, the latency and the URL it checked. A key is write-only by
-construction: `api_key` appears on the request model and on no response model
-anywhere in the API, which a test asserts across every route rather than only
-the credential ones.
+**From the console — the normal path:** go to **AI Setup** in the sidebar. Pick the
+tab for the kind you need (LLM, STT, TTS, or Embedding), click **Add**, choose the
+provider from the grouped dropdown (Cloud providers / Self-hosted), paste the API key,
+then click **Test Connection**. The test makes one real request (`GET {base_url}/models`)
+with the key you typed — without storing it first — and reports reachability, the URL
+checked, and the latency. The **Add** button becomes active only after a successful test.
+After saving, the credential appears in the table with a green verified tick.
 
-One key per provider, shared by every tier and every agent that names it.
-Replacing it clears the verified mark until it is tested again — a rotated key
-nobody has tried should not show a green tick.
+A key is write-only by construction: `api_key` appears on the request model and on no
+response model anywhere in the API. Only the last four characters (`key_hint`) are ever
+returned — enough to identify which key is stored without being enough to use it.
 
-What *Test connection* proves: the endpoint is reachable from this deployment,
-DNS and TLS work, and the key is accepted. What it does not prove: that a
-particular model is available to that key. That is a different request with a
-different failure mode, and reporting them as one result would put a tick beside
-a model the key cannot reach.
+One key per provider per label, shared by every agent that names that provider.
+Replacing a key clears the verified mark — a rotated key nobody has tested should not
+show a green tick.
+
+What *Test Connection* proves: the endpoint is reachable from this deployment, DNS and
+TLS work, and the key is accepted. What it does not prove: that a particular model is
+available to that key. That is a different request with a different failure mode, and
+reporting them as one result would put a tick beside a model the key cannot reach.
 
 **From the CLI**, still supported and still the right tool for scripted setup.
 It reads the key from **stdin**, so it never appears in a process listing or a
@@ -1305,7 +1343,8 @@ navigation and a platform account has no tenant to act in.
 | PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
 | Phone Numbers | `/phone-numbers` | DIDs, their trunk and the agent that answers, plus **Call Test** — a browser call to that number (§9d.7) |
-| Agents | `/agents` | The builder: providers and models per tier, keys with a connection test, versions, validation, publish, rollback |
+| Agents | `/agents` | The builder: provider and model selection per tier, versions, validation, publish, rollback. Provider dropdowns show only what is configured in AI Setup. |
+| **AI Setup** | `/ai-setup` | Four tabs — **LLM**, **Embedding**, **STT**, **TTS**. Each tab lists stored provider credentials with Test / Rotate / Delete actions; the Add modal verifies a key before saving it. Providers configured here populate the agent builder dropdowns. See [`AIProviders.md`](./AIProviders.md). |
 | Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |
 | Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
 | Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |
@@ -1955,6 +1994,9 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Caller heard silence during transfer | Hold media not configured, or the announcement finished without looping. Check the agent's announcement and hold-media settings. |
 | Transfer never reaches the human agent | `transfer_status` says which step stalled; then check the PBX extension/queue and what SIP response the PBX returned. |
 | A service never becomes ready | `/ready` reports which dependency failed; check PostgreSQL, Redis, LiveKit, object storage. |
+| AI Setup provider dropdown is empty (no providers listed in any tab) | The platform catalog has not been seeded yet, or a new migration was added and the seed was not re-run. Run `make migrate` then `docker compose ... exec configuration-api python -m app.cli seed-platform`. |
+| `TypeError: Failed to fetch` when opening the agent Configure dialog | The `agent_versions` table is missing the `embedding_provider_id` / `embedding_model_id` columns — run `make migrate`. If the columns exist, check API health with `make health`. |
+| `alembic upgrade head` fails with `type "providerkind" does not exist` | A migration written for a native PostgreSQL enum was applied to a VARCHAR column. Replace the migration body with a no-op (`pass` in `upgrade()`). See Plan §12.4. |
 
 Every investigation starts from the `call_id`. It is present in every call-related log line
 across every service.

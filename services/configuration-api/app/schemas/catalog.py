@@ -138,3 +138,22 @@ class CredentialVerifyResponse(BaseModel):
     checked_url: str
     latency_ms: int | None = None
     verified_at: datetime | None = None
+
+
+class CredentialDraftVerify(BaseModel):
+    """Verify a key before it is stored (AI Setup — add modal).
+
+    The plaintext key is used for the probe and discarded immediately. It
+    never reaches a log line, an audit entry, or any response (spec 54).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: uuid.UUID
+
+    #: Write-only, same constraint as CredentialUpsert.api_key.
+    api_key: str = Field(min_length=8, max_length=512)
+
+    #: Optional endpoint override, in case the tenant intends to configure a
+    #: self-hosted URL alongside the key.
+    base_url: str | None = Field(default=None, max_length=512)

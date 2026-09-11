@@ -3,25 +3,15 @@
 /**
  * Provider selection for the agent builder (spec 18, 24, 25, 26, 55, 62).
  *
- * Three stages — speech to text, language model, text to speech — each with up
- * to three tiers tried in order. The tiers are named rather than numbered
- * because "fallback" and "local" answer different questions: one insures
- * against a vendor having a bad day, the other against the internet being
- * unavailable. A numbered list would hide that distinction behind an index.
- *
- * The API key belongs to the *provider*, not the tier, so two tiers that name
- * the same provider share one key. The control is rendered beside whichever
- * tier surfaced it, and the shared-key note says so — the alternative, a
- * separate credentials screen, makes the operator hold the mapping in their
- * head while filling in a form that depends on it.
+ * Only providers with a stored credential (or no key requirement) are shown.
+ * All credential management now lives in AI Setup — this component's job is
+ * purely selection, not configuration.
  */
 
-import { useState } from "react";
+import Link from "next/link";
 
-import { Badge, Button, Dialog, Field, Notice } from "@/components/ui";
+import { Badge, Field, Notice } from "@/components/ui";
 import {
-  ApiError,
-  api,
   type AgentVersion,
   type Catalog,
   type CatalogProvider,
@@ -123,25 +113,28 @@ const STAGES: Stage[] = [
   },
 ];
 
+/** A provider is selectable when it either needs no key or has one stored. */
+function isSelectable(provider: CatalogProvider): boolean {
+  return !provider.requires_credential || provider.credential_set;
+}
+
 export function ProviderChain({
   draft,
   catalog,
   credentials,
   disabled,
   onSet,
-  onCredentialsChanged,
-  onError,
 }: {
   draft: Partial<AgentVersion>;
   catalog: Catalog | null;
   credentials: ProviderCredential[];
   disabled: boolean;
   onSet<K extends keyof AgentVersion>(key: K, value: AgentVersion[K]): void;
-  onCredentialsChanged(): void | Promise<void>;
-  onError(message: string): void;
+  /** @deprecated kept for backwards-compatibility, no longer used */
+  onCredentialsChanged?(): void | Promise<void>;
+  /** @deprecated kept for backwards-compatibility, no longer used */
+  onError?(message: string): void;
 }) {
-  const [keyFor, setKeyFor] = useState<CatalogProvider | null>(null);
-
   if (!catalog) {
     return (
       <div className="card" style={{ marginBottom: 14 }}>
@@ -151,17 +144,31 @@ export function ProviderChain({
     );
   }
 
-  if (catalog.providers.length === 0) {
+  const selectableCount = catalog.providers.filter(isSelectable).length;
+
+  if (selectableCount === 0) {
     return (
       <Notice tone="warn">
-        The platform catalog holds no active providers, so there is nothing to
-        select. A platform operator adds them under Providers and Models.
+        No configured AI providers found.{" "}
+        <Link href="/ai-setup" style={{ color: "var(--accent)" }}>
+          Go to AI Setup
+        </Link>{" "}
+        to add your LLM, STT, and TTS provider keys. Agents can only use providers
+        configured there.
       </Notice>
     );
   }
 
   return (
     <>
+      <Notice tone="info" style={{ marginBottom: 14 }}>
+        Only providers you have already configured in{" "}
+        <Link href="/ai-setup" style={{ color: "var(--accent)" }}>
+          AI Setup
+        </Link>{" "}
+        appear in the dropdowns below.
+      </Notice>
+
       {STAGES.map((stage) => (
         <StageCard
           key={stage.kind}
@@ -171,25 +178,14 @@ export function ProviderChain({
           credentials={credentials}
           disabled={disabled}
           onSet={onSet}
-          onKeyRequested={setKeyFor}
         />
       ))}
-
-      {keyFor && (
-        <CredentialDialog
-          provider={keyFor}
-          existing={credentials.find((c) => c.provider_id === keyFor.id) ?? null}
-          onClose={() => setKeyFor(null)}
-          onSaved={onCredentialsChanged}
-          onError={onError}
-        />
-      )}
     </>
   );
 }
 
 function StageCard({
-  stage, draft, catalog, credentials, disabled, onSet, onKeyRequested,
+  stage, draft, catalog, credentials, disabled, onSet,
 }: {
   stage: Stage;
   draft: Partial<AgentVersion>;
@@ -197,9 +193,10 @@ function StageCard({
   credentials: ProviderCredential[];
   disabled: boolean;
   onSet<K extends keyof AgentVersion>(key: K, value: AgentVersion[K]): void;
-  onKeyRequested(provider: CatalogProvider): void;
 }) {
-  const providers = catalog.providers.filter((p) => p.kind === stage.kind);
+  const providers = catalog.providers.filter(
+    (p) => p.kind === stage.kind && isSelectable(p),
+  );
 
   return (
     <div className="card" style={{ marginBottom: 14, padding: "12px 14px" }}>
@@ -208,7 +205,8 @@ function StageCard({
 
       {providers.length === 0 ? (
         <p className="subtle small" style={{ margin: 0 }}>
-          No active {stage.kind} provider in the catalog.
+          No {stage.kind} provider configured in{" "}
+          <Link href="/ai-setup" style={{ color: "var(--accent)" }}>AI Setup</Link>.
         </p>
       ) : (
         stage.tiers.map((tier) => (
@@ -222,7 +220,6 @@ function StageCard({
             credentials={credentials}
             disabled={disabled}
             onSet={onSet}
-            onKeyRequested={onKeyRequested}
           />
         ))
       )}
@@ -231,7 +228,7 @@ function StageCard({
 }
 
 function TierRow({
-  stage, tier, providers, draft, catalog, credentials, disabled, onSet, onKeyRequested,
+  stage, tier, providers, draft, catalog, credentials, disabled, onSet,
 }: {
   stage: Stage;
   tier: Tier;
@@ -241,7 +238,6 @@ function TierRow({
   credentials: ProviderCredential[];
   disabled: boolean;
   onSet<K extends keyof AgentVersion>(key: K, value: AgentVersion[K]): void;
-  onKeyRequested(provider: CatalogProvider): void;
 }) {
   const providerId = (draft[tier.provider] as string | null | undefined) ?? "";
   const modelId = (draft[tier.model] as string | null | undefined) ?? "";
@@ -254,13 +250,9 @@ function TierRow({
 
   function chooseProvider(next: string) {
     onSet(tier.provider, (next || null) as AgentVersion[typeof tier.provider]);
-    // Clearing the model and voice is the point: they belong to the previous
-    // provider, and carrying them over produces a pair the API rejects with a
-    // message about a foreign key rather than about the choice just made.
     onSet(tier.model, null as AgentVersion[typeof tier.model]);
     if (tier.voice) onSet(tier.voice, null as AgentVersion[typeof tier.voice]);
 
-    // Pre-select the catalog default, so the common case is one click.
     const fallbackModel = catalog.models.find((m) => m.provider_id === next && m.is_default);
     if (fallbackModel) {
       onSet(tier.model, fallbackModel.id as AgentVersion[typeof tier.model]);
@@ -300,7 +292,7 @@ function TierRow({
           </Badge>
         )}
         {provider && !provider.requires_credential && (
-          <Badge tone="neutral" title="This provider needs no API key, so none is asked for.">
+          <Badge tone="neutral" title="This provider needs no API key.">
             no key needed
           </Badge>
         )}
@@ -314,11 +306,6 @@ function TierRow({
             }
           >
             key ···{credential.key_hint} {credential.last_verified_at ? "verified" : "untested"}
-          </Badge>
-        )}
-        {provider?.requires_credential && !credential && (
-          <Badge tone="err" title="Publishing will fail until a key is stored for this provider.">
-            no key
           </Badge>
         )}
       </div>
@@ -391,146 +378,6 @@ function TierRow({
           </Field>
         )}
       </div>
-
-      {provider?.requires_credential && (
-        <CredentialControls
-          provider={provider}
-          credential={credential}
-          disabled={disabled}
-          onKeyRequested={onKeyRequested}
-        />
-      )}
     </div>
-  );
-}
-
-function CredentialControls({
-  provider, credential, disabled, onKeyRequested,
-}: {
-  provider: CatalogProvider;
-  credential: ProviderCredential | null;
-  disabled: boolean;
-  onKeyRequested(provider: CatalogProvider): void;
-}) {
-  const [result, setResult] = useState<string | null>(null);
-  const [testing, setTesting] = useState(false);
-
-  async function test() {
-    if (!credential) return;
-    setTesting(true);
-    setResult(null);
-    try {
-      const outcome = await api.catalog.verifyCredential(credential.id);
-      // The endpoint answers 200 whether or not the key works — the request
-      // succeeded in finding out. So the outcome is read from the body, not
-      // from the absence of an exception.
-      setResult(
-        `${outcome.ok ? "✓" : "✗"} ${outcome.detail}` +
-          (outcome.latency_ms !== null ? ` · ${outcome.latency_ms} ms` : "") +
-          ` · ${outcome.checked_url}`,
-      );
-    } catch (err) {
-      setResult(err instanceof ApiError ? `✗ ${err.message}` : "✗ the check could not be run");
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  return (
-    <div className="row small" style={{ gap: 8, flexWrap: "wrap" }}>
-      <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onKeyRequested(provider)}>
-        {credential ? "Replace key" : "Set key"}
-      </Button>
-      <Button size="sm" variant="ghost" disabled={disabled || !credential || testing} onClick={test}>
-        {testing ? "Testing…" : "Test connection"}
-      </Button>
-      {result && <span className="subtle mono" style={{ fontSize: 11 }}>{result}</span>}
-    </div>
-  );
-}
-
-function CredentialDialog({
-  provider, existing, onClose, onSaved, onError,
-}: {
-  provider: CatalogProvider;
-  existing: ProviderCredential | null;
-  onClose(): void;
-  onSaved(): void | Promise<void>;
-  onError(message: string): void;
-}) {
-  const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState(existing?.base_url ?? "");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    try {
-      await api.catalog.setCredential({
-        provider_id: provider.id,
-        api_key: apiKey,
-        base_url: baseUrl.trim() || null,
-      });
-      await onSaved();
-      onClose();
-    } catch (err) {
-      onError(err instanceof ApiError ? err.message : "could not store the key");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog
-      title={`${existing ? "Replace" : "Set"} the key for ${provider.display_name}`}
-      onClose={onClose}
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button onClick={submit} disabled={busy || apiKey.trim().length < 8}>
-            {busy ? "Storing…" : existing ? "Replace key" : "Store key"}
-          </Button>
-        </>
-      }
-    >
-      <form onSubmit={submit} noValidate>
-        <Field
-          label="API key"
-          required
-          hint="Encrypted before it is stored. It is never shown again, here or anywhere else in the API."
-        >
-          {(id) => (
-            <input
-              id={id}
-              type="password"
-              autoComplete="off"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={existing ? `replacing the key ending ${existing.key_hint}` : "sk-…"}
-            />
-          )}
-        </Field>
-
-        <Field
-          label="Endpoint override"
-          hint="Optional. Point at a self-hosted or regional endpoint instead of the provider default."
-        >
-          {(id) => (
-            <input
-              id={id}
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.openai.com/v1"
-            />
-          )}
-        </Field>
-
-        <Notice tone="info">
-          One key per provider, shared by every tier and every agent that names
-          it. Replacing it here changes it for all of them, and clears the
-          verified mark until it is tested again.
-        </Notice>
-      </form>
-    </Dialog>
   );
 }

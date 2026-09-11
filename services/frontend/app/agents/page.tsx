@@ -23,6 +23,8 @@ import {
   Badge, Button, Dialog, EmptyState, Field, Loading, Notice,
   RelativeTime, ToastStack, useToasts,
 } from "@/components/ui";
+import Link from "next/link";
+
 import {
   ApiError, api,
   type Agent, type AgentVersion, type Catalog, type ProviderCredential,
@@ -350,6 +352,8 @@ function AgentBuilder({
         tts_local_provider_id: draft.tts_local_provider_id ?? null,
         tts_local_model_id: draft.tts_local_model_id ?? null,
         tts_local_voice_id: draft.tts_local_voice_id ?? null,
+        embedding_provider_id: draft.embedding_provider_id ?? null,
+        embedding_model_id: draft.embedding_model_id ?? null,
         interruption_enabled: draft.interruption_enabled,
         silence_timeout_seconds: draft.silence_timeout_seconds,
         max_call_duration_seconds: draft.max_call_duration_seconds,
@@ -537,9 +541,17 @@ function AgentBuilder({
               credentials={credentials}
               disabled={!canWrite}
               onSet={set}
-              onCredentialsChanged={loadCredentials}
-              onError={onError}
             />
+
+            {draft.knowledge_base_id && catalog && (
+              <EmbeddingPicker
+                draft={draft}
+                catalog={catalog}
+                credentials={credentials}
+                disabled={!canWrite}
+                onSet={set}
+              />
+            )}
 
             <div className="field-row">
               <Field label="Silence timeout (s)"
@@ -601,5 +613,112 @@ function AgentBuilder({
         </>
       )}
     </Dialog>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// Embedding provider picker (shown only when a knowledge base is selected)
+// --------------------------------------------------------------------------- //
+
+function EmbeddingPicker({
+  draft, catalog, credentials, disabled, onSet,
+}: {
+  draft: Partial<AgentVersion>;
+  catalog: Catalog;
+  credentials: ProviderCredential[];
+  disabled: boolean;
+  onSet<K extends keyof AgentVersion>(key: K, value: AgentVersion[K]): void;
+}) {
+  const embeddingProviders = catalog.providers.filter(
+    (p) => p.kind === "EMBEDDING" && (!p.requires_credential || p.credential_set),
+  );
+
+  const providerId = draft.embedding_provider_id ?? "";
+  const modelId = draft.embedding_model_id ?? "";
+  const models = catalog.models.filter((m) => m.provider_id === providerId && m.provider_kind === "EMBEDDING");
+  const credential = credentials.find((c) => c.provider_id === providerId) ?? null;
+  const provider = embeddingProviders.find((p) => p.id === providerId) ?? null;
+
+  function chooseProvider(next: string) {
+    onSet("embedding_provider_id", (next || null) as AgentVersion["embedding_provider_id"]);
+    onSet("embedding_model_id", null);
+    const defaultModel = catalog.models.find((m) => m.provider_id === next && m.is_default);
+    if (defaultModel) {
+      onSet("embedding_model_id", defaultModel.id as AgentVersion["embedding_model_id"]);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 14, padding: "12px 14px" }}>
+      <div className="stat-label">Embedding</div>
+      <p className="subtle small" style={{ margin: "2px 0 10px" }}>
+        Required for knowledge-base retrieval (RAG). The embedding model must match
+        the one used when the knowledge base was indexed. This feature activates in Phase 6.
+      </p>
+
+      {embeddingProviders.length === 0 ? (
+        <p className="subtle small" style={{ margin: 0 }}>
+          No embedding provider configured. Go to{" "}
+          <Link href="/ai-setup" style={{ color: "var(--accent)" }}>AI Setup → Embedding</Link>{" "}
+          to add one.
+        </p>
+      ) : (
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 9 }}>
+          <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+            {provider?.requires_credential && credential?.last_verified_at && (
+              <Badge tone="ok" dot>key verified</Badge>
+            )}
+            {provider?.requires_credential && credential && !credential.last_verified_at && (
+              <Badge tone="warn">key unverified</Badge>
+            )}
+            {!providerId && (
+              <span className="subtle small">not configured — retrieval will not work</span>
+            )}
+          </div>
+
+          <div className="form-grid">
+            <Field label="Embedding provider" hint="Provider used to embed queries and documents.">
+              {(id) => (
+                <select
+                  id={id}
+                  value={providerId}
+                  disabled={disabled}
+                  onChange={(e) => chooseProvider(e.target.value)}
+                >
+                  <option value="">— none —</option>
+                  {embeddingProviders.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.display_name}
+                      {p.self_hosted ? " · self-hosted" : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
+
+            <Field label="Embedding model">
+              {(id) => (
+                <select
+                  id={id}
+                  value={modelId}
+                  disabled={disabled || !providerId}
+                  onChange={(e) =>
+                    onSet("embedding_model_id", (e.target.value || null) as AgentVersion["embedding_model_id"])
+                  }
+                >
+                  <option value="">{providerId ? "— none —" : "select a provider first"}</option>
+                  {models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.slug}
+                      {m.is_default ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

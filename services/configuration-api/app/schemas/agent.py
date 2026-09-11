@@ -90,6 +90,8 @@ class AgentVersionConfig(BaseModel):
     transfer_skip_dtmf: str | None = Field(default=None, max_length=1)
 
     knowledge_base_id: uuid.UUID | None = None
+    embedding_provider_id: uuid.UUID | None = None
+    embedding_model_id: uuid.UUID | None = None
     change_note: str | None = Field(default=None, max_length=1000)
 
 
@@ -141,6 +143,8 @@ class AgentVersionResponse(TimestampedResponse):
     transfer_skip_dtmf: str | None
 
     knowledge_base_id: uuid.UUID | None
+    embedding_provider_id: uuid.UUID | None = None
+    embedding_model_id: uuid.UUID | None = None
 
     published_at: datetime | None
     change_note: str | None

@@ -158,6 +158,7 @@ class ProviderKind(StrEnum):
     STT = "STT"
     LLM = "LLM"
     TTS = "TTS"
+    EMBEDDING = "EMBEDDING"
 
 
 # --------------------------------------------------------------------------- #

@@ -183,7 +183,8 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
     provider the code cannot construct would let an operator publish an agent
     that fails at call time rather than at validation time (spec 63).
     """
-    #: (kind, slug, adapter, display name, default base URL, model slugs).
+    #: (kind, slug, adapter, display name, default base URL, model slugs, requires_credential,
+    #:  notes).
     #:
     #: ``slug`` names the row and ``adapter`` names the code path, which is
     #: what lets a hosted endpoint and a self-hosted one both exist for the
@@ -191,34 +192,107 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
     #: adapter per kind, and the local tier in spec 55 would have nothing
     #: distinct to point at.
     #:
-    #: The existing ``openai_compatible`` rows keep their slug: they are the
+    #: ``requires_credential`` is stated explicitly here rather than inferred
+    #: from the URL, because third-party vendors (Groq, Mistral, etc.) host
+    #: their APIs at their own domains but still require an API key — the old
+    #: URL-based heuristic wrongly marked them as keyless.
+    #:
+    #: The existing ``openai_compatible`` slugs keep their names: they are the
     #: self-hosted speech endpoints and are referenced by agent versions
-    #: already published. Renaming them would invalidate a live configuration
-    #: to make a naming scheme tidier.
-    definitions = [
+    #: already published. Renaming them would invalidate a live configuration.
+    #:
+    #: Providers whose ``adapter`` does not yet have a worker implementation
+    #: can be configured through AI Setup and have keys stored and verified;
+    #: they cannot be published into a live agent until the adapter lands.
+    definitions: list[tuple[
+        ProviderKind, str, str, str, str | None, list[str], bool, str | None
+    ]] = [
+        # ------------------------------------------------------------------ #
+        # STT
+        # ------------------------------------------------------------------ #
         (
             ProviderKind.STT,
             "openai_compatible",
             "openai_compatible",
-            "Self-hosted STT (speaches)",
+            "Self-hosted STT (speaches / Whisper)",
             spec.speech_base_url,
             [spec.stt_model, "whisper-1"],
+            False,   # self-hosted, no key needed
+            None,
         ),
         (
             ProviderKind.STT,
             "openai_hosted",
             "openai_compatible",
-            "OpenAI STT (hosted)",
+            "OpenAI STT",
             "https://api.openai.com/v1",
-            ["gpt-4o-mini-transcribe", "whisper-1"],
+            ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"],
+            True,
+            None,
         ),
+        (
+            ProviderKind.STT,
+            "deepgram",
+            "deepgram",
+            "Deepgram",
+            "https://api.deepgram.com",
+            ["nova-3", "nova-2", "nova-2-general", "nova-2-meeting", "nova-2-phonecall",
+             "nova-2-medical", "enhanced", "base"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.STT,
+            "assemblyai",
+            "assemblyai",
+            "AssemblyAI",
+            "https://api.assemblyai.com",
+            ["best", "nano"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.STT,
+            "google_stt",
+            "google_stt",
+            "Google Cloud Speech-to-Text",
+            "https://speech.googleapis.com",
+            ["latest_long", "latest_short", "telephony", "medical_dictation"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.STT,
+            "speechmatics",
+            "speechmatics",
+            "Speechmatics",
+            "https://asr.api.speechmatics.com",
+            ["enhanced", "standard"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.STT,
+            "gladia",
+            "gladia",
+            "Gladia",
+            "https://api.gladia.io",
+            ["solaria-1", "fast"],
+            True,
+            None,
+        ),
+        # ------------------------------------------------------------------ #
+        # LLM
+        # ------------------------------------------------------------------ #
         (
             ProviderKind.LLM,
             "openai_compatible",
             "openai_compatible",
-            "OpenAI-compatible LLM",
+            "OpenAI-compatible (self-hosted)",
             None,
             ["gpt-4o-mini", "gpt-4o"],
+            False,   # no default URL → user supplies base_url with credential
+            None,
         ),
         (
             ProviderKind.LLM,
@@ -227,7 +301,98 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
             "Development echo model",
             None,
             [spec.llm_model],
+            False,
+            "Development stand-in. Refused outside development.",
         ),
+        (
+            ProviderKind.LLM,
+            "openai_hosted",
+            "openai_compatible",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "anthropic",
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1",
+            ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-3-5",
+             "claude-opus-4", "claude-sonnet-4"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "groq",
+            "openai_compatible",
+            "Groq",
+            "https://api.groq.com/openai/v1",
+            ["llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+             "mixtral-8x7b-32768", "gemma2-9b-it"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "mistral",
+            "openai_compatible",
+            "Mistral AI",
+            "https://api.mistral.ai/v1",
+            ["mistral-large-latest", "mistral-medium-latest",
+             "mistral-small-latest", "codestral-latest"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "google_gemini",
+            "openai_compatible",
+            "Google Gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro",
+             "gemini-1.5-pro", "gemini-1.5-flash"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "together",
+            "openai_compatible",
+            "Together AI",
+            "https://api.together.xyz/v1",
+            ["meta-llama/Llama-3.3-70B-Instruct-Turbo",
+             "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+             "mistralai/Mixtral-8x7B-Instruct-v0.1"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "deepseek",
+            "openai_compatible",
+            "DeepSeek",
+            "https://api.deepseek.com/v1",
+            ["deepseek-chat", "deepseek-reasoner"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.LLM,
+            "ollama",
+            "openai_compatible",
+            "Ollama (local)",
+            "http://host.docker.internal:11434/v1",
+            ["llama3.3", "llama3.2", "mistral", "phi4", "gemma3", "qwen3"],
+            False,  # local, no key
+            None,
+        ),
+        # ------------------------------------------------------------------ #
+        # TTS
+        # ------------------------------------------------------------------ #
         (
             ProviderKind.TTS,
             "openai_compatible",
@@ -235,18 +400,129 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
             "Self-hosted TTS (Kokoro)",
             spec.speech_base_url,
             [spec.tts_model, "tts-1"],
+            False,
+            None,
         ),
         (
             ProviderKind.TTS,
             "openai_hosted",
             "openai_compatible",
-            "OpenAI TTS (hosted)",
+            "OpenAI TTS",
             "https://api.openai.com/v1",
-            ["tts-1"],
+            ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.TTS,
+            "elevenlabs",
+            "elevenlabs",
+            "ElevenLabs",
+            "https://api.elevenlabs.io",
+            ["eleven_turbo_v2_5", "eleven_flash_v2_5",
+             "eleven_multilingual_v2", "eleven_turbo_v2"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.TTS,
+            "cartesia",
+            "cartesia",
+            "Cartesia",
+            "https://api.cartesia.ai",
+            ["sonic-2", "sonic-english", "sonic-multilingual"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.TTS,
+            "playht",
+            "playht",
+            "PlayHT",
+            "https://api.play.ht",
+            ["PlayDialog", "Play3.0-mini"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.TTS,
+            "lmnt",
+            "lmnt",
+            "LMNT",
+            "https://api.lmnt.com",
+            ["aurora", "blizzard"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.TTS,
+            "deepgram_tts",
+            "deepgram",
+            "Deepgram Aura",
+            "https://api.deepgram.com",
+            ["aura-2-en-us", "aura-asteria-en", "aura-luna-en",
+             "aura-stella-en", "aura-orion-en", "aura-arcas-en"],
+            True,
+            None,
+        ),
+        # ------------------------------------------------------------------ #
+        # Embedding
+        # ------------------------------------------------------------------ #
+        (
+            ProviderKind.EMBEDDING,
+            "openai_compatible",
+            "openai_compatible",
+            "Self-hosted Embedding (OpenAI-compatible)",
+            spec.speech_base_url,
+            ["text-embedding-3-small", "text-embedding-3-large"],
+            False,
+            None,
+        ),
+        (
+            ProviderKind.EMBEDDING,
+            "openai_hosted",
+            "openai_compatible",
+            "OpenAI Embedding",
+            "https://api.openai.com/v1",
+            ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.EMBEDDING,
+            "cohere",
+            "cohere",
+            "Cohere",
+            "https://api.cohere.ai",
+            ["embed-english-v3.0", "embed-multilingual-v3.0",
+             "embed-english-light-v3.0", "embed-multilingual-light-v3.0"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.EMBEDDING,
+            "voyage",
+            "openai_compatible",
+            "Voyage AI",
+            "https://api.voyageai.com/v1",
+            ["voyage-3.5", "voyage-3.5-lite", "voyage-3", "voyage-3-lite",
+             "voyage-code-3", "voyage-finance-2"],
+            True,
+            None,
+        ),
+        (
+            ProviderKind.EMBEDDING,
+            "google_embedding",
+            "google_embedding",
+            "Google Embedding",
+            "https://generativelanguage.googleapis.com/v1beta",
+            ["text-embedding-004", "gemini-embedding-exp-03-07"],
+            True,
+            None,
         ),
     ]
 
-    for kind, slug, adapter, display_name, base_url, model_slugs in definitions:
+    for kind, slug, adapter, display_name, base_url, model_slugs, requires_credential, notes in definitions:
         provider = (
             await session.execute(
                 select(Provider).where(Provider.kind == kind, Provider.slug == slug)
@@ -261,19 +537,8 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
                 display_name=display_name,
                 default_base_url=base_url,
                 supports_streaming=True,
-                # A base URL pointing somewhere other than a vendor's public
-                # API means a self-hosted endpoint, which authenticates by
-                # network reachability rather than by key. Seeding it as
-                # credential-required would make the local-model path
-                # unpublishable out of the box.
-                requires_credential=not (
-                    base_url and "://" in base_url and "api.openai.com" not in base_url
-                ),
-                notes=(
-                    "Development stand-in. Refused outside development."
-                    if slug == spec.llm_provider_slug
-                    else None
-                ),
+                requires_credential=requires_credential,
+                notes=notes,
             )
             session.add(provider)
             await session.flush()
