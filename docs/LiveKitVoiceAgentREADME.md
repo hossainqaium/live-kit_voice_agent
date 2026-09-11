@@ -973,6 +973,7 @@ misread as a fault:
 | Warm transfer to a human agent | Not yet — Phase 6 |
 | Tools, function calling, RAG | Not yet — Phase 6 |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
+| Testing the agent from a browser instead of a phone | **Not yet.** The worker requires a SIP participant, so LiveKit's Agents Playground connects and is ignored — §9d.7, Plan 2b.10. |
 
 Two honest caveats about interpreting a test call:
 
@@ -1128,6 +1129,8 @@ navigation and a platform account has no tenant to act in.
 | Grafana | http://localhost:3201 | Working; no voice dashboard yet (Phase 2b.6) |
 | Prometheus | http://localhost:9290 | Working, metrics scraped |
 | MinIO console | http://localhost:9201 | Working, empty until recording lands (Phase 2b.3) |
+| LiveKit admin UI | — | **None exists** for self-hosted LiveKit. The platform console is the configuration surface, by design — §9d.6 |
+| Agents Playground | — | Not deployed, and blocked on Plan 2b.10 — §9d.7 |
 
 #### Tenant console sections
 
@@ -1330,6 +1333,85 @@ docker compose -f deploy/docker-compose.yml --env-file .env logs -f frontend
 `services/frontend/lib/api.ts` is the API client. It deliberately has **no way
 to pass a tenant ID** — tenant identity comes from the session, and leaving it
 off the client means no call site can supply one by accident.
+
+### 9d.6 LiveKit's own interfaces
+
+A question that comes up early: is there a LiveKit UI for configuring LiveKit
+itself? For a self-hosted deployment, no.
+
+| Surface | Configuration UI | Applies here |
+|---|---|---|
+| `livekit-server` | None. Port 7880 serves the WebSocket and Twirp API, 6789 serves Prometheus text; no path serves HTML. | Running |
+| `livekit-sip` | None at all. Inbound trunks and dispatch rules exist only over the Twirp API. | Running |
+| LiveKit Cloud dashboard | Yes — keys, SIP trunks, dispatch rules, room monitoring, analytics | **No.** Cloud-only, and PRD Q1 chose self-hosted because §11/§13 require port-range, TURN and cluster administration. |
+| Cloud **Agent Console** | Yes — realtime agent debugging | **No.** It debugs agents running anywhere, self-hosted included, but it launches from a LiveKit Cloud project dashboard. With no Cloud project there is no button to press. |
+| `lk` CLI (livekit-cli) | The real self-hosted admin surface: `lk room list`, `lk sip inbound create`, `lk dispatch` | Not installed, deliberately — see below |
+
+**The absence is by design, not a missing integration.** §12 makes PostgreSQL
+the source of truth and LiveKit the mirror: every write goes to PostgreSQL
+first and LiveKit second. A second UI writing straight to LiveKit would be a
+second source of truth, and anything entered there is overwritten by the next
+re-sync — which is precisely the drift §46 asks the platform to detect. So
+`/platform/livekit` reports the mirror's *agreement* with the database — sync
+state counts and drifted rows — rather than an inventory of LiveKit objects.
+The useful question about LiveKit here is "does it still match the records",
+not "what does it contain".
+
+The one genuinely UI-less piece is infrastructure configuration:
+`deploy/livekit/livekit.yaml` holds the RTC port range, TURN, Redis address and
+API keys. That is platform/DevOps controlled under §13 and must never reach a
+tenant administrator — the file's own header says so. Its runtime behaviour is
+observed through Grafana (§12), not edited through a console.
+
+### 9d.7 Testing an agent from a browser — the Agents Playground
+
+LiveKit's Agents Playground is a browser client that joins a room and talks to
+an agent over WebRTC with no telephony in the path. It is a separate LiveKit
+application, not something `livekit-server` serves:
+
+| Where | What it is |
+|---|---|
+| https://agents-playground.livekit.io | Hosted demo. Still up, though LiveKit now steers people to the Cloud Agent Console. |
+| https://github.com/livekit/agents-playground | The open-source Next.js app. Wants exactly `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` and `NEXT_PUBLIC_LIVEKIT_URL`. |
+| https://github.com/livekit-examples/agent-starter-react | Newer, slimmer, voice-only. Same purpose. |
+
+All three values it needs already exist here: `devkey` and
+`devsecret-at-least-32-characters-long` from `.env`, and `ws://localhost:7880`
+from a browser (`ws://livekit:7880` from inside the compose network). Port 3202
+is free if it is added to `deploy/docker-compose.yml`.
+
+**It will not work against this worker yet, and the failure is silent.**
+`worker/entrypoint.py` gates every job on a SIP participant:
+
+```python
+participant = await _await_sip_participant(ctx)
+if participant is None:
+    # Nothing to serve. Recorded as a log event rather than a call row,
+    # because without SIP attributes there is no tenant to attribute it
+    # to — and a call row with a null tenant would violate spec 6.
+    logger.warning("no_sip_participant", extra={"room": ctx.room.name})
+    return
+```
+
+`_await_sip_participant` matches only `PARTICIPANT_KIND_SIP`. A browser joins
+as `PARTICIPANT_KIND_STANDARD`, so the playground connects to the room, the
+worker waits out the participant timeout, logs `no_sip_participant`, and
+leaves. What a tester hears is silence — the same symptom as the barge-in
+defect in §9a.11, which makes this the worst possible failure mode for a tool
+whose whole purpose is diagnosis.
+
+The comment states the reason, and it is a good one, so the gate stays. Making
+the playground usable therefore needs a **development-only** branch: accept a
+non-SIP participant that carries a DID in its participant attributes or room
+metadata, resolve configuration from that DID exactly as a call does, and gate
+the branch behind a setting that defaults to off so it cannot reach production.
+That is Plan item 2b.10.
+
+Until then the only way to exercise the pipeline is a real call (§9a.8), which
+measures telephony and the pipeline together — the specific reason 2b.10 is
+worth doing before the endpointing work in 2b.7.
+
+---
 
 ## 10. API Surface
 

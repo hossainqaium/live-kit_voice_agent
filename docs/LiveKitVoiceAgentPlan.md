@@ -249,12 +249,25 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
 | 2b.9 | Move STT to the self-hosted endpoint and re-measure. ~1.1s of the 4.7s time-to-first-audio is network transcription latency. | **defect** | §25, §56 |
+| 2b.10 | **Browser-based test client.** A development-only worker branch that accepts a non-SIP participant carrying a DID, so LiveKit's Agents Playground can exercise the real pipeline with no telephony in the path. Today the worker requires `PARTICIPANT_KIND_SIP` and abandons a browser participant silently. | tooling | §70 |
 | 2b.8 | 10-concurrent-call harness. | feature | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
 accepts `user_away_timeout`, `min_interruption_duration`,
 `min_interruption_words` and `allow_interruptions`; the work is passing
 configuration into them. Only maximum call duration needs new logic.
+
+**Why 2b.10 comes before 2b.7 rather than after it.** The endpointing defect can
+only be reproduced today by placing a real PBX call, so every measurement carries
+SIP, NAT and codec behaviour along with the pipeline's own — and the two are not
+separable from the outside. A browser client removes all of it and makes one
+conversational turn reproducible in seconds. The reason it does not already work
+is sound and must be preserved: SIP attributes carry the DID, the DID is the only
+route to a tenant, and a call row with a null tenant breaks §6. So the branch has
+to resolve a DID it is handed rather than skip tenant resolution, and it has to
+default to off. It is listed as tooling, not a feature — nothing ships to a
+tenant — but it is the cheapest thing in this phase and it shortens everything
+after it.
 
 **Exit criteria**
 
@@ -266,6 +279,9 @@ configuration into them. Only maximum call duration needs new logic.
 - No setting in `agent_versions` is loaded at runtime and then ignored — the
   property worth asserting in a test, so this class of defect cannot recur.
 - The latency dashboard renders p50 and p95 per stage.
+- One conversational turn can be exercised from a browser against a real
+  agent version's configuration, with no PBX in the path, and the
+  development-only branch that allows it is off by default.
 
 ### Phase 4b — Configuration Completion
 
@@ -355,7 +371,9 @@ So the priority is the enforcement gap, not more screens:
    shows and what a call does.
 2. **2b.7 and 2b.9** — endpointing and STT latency. The agent transcribes and
    does not reply; see §12.1. Nothing else in the product matters while that
-   holds.
+   holds. **2b.10 goes first inside this step**: reproducing the defect from a
+   browser costs seconds, where a PBX call costs minutes and adds variables
+   that cannot be separated from the pipeline's own.
 3. **2b.1–2b.4** — the agent-version settings that are loaded and ignored.
 4. **4b.4** — provider credentials in the console, which is what §77 turns on.
 5. **1b.1** — the usage rollup, so two of the three call limits stop being
@@ -1143,6 +1161,25 @@ invisible in development and obvious in production.
 **Assessment:** expected on a laptop, and a capacity signal rather than a bug.
 It is exactly the kind of thing Phase 8 must measure on production-shaped
 hardware instead of extrapolating from here (spec 75).
+
+#### The Agents Playground connects but no agent ever joins
+
+Symptom: the browser client joins the room and appears as a participant, nothing
+ever speaks, and the worker logs `no_sip_participant` once the participant
+timeout expires. No call row is written, so the attempt leaves no trace in the
+database either.
+
+Cause: `_await_sip_participant` in `worker/entrypoint.py` matches only
+`PARTICIPANT_KIND_SIP`. A browser participant is `PARTICIPANT_KIND_STANDARD`, so
+the job is abandoned — deliberately, because without SIP attributes there is no
+DID, without a DID there is no tenant, and a call attributed to no tenant would
+violate §6.
+
+No configuration changes this; the hosted playground cannot work against this
+worker as written. A browser test path needs the development-only branch recorded
+as item 2b.10. Worth knowing *before* reaching for the playground to debug audio,
+because its symptom — silence — is indistinguishable from the endpointing defect
+above, and mistaking one for the other costs an afternoon.
 
 #### Testing against a real PBX without touching its configuration
 

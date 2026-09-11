@@ -276,6 +276,28 @@ topology.
 
 Tenant-level LiveKit configuration **must** be UI/API managed. [§13]
 
+### 7.5 LiveKit's own administration surfaces [§11]
+
+§11 requires a LiveKit administration section and states that administrators must not be
+required to run LiveKit CLI commands for normal tenant configuration. Two properties of
+self-hosted LiveKit determine how that is satisfied:
+
+- **`livekit-server` and `livekit-sip` ship no administration UI.** Both expose an API only.
+  The LiveKit Cloud dashboard and its Agent Console *are* web UIs, but both are reached
+  through a LiveKit Cloud project, which Q1 rules out.
+- **`lk` (livekit-cli) is the only vendor-provided administration surface for a self-hosted
+  deployment** — and §11 explicitly rejects the CLI as the path for tenant configuration.
+
+So §11's administration section is the platform console itself, and the CLI remains an
+operator escape hatch rather than a configuration route.
+
+Combined with §12 — PostgreSQL first, LiveKit second — this yields a constraint worth stating
+directly: **the platform must never offer a UI that writes to LiveKit directly.** A direct
+write creates a second source of truth, and its divergence is exactly the drift §46 exists to
+detect. The LiveKit screen therefore reports the mirror's agreement with the database (sync
+state, drifted resources, Synchronize / Retry / Repair) rather than an inventory of LiveKit
+objects.
+
 ---
 
 ## 8. Telephony Configuration Requirements
@@ -998,6 +1020,12 @@ every request refuses.
 | Unit | tenant isolation, authorization, routing, configuration, agent logic, provider adapters, tools |
 | Integration | PBX → SIP → LiveKit → AI Agent → STT → LLM → TTS |
 | End-to-end | actual SIP/phone calls through the complete system |
+
+The integration row is deliberately the whole chain. A browser-based test client (LiveKit's
+Agents Playground, §9d.7 of the README) bypasses SIP and is a **diagnostic, not a substitute**:
+its value is separating a telephony fault from a pipeline fault, which the end-to-end path
+cannot do. It does not work against the current worker, which requires a SIP participant in
+order to resolve a tenant at all — Plan item 2b.10.
 
 ### 18.2 Load Testing [§71]
 
