@@ -27,8 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.crypto import CredentialCipher, CredentialEncryptionError
 from shared.logging import get_logger
-from shared.models import ProviderKind
+from shared.models import FallbackAction, ProviderKind
 from worker.providers.base import ProviderConfig
+from worker import routing as routing_engine
+from worker.routing import RoutingClosedError, RoutingDecision, RoutingHangupError
 
 logger = get_logger(__name__)
 
@@ -126,6 +128,10 @@ class CallContext:
     call_policy: CallPolicy
     transfer_policy: TransferPolicy
 
+    #: IANA timezone for the tenant. Used to determine which calendar day a
+    #: call belongs to for daily-limit and usage-rollup purposes (spec 47).
+    tenant_timezone: str = "UTC"
+
     #: Resolved tool definitions. Empty in Phase 1; populated in Phase 6.
     tools: tuple[dict[str, Any], ...] = ()
 
@@ -215,6 +221,7 @@ _RESOLVE_SQL = text(
     SELECT
         t.id                AS tenant_id,
         t.slug              AS tenant_slug,
+        t.timezone          AS tenant_timezone,
         t.max_concurrent_calls,
         t.max_daily_calls,
         t.max_monthly_minutes,
@@ -223,7 +230,8 @@ _RESOLVE_SQL = text(
         a.published_version_id,
         pn.id               AS phone_number_id,
         pn.pbx_id           AS pbx_id,
-        pn.sip_trunk_id     AS sip_trunk_id
+        pn.sip_trunk_id     AS sip_trunk_id,
+        pn.routing_rule_id  AS routing_rule_id
     FROM phone_numbers pn
     JOIN tenants t   ON t.id = pn.tenant_id
     LEFT JOIN agents a ON a.id = pn.inbound_agent_id
@@ -231,6 +239,15 @@ _RESOLVE_SQL = text(
       AND pn.status = 'ACTIVE'
       AND t.status  = 'ACTIVE'
     LIMIT 1
+    """
+)
+
+_AGENT_SQL = text(
+    """
+    SELECT id, name, published_version_id
+    FROM agents
+    WHERE id = :agent_id
+      AND status = 'ACTIVE'
     """
 )
 
@@ -319,6 +336,78 @@ _CONCURRENCY_SQL = text(
     """
 )
 
+#: Count of calls whose start_time falls on today's date in the tenant's own
+#: timezone.  Uses the index on (tenant_id, start_time) — the AT TIME ZONE
+#: cast is applied to the column value rather than to the comparison boundary,
+#: which prevents a full table scan on a large calls table.
+_DAILY_CALLS_SQL = text(
+    """
+    SELECT count(*)
+    FROM calls
+    WHERE tenant_id = :tenant_id
+      AND (start_time AT TIME ZONE :timezone)::date
+          = (now() AT TIME ZONE :timezone)::date
+    """
+)
+
+#: Estimated call minutes used this calendar month.
+#:
+#: For completed calls the stored ``duration_seconds`` is used exactly.
+#: For calls still in progress (no terminal state yet) the time elapsed
+#: since ``start_time`` is used as an upper bound.  This may overcount
+#: slightly — a call in progress will be counted twice if the check runs
+#: mid-call and again when it finishes — but it is the safe direction for
+#: a limit check: it will not allow more calls than the limit permits.
+#:
+#: The result is in seconds; the caller converts to minutes.
+_MONTHLY_SECONDS_SQL = text(
+    """
+    SELECT COALESCE(SUM(
+        CASE
+            WHEN duration_seconds IS NOT NULL
+                THEN duration_seconds
+            WHEN state NOT IN ('COMPLETED','FAILED','TIMEOUT','CANCELLED','BUSY','NO_ANSWER')
+                 AND start_time IS NOT NULL
+                THEN EXTRACT(EPOCH FROM (now() - start_time))::int
+            ELSE 0
+        END
+    ), 0)
+    FROM calls
+    WHERE tenant_id = :tenant_id
+      AND start_time IS NOT NULL
+      AND (start_time AT TIME ZONE :timezone)::date
+          >= date_trunc('month', (now() AT TIME ZONE :timezone)::date)::date
+    """
+)
+
+#: Upserts one row per (tenant, day) in the usage table so the monthly
+#: minutes rollup stays consistent.  The ON CONFLICT clause makes this safe
+#: to call even if the row already exists.
+_USAGE_UPSERT_SQL = text(
+    """
+    INSERT INTO usage (
+        id, tenant_id, usage_date,
+        call_count, answered_count, failed_count, transferred_count,
+        total_seconds, ai_seconds, provider_usage,
+        created_at, updated_at
+    )
+    VALUES (
+        :id, :tenant_id, :usage_date,
+        1, :answered, :failed, 0,
+        :duration_seconds, :duration_seconds, '{}'::jsonb,
+        :now, :now
+    )
+    ON CONFLICT (tenant_id, usage_date)
+    DO UPDATE SET
+        call_count      = usage.call_count      + 1,
+        answered_count  = usage.answered_count  + :answered,
+        failed_count    = usage.failed_count    + :failed,
+        total_seconds   = usage.total_seconds   + :duration_seconds,
+        ai_seconds      = usage.ai_seconds      + :duration_seconds,
+        updated_at      = :now
+    """
+)
+
 
 class CallConfigLoader:
     """Resolves a call's configuration and records the call."""
@@ -355,25 +444,57 @@ class CallConfigLoader:
         if row is None:
             raise NoRouteError(f"no active DID matches {did!r} for any active tenant")
 
-        if row["agent_id"] is None:
-            raise NoRouteError(f"DID {did!r} has no inbound agent assigned")
-
-        if row["published_version_id"] is None:
-            raise NotPublishedError(
-                f"agent {row['agent_name']!r} has no published version, so it cannot answer"
-            )
-
-        # Enforced before accepting the call, as spec 47 requires. Doing it
-        # after would mean the caller has already been answered.
+        # Enforced before accepting the call, as spec 47 requires.
         await self._enforce_limits(session, row)
 
+        # Evaluate routing rules (spec 20, 37, 38).  On success we get a
+        # RoutingDecision; on None we fall back to the DID's inbound_agent_id.
+        try:
+            decision: RoutingDecision | None = await routing_engine.resolve_route(
+                session,
+                tenant_id=row["tenant_id"],
+                tenant_timezone=row["tenant_timezone"] or "UTC",
+                did=did,
+                caller_number=sip.caller_number,
+                pbx_id=row["pbx_id"],
+                sip_trunk_id=row["sip_trunk_id"],
+                pinned_rule_id=row["routing_rule_id"],
+            )
+        except RoutingClosedError as exc:
+            raise NoRouteError(
+                f"routing closed for DID {did!r}: {exc}"
+            ) from exc
+        except RoutingHangupError as exc:
+            raise NoRouteError(
+                f"routing explicitly rejected DID {did!r}: {exc}"
+            ) from exc
+
+        if decision is not None:
+            # A routing rule selected an agent.  Look it up directly so we can
+            # apply the fallback chain when the primary has no published version.
+            resolved_agent_id, resolved_agent_name, resolved_version_id = (
+                await self._resolve_agent(session, decision, did)
+            )
+        else:
+            # No routing rules configured (or none match) — legacy direct assignment.
+            if row["agent_id"] is None:
+                raise NoRouteError(f"DID {did!r} has no inbound agent assigned")
+            if row["published_version_id"] is None:
+                raise NotPublishedError(
+                    f"agent {row['agent_name']!r} has no published version, "
+                    "so it cannot answer"
+                )
+            resolved_agent_id = row["agent_id"]
+            resolved_agent_name = row["agent_name"]
+            resolved_version_id = row["published_version_id"]
+
         version = (
-            (await session.execute(_VERSION_SQL, {"version_id": row["published_version_id"]}))
+            (await session.execute(_VERSION_SQL, {"version_id": resolved_version_id}))
             .mappings()
             .first()
         )
         if version is None:
-            raise NotPublishedError(f"published version {row['published_version_id']} is missing")
+            raise NotPublishedError(f"published version {resolved_version_id} is missing")
 
         credentials = await self._load_credentials(session, row["tenant_id"], version)
 
@@ -432,6 +553,7 @@ class CallConfigLoader:
             room_name=room_name,
             sip=sip,
             row=row,
+            agent_id=resolved_agent_id,
             version_id=version["id"],
             worker_id=worker_id,
         )
@@ -441,9 +563,10 @@ class CallConfigLoader:
             call_row_id=call_row_id,
             tenant_id=row["tenant_id"],
             tenant_slug=row["tenant_slug"],
-            agent_id=row["agent_id"],
+            tenant_timezone=row["tenant_timezone"] or "UTC",
+            agent_id=resolved_agent_id,
             agent_version_id=version["id"],
-            agent_name=row["agent_name"],
+            agent_name=resolved_agent_name,
             version_number=version["version_number"],
             room_name=room_name,
             did=did,
@@ -483,22 +606,124 @@ class CallConfigLoader:
 
     # ------------------------------------------------------------------ #
 
-    async def _enforce_limits(self, session: AsyncSession, row: Any) -> None:
-        """Reject the call if a tenant limit is already reached (spec 47)."""
-        max_concurrent = row["max_concurrent_calls"]
-        if max_concurrent is None:
-            return
+    async def _resolve_agent(
+        self,
+        session: AsyncSession,
+        decision: RoutingDecision,
+        did: str,
+    ) -> tuple[uuid.UUID, str, uuid.UUID]:
+        """Look up the routing-resolved agent and apply the fallback chain.
 
-        active = (
-            await session.execute(_CONCURRENCY_SQL, {"tenant_id": row["tenant_id"]})
-        ).scalar_one()
+        Returns ``(agent_id, agent_name, published_version_id)`` for whichever
+        agent (primary or secondary) can actually answer.
 
-        if active >= max_concurrent:
-            raise TenantLimitExceededError(
-                f"tenant {row['tenant_slug']!r} already has {active} active call(s), "
-                f"at its limit of {max_concurrent}",
-                limit="MAX_CONCURRENT_CALLS",
+        Raises ``NoRouteError`` when the agent no longer exists.
+        Raises ``NotPublishedError`` when neither the primary nor any fallback
+        has a published version.
+        """
+        agent_row = (
+            (await session.execute(_AGENT_SQL, {"agent_id": decision.agent_id}))
+            .mappings()
+            .first()
+        )
+        if agent_row is None:
+            raise NoRouteError(
+                f"routing rule {decision.rule_name!r} points to agent "
+                f"{decision.agent_id} which no longer exists or is inactive"
             )
+
+        if agent_row["published_version_id"] is not None:
+            return agent_row["id"], agent_row["name"], agent_row["published_version_id"]
+
+        # Primary has no published version — try the fallback agent if one is configured.
+        if (
+            decision.fallback_action == FallbackAction.SECONDARY_AGENT
+            and decision.fallback_agent_id is not None
+        ):
+            fallback_row = (
+                (await session.execute(_AGENT_SQL, {"agent_id": decision.fallback_agent_id}))
+                .mappings()
+                .first()
+            )
+            if fallback_row is not None and fallback_row["published_version_id"] is not None:
+                logger.info(
+                    "routing_primary_unpublished_using_fallback",
+                    extra={
+                        "rule": decision.rule_name,
+                        "primary_agent_id": str(decision.agent_id),
+                        "fallback_agent_id": str(decision.fallback_agent_id),
+                    },
+                )
+                return (
+                    fallback_row["id"],
+                    fallback_row["name"],
+                    fallback_row["published_version_id"],
+                )
+
+        raise NotPublishedError(
+            f"agent {agent_row['name']!r} (from routing rule {decision.rule_name!r}) "
+            "has no published version, so it cannot answer"
+        )
+
+    async def _enforce_limits(self, session: AsyncSession, row: Any) -> None:
+        """Reject the call if any tenant limit would be exceeded (spec 47).
+
+        Three limits are checked in order of query cost — cheapest first so
+        the common case (all limits unset, or only concurrent set) is fast:
+
+        1. ``max_concurrent_calls`` — one COUNT over the active-call index.
+        2. ``max_daily_calls``      — one COUNT over today's rows, index-backed.
+        3. ``max_monthly_minutes``  — one SUM over this month's rows.
+
+        All three are gated; a None limit is unconstrained.
+        """
+        tenant_id = row["tenant_id"]
+        tenant_slug = row["tenant_slug"]
+        timezone = row["tenant_timezone"] or "UTC"
+
+        # 1. Concurrent-call limit (spec 47 §max_concurrent).
+        max_concurrent = row["max_concurrent_calls"]
+        if max_concurrent is not None:
+            active = (
+                await session.execute(_CONCURRENCY_SQL, {"tenant_id": tenant_id})
+            ).scalar_one()
+            if active >= max_concurrent:
+                raise TenantLimitExceededError(
+                    f"tenant {tenant_slug!r} already has {active} active call(s), "
+                    f"at its limit of {max_concurrent}",
+                    limit="MAX_CONCURRENT_CALLS",
+                )
+
+        # 2. Daily call limit (spec 47 §max_daily_calls).
+        max_daily = row["max_daily_calls"]
+        if max_daily is not None:
+            daily = (
+                await session.execute(
+                    _DAILY_CALLS_SQL, {"tenant_id": tenant_id, "timezone": timezone}
+                )
+            ).scalar_one()
+            if daily >= max_daily:
+                raise TenantLimitExceededError(
+                    f"tenant {tenant_slug!r} has made {daily} call(s) today, "
+                    f"at its daily limit of {max_daily}",
+                    limit="MAX_DAILY_CALLS",
+                )
+
+        # 3. Monthly minutes limit (spec 47 §max_monthly_minutes).
+        max_monthly = row["max_monthly_minutes"]
+        if max_monthly is not None:
+            monthly_seconds = (
+                await session.execute(
+                    _MONTHLY_SECONDS_SQL, {"tenant_id": tenant_id, "timezone": timezone}
+                )
+            ).scalar_one() or 0
+            used_minutes = int(monthly_seconds) // 60
+            if used_minutes >= max_monthly:
+                raise TenantLimitExceededError(
+                    f"tenant {tenant_slug!r} has used {used_minutes}/{max_monthly} minutes "
+                    "this month",
+                    limit="MAX_MONTHLY_MINUTES",
+                )
 
     async def _load_credentials(
         self, session: AsyncSession, tenant_id: uuid.UUID, version: Any
@@ -632,6 +857,7 @@ class CallConfigLoader:
         room_name: str,
         sip: SipCallInfo,
         row: Any,
+        agent_id: uuid.UUID,
         version_id: uuid.UUID,
         worker_id: str,
     ) -> uuid.UUID:
@@ -661,7 +887,7 @@ class CallConfigLoader:
                 "id": call_row_id,
                 "tenant_id": row["tenant_id"],
                 "call_id": call_id,
-                "agent_id": row["agent_id"],
+                "agent_id": agent_id,
                 "agent_version_id": version_id,
                 "pbx_id": row["pbx_id"],
                 "sip_trunk_id": row["sip_trunk_id"],
@@ -678,3 +904,52 @@ class CallConfigLoader:
         )
         await session.commit()
         return call_row_id
+
+
+async def update_usage(
+    session: AsyncSession,
+    *,
+    context: CallContext,
+    duration_seconds: int,
+    succeeded: bool,
+) -> None:
+    """Upsert the tenant's daily usage row after a call completes (spec 47, 61).
+
+    This keeps the ``usage`` table accurate so that monthly-minutes checks
+    reflect completed calls.  Non-fatal: a failure here costs a row in the
+    analytics table, not a lost call.
+
+    Parameters
+    ----------
+    session:
+        Open async session.  The caller is responsible for committing.
+    context:
+        The completed call's context (supplies tenant_id, tenant_timezone).
+    duration_seconds:
+        Actual call duration, from the state tracker.  Clamped to 0 so a
+        missing duration (very short or failed calls) does not go negative.
+    succeeded:
+        True when the call ended in COMPLETED; False for FAILED / other.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        zone = ZoneInfo(context.tenant_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo("UTC")
+
+    usage_date = datetime.now(UTC).astimezone(zone).date()
+    secs = max(0, int(duration_seconds))
+
+    await session.execute(
+        _USAGE_UPSERT_SQL,
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": context.tenant_id,
+            "usage_date": usage_date,
+            "answered": 1 if succeeded else 0,
+            "failed": 0 if succeeded else 1,
+            "duration_seconds": secs,
+            "now": datetime.now(UTC),
+        },
+    )

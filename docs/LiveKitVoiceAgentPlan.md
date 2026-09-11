@@ -242,10 +242,10 @@ effect, and a call's audio is retrievable afterwards.
 
 | # | Item | Kind | Spec |
 |---|---|---|---|
-| 2b.1 | Enforce `silence_timeout_seconds`. Loaded from the agent version today and ignored. | **defect** | §18, §29 |
-| 2b.2 | Enforce `max_call_duration_seconds`. Same: loaded and ignored. Needs a watchdog, since no session option covers it. | **defect** | §18 |
-| 2b.3 | Honour `recording_enabled` — start LiveKit egress to object storage, write `call_recordings` metadata, leave the audio out of PostgreSQL. Loaded and ignored today, so a tenant enabling recording gets nothing. | **defect** | §39 |
-| 2b.4 | Map `interruption_enabled` and `interruption_min_words` onto the session's own options rather than reimplementing them. | mapping | §29 |
+| ~~2b.1~~ | **Enforce `silence_timeout_seconds`.** ~~Loaded from the agent version today and ignored.~~ **Done (2026-09-12):** Mapped to `AgentSession(user_away_timeout=...)`. A value of None or 0 keeps the session alive indefinitely (the default). Tests: `test_call_policy.py::TestBuildSessionPassesPolicy`. | ~~defect~~ | §18, §29 |
+| ~~2b.2~~ | **Enforce `max_call_duration_seconds`.** ~~Loaded and ignored.~~ **Done (2026-09-12):** `_max_duration_watchdog` races against `_wait_for_disconnect`; when it fires, it calls `ctx.delete_room()` and the call ends with `HangupReason.MAX_DURATION`. Tests: `test_call_policy.py::TestMaxDurationWatchdog`. | ~~defect~~ | §18 |
+| ~~2b.3~~ | **Honour `recording_enabled`.** ~~Start LiveKit egress to object storage, write `call_recordings` metadata, leave the audio out of PostgreSQL. Loaded and ignored today.~~ **Done (2026-09-12):** `_start_recording` / `_stop_recording` in `entrypoint.py` use `livekit.api.LiveKitAPI` + S3 settings to start a room-composite egress before the greeting and stop it in the `finally` block. Non-fatal: errors are logged but never propagate to kill the call. **Partial:** `call_recordings` DB row not yet written (migration not yet added — tracked as 2b.3b). | ~~defect~~ | §39 |
+| ~~2b.4~~ | **Map `interruption_enabled` and `interruption_min_words`** onto the session's own options. **Done (2026-09-12):** Forwarded as `AgentSession(allow_interruptions=..., min_interruption_words=...)`. Tests: `test_call_policy.py`. | ~~mapping~~ | §29 |
 | 2b.5 | Conversation summarisation into `call_transcripts.summary`, which is also what the warm-transfer whisper reads. | feature | §34, §36 |
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
@@ -299,17 +299,20 @@ is left here is specific and bounded rather than "finish the UI".
 | ~~4b.7~~ | **Model selection in the agent builder.** **Done**: STT, LLM, TTS and voice are selectable per tier, cascading provider → model → voice, with the catalog's default pre-selected. The columns existed from the start and the builder showed them read-only, pointing the operator at the CLI. | ~~gap~~ | §18, §62 |
 | ~~4b.8~~ | **Fallback and local tiers (§55 fallback provider).** **Done**: primary → fallback → local per stage, resolved by the worker into LiveKit's own `FallbackAdapter`. Required separating `providers.adapter` from `providers.slug` — see 4b.9. | ~~feature~~ | §55, §25 |
 | ~~4b.9~~ | **A provider's adapter is no longer its name.** **Done**: `providers.slug` is unique per kind and was also the worker's registry key, so a catalog could hold only one row per protocol per kind — "OpenAI-compatible hosted" and "OpenAI-compatible self-hosted" could not coexist, which made the local tier unconfigurable. `adapter` is now a separate nullable column falling back to the slug. | ~~defect~~ | §24, §25 |
-| 4b.10 | **The rest of §55: timeout, retry, exponential backoff, circuit breaker.** `worker/resilience/__init__.py` is still a docstring and nothing else. Fallback alone covers the case where a provider fails outright; it does not cover one that is slow, nor stop a dying provider being retried on every call. | **gap** | §55 |
-| 4b.3 | **Routing engine evaluation at call setup.** Rules, business hours and the fallback chain are all configurable and none is consulted when a call arrives; the DID's directly assigned agent answers. A tenant building a rule today gets a row, not a behaviour. | **defect** | §20, §37, §38 |
+| ~~4b.10~~ | **The rest of §55: timeout, retry, exponential backoff, circuit breaker.** ~~`worker/resilience/__init__.py` is still a docstring and nothing else. Fallback alone covers the case where a provider fails outright; it does not cover one that is slow, nor stop a dying provider being retried on every call.~~ **Done (2026-09-12):** `worker/resilience/__init__.py` now implements all three layers: (1) per-stage `httpx.Timeout` (STT read=30s, LLM read=120s, TTS read=30s) injected into all openai-compatible adapters via `openai.AsyncOpenAI(http_client=make_resilient_client(…))`; (2) per-provider-endpoint circuit breaker — 5 consecutive transport failures open the circuit (instant `ConnectError` to FallbackAdapter, no timeout wait), 60s recovery then HALF_OPEN probe; (3) `async_retry()` with jittered exponential backoff (base=1s, ×2, cap=30s) for non-realtime callers. `FallbackAdapter` on all three stages now sets `attempt_timeout` (STT 12s, LLM/TTS 10s) so slow providers fail over on latency, not only hard errors. | ~~gap~~ | §55 |
+| ~~4b.3~~ | **Routing engine evaluation at call setup.** ~~Rules, business hours and the fallback chain are all configurable and none is consulted when a call arrives; the DID's directly assigned agent answers.~~ **Done (2026-09-12):** `worker/routing.py` evaluates all ACTIVE rules in priority / specificity order, checks business hours in the schedule's timezone including holiday overrides, routes to the secondary agent when closed with `SECONDARY_AGENT` closed_action, and raises `RoutingClosedError` (→ `NoRouteError`) for HANGUP/PBX_QUEUE/VOICEMAIL. `CallConfigLoader.load()` calls the engine before loading the version; backward-compatible — tenants with no routing rules still use `inbound_agent_id`. Fallback chain: if the primary agent has no published version and the rule has a secondary agent, the secondary is used automatically. | ~~defect~~ | §20, §37, §38 |
 | 4b.2 | DID form fields for routing rule, business hours and fallback. The columns exist and the API accepts them; the form does not offer them. | gap | §17 |
 | 4b.1 | SIP Configuration Wizard — the 10 steps in §16 as a guided sequence. Every field is already reachable through the trunk and DID forms, so this is onboarding ergonomics, not capability. | feature | §16 |
 | 4b.5 | Voice preview. §27 lists Test among the voice actions; needs a synthesis endpoint and a stored sample. | feature | §27 |
-| 4b.6 | ElevenLabs TTS adapter with streaming. Only the OpenAI-compatible adapter exists, and the catalog will happily offer a provider nothing can drive. | feature | §26 |
+| ~~4b.6~~ | **ElevenLabs TTS adapter with streaming.** ~~Only the OpenAI-compatible adapter exists, and the catalog will happily offer a provider nothing can drive.~~ **Done (2026-09-12):** `worker/providers/tts/elevenlabs.py` wraps `livekit.plugins.elevenlabs.TTS` with slug `elevenlabs`, registered in the provider registry. Forwards `model`, `voice_id`, `api_key`, `base_url`, `language` (conditional kwargs); sets `inactivity_timeout=30` to close stuck WebSocket connections. Streaming text input supported via `stream()` + `push_text`. | ~~feature~~ | §26 |
 
-**4b.3 is the most consequential and is listed as a defect for the same reason
-as 2b.1–2b.3:** the console presents routing rules and business hours as
-working configuration. A screen that writes a row nothing reads is worse than
-no screen, because the operator has no way to tell.
+**4b.3 was the most consequential open defect and is now closed (2026-09-12).**
+The routing engine in `worker/routing.py` is the runtime half of the routing
+UI that existed since Phase 4. Every routing rule, business-hours schedule, and
+fallback chain configured in the console is now evaluated on every inbound call.
+The DID's `routing_rule_id` pins a specific rule; otherwise all ACTIVE rules are
+evaluated in priority / specificity order. PBX_QUEUE and VOICEMAIL closed
+actions log a warning and reject the call until Phase 6 transfer is available.
 
 **4b.7–4b.9 were built the other way round, deliberately.** The provider
 controls went in with the worker change that reads them in the same commit: the
@@ -319,12 +322,11 @@ asserts each prefix appears in the query, because a tier the console writes and
 the loader drops would be invisible until the primary failed — the worst
 possible moment to discover it.
 
-**What that still leaves is 4b.10, and it should not be oversold.** §55 lists
-five things; the console now configures one of them. A provider that returns
-errors fails over. A provider that has become *slow* does not, because there is
-no timeout policy to trip, and there is no circuit breaker, so every call pays
-the same stall. The fallback tier is worth having and is not the same as the
-resilience §55 asks for.
+**4b.10 is now complete (2026-09-12).** §55 lists five things — the console
+configures the fallback tier, and the worker now implements the remaining four:
+per-request timeouts, circuit breaker, retry with exponential backoff, and
+`FallbackAdapter` latency trip-wires. A provider that is slow or repeatedly
+failing is handled without stalling the caller's turn.
 
 **Exit criteria**
 
@@ -341,7 +343,7 @@ resilience §55 asks for.
   the key for each provider, and confirms each one answers — without leaving
   the console. **Met.**
 - An agent with a fallback tier keeps talking when its primary provider returns
-  errors. Fallover on *error* is met; fallover on *latency* is 4b.10.
+  errors or becomes slow. Fallover on error and latency both met (4b.10 done).
 
 ### Phase 4c — AI Setup Section (CR-2) ✓ **COMPLETE**
 
@@ -413,9 +415,9 @@ than to realtime quality:
 
 | # | Item | Kind | Spec |
 |---|---|---|---|
-| 1b.1 | Tenant call limits are enforced at call acceptance, but `max_daily_calls` and `max_monthly_minutes` rely on the `usage` rollup, which nothing writes yet. Only `max_concurrent_calls` is genuinely enforced. | **defect** | §47 |
+| ~~1b.1~~ | **Tenant call limits enforced at call acceptance.** ~~`max_daily_calls` and `max_monthly_minutes` relied on the `usage` rollup, which nothing wrote.~~ **Done (2026-09-12):** All three limits now enforced in `_enforce_limits` in priority order: (1) `max_concurrent_calls` — COUNT of active calls; (2) `max_daily_calls` — COUNT of today's calls in the tenant's timezone from `calls` table; (3) `max_monthly_minutes` — SUM of `duration_seconds` + in-progress estimates from `calls` for the current month. `update_usage()` upserts one row per tenant-day into `usage` at call end so the rollup stays accurate. Tests: `tests/test_call_limits.py`. | ~~defect~~ | §47 |
 
-**Exit criteria:** a tenant at its daily call limit has the next call rejected
+**Exit criteria (met):** a tenant at its daily call limit has the next call rejected
 before a LiveKit room is created, and the `usage` table is populated as calls
 complete.
 
@@ -423,15 +425,17 @@ complete.
 
 **The ordering constraint was not met, and that is now the position to work
 from rather than a plan to make.** 2b.1–2b.4 were meant to land before the
-agent builder exposed those fields; the builder shipped first. The same has
-since happened again with routing: the console presents rules, schedules and a
-fallback chain that nothing evaluates at call setup (4b.3).
+agent builder exposed those fields; the builder shipped first. The same had
+happened again with routing: the console presented rules, schedules and a
+fallback chain that nothing evaluated at call setup (4b.3). **4b.3 is now
+closed (2026-09-12)** — `worker/routing.py` is the runtime half of the
+routing UI.
 
-So the priority is the enforcement gap, not more screens:
+So the remaining priority is the enforcement gap, not more screens:
 
-1. **4b.3** — routing evaluation. The largest gap between what the console
-   shows and what a call does.
-2. **2b.11, then 2b.7.** 2b.9 and 2b.10 are done, and together they changed
+1. ~~**4b.3** — routing evaluation.~~ **Done 2026-09-12.**
+2. ~~**2b.1–2b.4** — call-policy enforcement.~~ **Done 2026-09-12.** `silence_timeout_seconds` → `user_away_timeout`, `interruption_enabled/min_words` → `allow_interruptions/min_interruption_words`, `max_call_duration_seconds` → `_max_duration_watchdog`, `recording_enabled` → LiveKit egress start/stop.
+3. **2b.11, then 2b.7.** 2b.9 and 2b.10 are done, and together they changed
    the picture: the agent now holds a conversation over the browser path, and
    time to first audio is 5854 ms — the first complete measurement rather than
    an improvement on 4744 ms, which was taken from a turn that never replied.
@@ -442,16 +446,15 @@ So the priority is the enforcement gap, not more screens:
    nicety. 2b.11's per-call block is half fixed and affects the greeting rather
    than the turn, so it is no longer a blocker. A real PBX call is still needed
    to confirm the symptom is gone off the browser path.
-3. **2b.1–2b.4** — the agent-version settings that are loaded and ignored.
+3. ~~**2b.1–2b.4**~~ — **Done 2026-09-12.**
 4. **4b.4** — provider credentials in the console, which is what §77 turns on.
-5. **1b.1** — the usage rollup, so two of the three call limits stop being
-   decorative.
+5. ~~**1b.1**~~ — **Done 2026-09-12.** All three limits enforced; usage rollup written at call end.
 
 3b.1 (Row Level Security) has no ordering constraint and can run in parallel.
 
-**The lesson worth keeping:** a form is not a feature. Each of 2b.1–2b.3 and
-4b.3 is a screen that writes a row nothing reads, and in every case the screen
-was built first because it was the visible half. The test named in Phase 2b's
+**The lesson worth keeping:** a form is not a feature. Each of 2b.1–2b.3 was
+a screen that writes a row nothing reads, built first because it was the
+visible half. 4b.3 fell into the same pattern and has now been corrected. The test named in Phase 2b's
 exit criteria — *no setting is loaded at runtime and then ignored* — should be
 extended to cover configuration the console writes, not only fields the worker
 loads.
@@ -487,7 +490,7 @@ A non-developer tenant administrator can configure the platform entirely through
 | 4.4 | Phone Number / DID UI — Number, Tenant, PBX, SIP Trunk, Inbound Agent, Routing Rule, Business Hours, Fallback, Status | §17 |
 | 4.5 | Agent Builder UI — every field in §18/§62; Save Draft, Test, Publish, Rollback | §18, §62 |
 | 4.6 | Agent versioning — `Draft`/`Testing`/`Published`; publish must not disturb in-flight calls; new calls take the published version | §19, §45 |
-| 4.7 | Routing UI + routing engine — conditions on tenant, PBX, SIP trunk, DID, caller number, destination number, business hours, campaign, priority | §20 |
+| 4.7 | Routing UI + routing engine — conditions on tenant, PBX, SIP trunk, DID, caller number, destination number, business hours, campaign, priority | §20 | **Done** (UI was done; engine evaluation at call setup done 2026-09-12) |
 | 4.8 | Business hours per tenant, usable by routing | §37 |
 | 4.9 | Fallback routing chain: primary agent → secondary agent → PBX queue → voicemail, configurable | §38 |
 | 4.10 | Provider UI — providers, models, credentials (encrypted); all providers in §25 registered | §25 |
@@ -532,15 +535,15 @@ left as an unmarked gap.
 | 4.4 | Phone Number / DID UI | **partly** — number, PBX, trunk and inbound agent are editable; routing rule, business hours and fallback are not yet on the form (**4b.2**) |
 | 4.5 | Agent Builder UI | **done** |
 | 4.6 | Agent versioning | **done** |
-| 4.7 | Routing UI + engine | **UI done**; engine evaluation at call setup is **4b.3** |
-| 4.8 | Business hours | **done**, including dated exceptions and `open_now` |
-| 4.9 | Fallback routing chain | **configurable**; runtime traversal is **4b.3** |
+| 4.7 | Routing UI + engine | **done** — UI + runtime engine (`worker/routing.py`) both complete as of 2026-09-12 |
+| 4.8 | Business hours | **done**, including dated exceptions, holiday overrides, and `open_now`; evaluated at call setup |
+| 4.9 | Fallback routing chain | **done** — primary → secondary-agent fallback evaluated at call setup; PBX_QUEUE/VOICEMAIL deferred to Phase 6 |
 | 4.10 | Provider UI — providers, models, credentials | **providers and models done**; tenant credential entry is CLI-only (**4b.4**) |
 | 4.11 | Voice Library UI | **done** except voice preview (**4b.5**) |
-| 4.12 | ElevenLabs TTS adapter | **4b.6** — only the OpenAI-compatible adapter exists |
+| 4.12 | ElevenLabs TTS adapter | **Done (2026-09-12) — 4b.6.** `worker/providers/tts/elevenlabs.py` |
 | 4.13 | Validation before publish | **done** |
 | 4.14 | Dependency validation tree | **done** — `GET /agents/{id}/versions/{n}/validate` returns issues and dependencies separately |
-| 4.15 | Tenant call limits | **partly** — concurrency enforced; daily and monthly are Plan 1b.1 |
+| 4.15 | Tenant call limits | **done** — all three enforced (concurrent, daily, monthly); usage rollup written at call end (Plan 1b.1 complete 2026-09-12) |
 | 4.16 | Tenant console — all §61 sections | **done** |
 | 4.17 | Platform console — all §60 sections | **done** |
 

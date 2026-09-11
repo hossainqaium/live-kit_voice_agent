@@ -35,6 +35,7 @@ def _registry() -> dict[tuple[ProviderKind, str], Builder]:
     from worker.providers.llm import echo as llm_echo
     from worker.providers.llm import openai_compatible as llm_openai
     from worker.providers.stt import openai_compatible as stt_openai
+    from worker.providers.tts import elevenlabs as tts_elevenlabs
     from worker.providers.tts import openai_compatible as tts_openai
 
     return {
@@ -42,6 +43,7 @@ def _registry() -> dict[tuple[ProviderKind, str], Builder]:
         (ProviderKind.LLM, llm_openai.OpenAICompatibleLLM.slug): llm_openai.build,
         (ProviderKind.LLM, llm_echo.EchoLLM.slug): llm_echo.build,
         (ProviderKind.TTS, tts_openai.OpenAICompatibleTTS.slug): tts_openai.build,
+        (ProviderKind.TTS, tts_elevenlabs.ElevenLabsTTS.slug): tts_elevenlabs.build,
     }
 
 

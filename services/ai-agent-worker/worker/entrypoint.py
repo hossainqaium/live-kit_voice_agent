@@ -15,6 +15,7 @@ The worker holds no tenant logic. Everything above step 3 is data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
@@ -35,11 +36,13 @@ from worker.config_loader import (
     NotPublishedError,
     SipCallInfo,
     TenantLimitExceededError,
+    update_usage,
 )
 from worker.db import get_session_factory
 from worker.health import state as worker_state
 from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
+from worker.resilience import ATTEMPT_TIMEOUT
 from worker.settings import get_settings
 
 logger = get_logger(__name__)
@@ -186,6 +189,14 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
     A single-tier chain is passed through unwrapped. Wrapping one provider adds
     a layer that can only ever fail the same way, and it would show up in every
     trace for no reason.
+
+    Call-policy options (spec 18, 29) are forwarded to the session rather than
+    reimplemented. LiveKit's own option names are used; the mapping is:
+      silence_timeout_seconds → user_away_timeout
+      interruption_enabled    → allow_interruptions
+      interruption_min_words  → min_interruption_words
+    max_call_duration_seconds is handled by a separate watchdog task in
+    ``_run_call`` because no session option covers hard wall-clock limits.
     """
     from livekit.agents import llm as llm_api
     from livekit.agents import stt as stt_api
@@ -204,9 +215,21 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
         for config in (context.tts, *context.tts_fallbacks)
     ]
 
-    stt = stt_chain[0] if len(stt_chain) == 1 else stt_api.FallbackAdapter(stt_chain)
-    llm = llm_chain[0] if len(llm_chain) == 1 else llm_api.FallbackAdapter(llm_chain)
-    tts = tts_chain[0] if len(tts_chain) == 1 else tts_api.FallbackAdapter(tts_chain)
+    stt = (
+        stt_chain[0]
+        if len(stt_chain) == 1
+        else stt_api.FallbackAdapter(stt_chain, attempt_timeout=ATTEMPT_TIMEOUT["stt"])
+    )
+    llm = (
+        llm_chain[0]
+        if len(llm_chain) == 1
+        else llm_api.FallbackAdapter(llm_chain, attempt_timeout=ATTEMPT_TIMEOUT["llm"])
+    )
+    tts = (
+        tts_chain[0]
+        if len(tts_chain) == 1
+        else tts_api.FallbackAdapter(tts_chain, attempt_timeout=ATTEMPT_TIMEOUT["tts"])
+    )
 
     if len(stt_chain) > 1 or len(llm_chain) > 1 or len(tts_chain) > 1:
         logger.info(
@@ -218,11 +241,28 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
             },
         )
 
+    policy = context.call_policy
+
     # Voice activity detection drives turn-taking and barge-in (spec 29).
     # Silero runs locally, so it adds no network latency to the turn decision —
     # but loading it is synchronous, which is why it arrives here already
     # loaded by ``prewarm`` rather than being loaded per call.
-    return AgentSession(stt=stt, llm=llm, tts=tts, vad=vad)
+    return AgentSession(
+        stt=stt,
+        llm=llm,
+        tts=tts,
+        vad=vad,
+        # Spec 29 — barge-in / interruption policy (2b.4).
+        allow_interruptions=policy.interruption_enabled,
+        min_interruption_words=policy.interruption_min_words,
+        # Spec 18 — hang up when the caller goes silent for too long (2b.1).
+        # None keeps the session alive indefinitely (the default behaviour).
+        user_away_timeout=(
+            float(policy.silence_timeout_seconds)
+            if policy.silence_timeout_seconds
+            else None
+        ),
+    )
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -309,6 +349,137 @@ async def entrypoint(ctx: JobContext) -> None:
         await _run_call(ctx, context, factory)
 
 
+async def _max_duration_watchdog(
+    ctx: JobContext, max_seconds: int, call_id: str
+) -> HangupReason:
+    """Sleep for ``max_seconds``, then close the room (spec 18, 2b.2).
+
+    Returns ``MAX_DURATION`` so the caller can record why the call ended.
+    The room deletion is what actually causes ``_wait_for_disconnect`` to
+    resolve, so both tasks always finish cleanly.
+    """
+    import asyncio
+
+    await asyncio.sleep(max_seconds)
+    logger.warning(
+        "call_max_duration_reached",
+        extra={"call_id": call_id, "max_seconds": max_seconds},
+    )
+    await ctx.delete_room()
+    return HangupReason.MAX_DURATION
+
+
+async def _wait_for_call_end(
+    ctx: JobContext, context: CallContext
+) -> HangupReason:
+    """Wait for the room to close, enforcing a hard wall-clock limit if set.
+
+    When ``max_call_duration_seconds`` is configured, two tasks race:
+    - ``_wait_for_disconnect`` resolves on caller hangup (normal path).
+    - ``_max_duration_watchdog`` fires after the limit, deletes the room, and
+      resolves ``_wait_for_disconnect`` as a side-effect.
+
+    The task that did not win is cancelled so it does not linger.
+    """
+    import asyncio
+
+    max_seconds = context.call_policy.max_call_duration_seconds
+    if max_seconds is None:
+        await _wait_for_disconnect(ctx)
+        return HangupReason.CALLER_HANGUP
+
+    disconnect_task = asyncio.create_task(_wait_for_disconnect(ctx))
+    watchdog_task = asyncio.create_task(
+        _max_duration_watchdog(ctx, max_seconds, context.call_id)
+    )
+
+    done, pending = await asyncio.wait(
+        {disconnect_task, watchdog_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    if watchdog_task in done:
+        return HangupReason.MAX_DURATION
+    return HangupReason.CALLER_HANGUP
+
+
+async def _start_recording(ctx: JobContext, context: CallContext) -> str | None:
+    """Start a LiveKit room-composite egress to S3/MinIO (spec 39, 2b.3).
+
+    Non-fatal: a recording failure must never silence the caller. The egress ID
+    is logged so it can be retrieved from LiveKit's own records if needed.
+    """
+    settings = get_settings()
+    if not settings.s3_bucket_recordings:
+        return None
+    try:
+        from livekit.api import LiveKitAPI
+        from livekit.api import (  # livekit-api ≥ 1.0  # noqa: PLC0415
+            EncodedFileOutput,
+            RoomCompositeEgressRequest,
+            S3Upload,
+        )
+
+        s3 = S3Upload(
+            access_key=settings.s3_access_key_id.get_secret_value(),
+            secret=settings.s3_secret_access_key.get_secret_value(),
+            bucket=settings.s3_bucket_recordings,
+            region=settings.s3_region,
+            endpoint=settings.s3_endpoint_url or "",
+            force_path_style=bool(settings.s3_endpoint_url),
+        )
+        egress_path = f"calls/{context.tenant_id}/{context.call_id}.mp4"
+        req = RoomCompositeEgressRequest(
+            room_name=context.room_name,
+            file_outputs=[EncodedFileOutput(filepath=egress_path, s3=s3)],
+        )
+        lk_url = (
+            settings.livekit_url.replace("ws://", "http://").replace("wss://", "https://")
+        )
+        async with LiveKitAPI(
+            url=lk_url,
+            api_key=settings.livekit_api_key.get_secret_value(),
+            api_secret=settings.livekit_api_secret.get_secret_value(),
+        ) as lk:
+            info = await lk.egress.start_room_composite_egress(req)
+        egress_id: str = info.egress_id
+        logger.info(
+            "recording_started",
+            extra={"egress_id": egress_id, "s3_path": egress_path},
+        )
+        return egress_id
+    except Exception:
+        logger.exception("recording_start_failed_call_continues")
+        return None
+
+
+async def _stop_recording(egress_id: str) -> None:
+    """Stop the LiveKit egress started by ``_start_recording``."""
+    settings = get_settings()
+    try:
+        from livekit.api import LiveKitAPI  # noqa: PLC0415
+
+        lk_url = (
+            settings.livekit_url.replace("ws://", "http://").replace("wss://", "https://")
+        )
+        async with LiveKitAPI(
+            url=lk_url,
+            api_key=settings.livekit_api_key.get_secret_value(),
+            api_secret=settings.livekit_api_secret.get_secret_value(),
+        ) as lk:
+            await lk.egress.stop_egress(egress_id)
+        logger.info("recording_stopped", extra={"egress_id": egress_id})
+    except Exception:
+        logger.exception("recording_stop_failed", extra={"egress_id": egress_id})
+
+
 async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
     """Run the conversation for a fully resolved call."""
     tracker = CallStateTracker(
@@ -334,6 +505,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
     )
 
     with log_context(**context.log_fields()):
+        egress_id: str | None = None
         try:
             session = _build_session(context, ctx.proc.userdata["vad"])
 
@@ -364,17 +536,22 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             await tracker.transition(CallState.IN_PROGRESS)
             logger.info("conversation_started")
 
+            # Start recording before any audio so the greeting is captured
+            # (spec 39, 2b.3). Non-fatal: failure is logged, call continues.
+            if context.call_policy.recording_enabled:
+                egress_id = await _start_recording(ctx, context)
+
             if context.greeting:
                 # Spoken first so the caller is not met with silence while the
                 # model warms up.
                 await session.say(context.greeting, allow_interruptions=True)
 
-            # The session ends when the caller hangs up, or when a policy limit
-            # closes it. Both surface as the room disconnecting.
-            await _wait_for_disconnect(ctx)
+            # Wait for the call to end — either the caller hangs up, or the
+            # max-duration watchdog fires (spec 18, 2b.2).
+            hangup_reason = await _wait_for_call_end(ctx, context)
 
-            await tracker.transition(CallState.COMPLETED, hangup_reason=HangupReason.CALLER_HANGUP)
-            logger.info("conversation_ended")
+            await tracker.transition(CallState.COMPLETED, hangup_reason=hangup_reason)
+            logger.info("conversation_ended", extra={"hangup_reason": hangup_reason})
             _record_completion(context, tracker, CallState.COMPLETED)
 
         except Exception as exc:
@@ -388,9 +565,31 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             _record_completion(context, tracker, CallState.FAILED)
             raise
         finally:
+            # Stop recording before closing the observer so the egress
+            # has a chance to flush its last segment.
+            if egress_id:
+                await _stop_recording(egress_id)
+
             # Flushed before the counters drop, so a transcript is complete
             # even when the call ended badly.
             await observer.aclose()
+
+            # Upsert the daily usage row so the monthly-minutes limit check
+            # stays accurate (spec 47, 61).  Non-fatal.
+            try:
+                duration = tracker.duration_seconds or 0
+                succeeded = tracker.state == CallState.COMPLETED
+                async with factory() as usage_session:
+                    await update_usage(
+                        usage_session,
+                        context=context,
+                        duration_seconds=int(duration),
+                        succeeded=succeeded,
+                    )
+                    await usage_session.commit()
+            except Exception:
+                logger.exception("usage_update_failed")
+
             worker_state.active_calls = max(0, worker_state.active_calls - 1)
             voice_metrics.active_calls.labels(tenant_id=str(context.tenant_id)).dec()
             _update_utilization()

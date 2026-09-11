@@ -172,10 +172,10 @@ The intended structure. Do **not** collapse this into a monolith.
 │   │   │   ├── tools/              # HTTP tool executor, variable substitution
 │   │   │   ├── rag/                # pgvector retrieval
 │   │   │   ├── transfer/           # summary generation, destination handling
-│   │   │   └── resilience/         # spec 55. Fallback is done — the provider chain
-│   │   │                         #   becomes a LiveKit FallbackAdapter. Timeout,
-│   │   │                         #   retry, backoff and circuit breaker are NOT:
-│   │   │                         #   this package is still only a docstring (4b.10)
+│   │   │   └── resilience/         # spec 55. Per-stage httpx.Timeout, circuit breaker
+│   │   │                         #   (5-failure threshold, 60s recovery, HALF_OPEN probe),
+│   │   │                         #   async_retry() with jittered exponential backoff, and
+│   │   │                         #   FallbackAdapter attempt_timeout (4b.10 complete)
 │   │   └── tests/
 │   │
 │   ├── frontend/                   # Next.js — platform console + tenant console
@@ -1037,8 +1037,16 @@ misread as a fault:
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
 | Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 29 providers across LLM/STT/TTS/Embedding. See [`AIProviders.md`](./AIProviders.md). |
+| Routing rules evaluated at call setup | **Working — Plan 4b.3 complete (2026-09-12).** `worker/routing.py` evaluates all ACTIVE rules in priority/specificity order. Business hours (including holiday overrides) are checked in the schedule's own timezone. The closed-action and fallback-agent chains are traversed. A DID with no routing rules falls back to its direct `inbound_agent_id` for backward compatibility. |
+| Silence timeout (`silence_timeout_seconds`) | **Working — Plan 2b.1 complete (2026-09-12).** Forwarded to `AgentSession(user_away_timeout=...)`. |
+| Max call duration (`max_call_duration_seconds`) | **Working — Plan 2b.2 complete (2026-09-12).** `_max_duration_watchdog` task races against the hangup; fires `ctx.delete_room()` and records `HangupReason.MAX_DURATION`. |
+| Recording (`recording_enabled`) | **Partial — Plan 2b.3 (2026-09-12).** LiveKit room-composite egress to S3/MinIO starts before the greeting and stops in the finally block. DB row (`call_recordings`) not yet written — tracked as 2b.3b. |
+| Interruption policy (`interruption_enabled`, `interruption_min_words`) | **Working — Plan 2b.4 complete (2026-09-12).** Forwarded to `AgentSession(allow_interruptions=..., min_interruption_words=...)`. |
+| Daily call limit (`max_daily_calls`) | **Working — Plan 1b.1 complete (2026-09-12).** Checked before accepting each call; counts today's calls in the tenant's IANA timezone. |
+| Monthly minutes limit (`max_monthly_minutes`) | **Working — Plan 1b.1 complete (2026-09-12).** Checked before accepting; sums completed + in-progress call seconds for the billing month. Usage rollup written to the `usage` table at call end. |
 | Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
-| Provider timeout, retry, backoff, circuit breaker | **Not yet — Plan 4b.10.** A *slow* provider does not trigger fallover. |
+| Provider timeout, retry, backoff, circuit breaker | **Working — Plan 4b.10 complete (2026-09-12).** Per-stage `httpx.Timeout` (STT/TTS read=30s, LLM read=120s); per-provider circuit breaker (5-failure threshold, 60s recovery); `FallbackAdapter` latency trip-wire (`attempt_timeout` = 12s STT, 10s LLM/TTS); `async_retry()` with jittered exponential backoff for non-realtime callers. |
+| ElevenLabs TTS adapter | **Working — Plan 4b.6 complete (2026-09-12).** `worker/providers/tts/elevenlabs.py` — slug `elevenlabs`, registered in the registry. Streaming synthesis via WebSocket; `inactivity_timeout=30` prevents stuck connections. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1304,11 +1312,11 @@ A tier only helps if it can fail independently:
   "self-hosted" ends up calling OpenAI, if a key was stored against it with a
   vendor URL. Check this before concluding a local tier is unused.
 
-**What is not implemented, stated plainly.** §55 lists timeout, retry,
-exponential backoff, circuit breaker and fallback. Only the last is configured.
-A provider that *errors* fails over; one that has become *slow* does not,
-because there is no timeout policy to trip, and there is no circuit breaker, so
-a dying provider is retried on every call. That is Plan item 4b.10.
+**All five items in §55 are now implemented (2026-09-12).** The fallback tier
+is configured by the operator. Timeout, retry, exponential backoff and circuit
+breaker are implemented in `worker/resilience/`. A provider that *errors* fails
+over via `FallbackAdapter`; one that is *slow* fails over via `attempt_timeout`;
+one that is repeatedly failing is blocked instantly by the circuit breaker.
 
 ---
 

@@ -10,9 +10,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import openai as _openai
 from livekit.plugins import openai as lk_openai
 
 from worker.providers.base import Completion, LLMProvider, Message, ProviderConfig, ToolCall
+from worker.resilience import make_resilient_client
 
 _NO_CREDENTIAL_PLACEHOLDER = "not-required"
 
@@ -23,10 +25,19 @@ class OpenAICompatibleLLM(LLMProvider):
     slug = "openai_compatible"
 
     def build_livekit_component(self) -> Any:
+        http_client = make_resilient_client(
+            provider_key=self.config.base_url or self.config.provider,
+            kind="llm",
+        )
+        openai_client = _openai.AsyncOpenAI(
+            api_key=self.config.api_key or _NO_CREDENTIAL_PLACEHOLDER,
+            base_url=self.config.base_url,
+            http_client=http_client,
+            max_retries=0,
+        )
         kwargs: dict[str, Any] = {
             "model": self.config.model or "gpt-4o-mini",
-            "base_url": self.config.base_url,
-            "api_key": self.config.api_key or _NO_CREDENTIAL_PLACEHOLDER,
+            "client": openai_client,
         }
         # Only pass temperature when configured. Some self-hosted servers
         # reject an explicit null, and others have a better default than ours.

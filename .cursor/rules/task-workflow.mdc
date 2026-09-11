@@ -1,0 +1,33 @@
+---
+description: Mandatory workflow after completing every implementation task in this project
+alwaysApply: true
+---
+
+# Task Completion Workflow
+
+After finishing **every** implementation task, always do these two steps before reporting done — no exceptions:
+
+## 1. Update Documentation
+
+Update all three docs to reflect the completed work:
+
+- **`docs/LiveKitVoiceAgentPlan.md`** — mark the item done (strikethrough row, ~~status~~, annotation with date + files changed), update the sequencing section, update any feature-status tables.
+- **`docs/LiveKitVoiceAgentREADME.md`** — update the feature status table (§9a.11 or equivalent) and any relevant sections (call flow, troubleshooting, quickstart).
+- If the task introduced a significant new subsystem, add a troubleshooting entry.
+
+## 2. Add Tests
+
+Add tests alongside the code — not as a separate task later:
+
+- **Unit tests**: new logic (pure functions, condition matching, state machines) → `tests/unit/` in the relevant service.
+- **Integration tests**: new API endpoints, DB mutations, worker load paths → `tests/integration/` or `tests/test_*.py`.
+- Follow existing test file naming (`test_<module>.py`) and fixture patterns in the repo.
+- Tests must pass before the task is reported complete (`make test-unit` or equivalent).
+- A feature the plan marks as done must have at least one test asserting the thing it does — a form that writes a row no test reads is the pattern we are explicitly avoiding.
+
+## Checklist (run mentally before saying "done")
+
+- [ ] Plan doc updated — item struck through with date
+- [ ] README feature status updated
+- [ ] New tests written and passing
+- [ ] No linter errors on modified files (ReadLints)

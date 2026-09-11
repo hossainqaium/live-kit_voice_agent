@@ -9,9 +9,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import openai as _openai
 from livekit.plugins import openai as lk_openai
 
 from worker.providers.base import AudioChunk, ProviderConfig, TTSProvider
+from worker.resilience import make_resilient_client
 
 _NO_CREDENTIAL_PLACEHOLDER = "not-required"
 
@@ -22,11 +24,20 @@ class OpenAICompatibleTTS(TTSProvider):
     slug = "openai_compatible"
 
     def build_livekit_component(self) -> Any:
+        http_client = make_resilient_client(
+            provider_key=self.config.base_url or self.config.provider,
+            kind="tts",
+        )
+        openai_client = _openai.AsyncOpenAI(
+            api_key=self.config.api_key or _NO_CREDENTIAL_PLACEHOLDER,
+            base_url=self.config.base_url,
+            http_client=http_client,
+            max_retries=0,
+        )
         return lk_openai.TTS(
             model=self.config.model or "tts-1",
             voice=self.config.voice_id or "alloy",
-            base_url=self.config.base_url,
-            api_key=self.config.api_key or _NO_CREDENTIAL_PLACEHOLDER,
+            client=openai_client,
         )
 
     async def synthesize(
