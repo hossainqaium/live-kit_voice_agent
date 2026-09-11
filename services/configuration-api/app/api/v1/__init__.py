@@ -11,12 +11,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.api.v1 import auth
+from app.api.v1 import auth, pbxs
 from app.core.dependencies import reject_client_tenant_id
 
 api_router = APIRouter(dependencies=[Depends(reject_client_tenant_id)])
 
 api_router.include_router(auth.router)
+api_router.include_router(pbxs.router)
 
 # Resource routers are mounted here as the phases deliver them:
 #   tenants, pbxs, sip-trunks, phone-numbers, agents, providers, voices,
