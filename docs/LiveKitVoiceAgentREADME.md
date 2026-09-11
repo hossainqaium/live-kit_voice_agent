@@ -963,13 +963,14 @@ misread as a fault:
 | Inbound call from a PBX extension, agent answers, speaks a greeting | Working |
 | Dedicated dialplan entry routing a chosen number to the agent | Working |
 | Call record, state machine, correlation ID across services | Working |
-| Speech to text | Working — now **self-hosted** `faster-whisper-tiny` by default (warm p50 548 ms vs 1103 ms hosted). Hosted remains selectable. |
+| Speech to text | Working, **but `faster-whisper-tiny` is not accurate enough on 8 kHz telephony audio**: a real call transcribed "the future of telephony" as "The Future Up to Lathany". Latency is fine (1296 ms on that call); quality is not. Hosted STT or a larger local model — Plan 2b.9. |
 | Language model | Working — OpenAI `gpt-4o-mini`, or any OpenAI-compatible endpoint. Verified by exercising the adapter directly (§9c.5). |
 | Text to speech | Working — self-hosted Kokoro, or OpenAI |
 | Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
 | Per-turn latency metrics (STT, LLM first token, TTS first audio) | Working — populated per turn. **But single-call figures are not usable on this host**: transcription varied 1661-11832 ms across three identical calls, because self-hosted Whisper on CPU is the contended resource. Repeated measurement is Plan 2b.8. |
 | Recording to object storage | Not yet — Phase 2 |
 | Barge-in and interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
+| The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
 | Tools, function calling, RAG | Not yet — Phase 6 |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |

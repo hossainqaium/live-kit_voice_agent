@@ -1103,6 +1103,56 @@ duration. This entry exists because the observability work is what made the
 failure legible, which is the argument for doing 2b.7 and the latency tuning
 before anything else in Phase 2b.
 
+#### Confirmed on a real PBX call: the agent replies, and `tiny` is not good enough
+
+A live call from the FusionPBX at 192.168.0.113 to DID 1801, parked so it stays
+open, with FreeSWITCH's own `ivr-welcome_to_freeswitch.wav` broadcast into it
+after the greeting finished:
+
+```
+AI     : Hello. You are through to the development voice agent…
+CALLER : Welcome to Free Switch, The Future Up to Lathany.
+AI     : Thanks! How can I assist you with Free Switch today?
+```
+
+**The 2b.7 symptom is gone on a real call, not only in the browser.** SIP,
+media, STT, LLM and TTS all work end to end, and 131 RTP frames arrived while
+132 went back.
+
+**And `faster-whisper-tiny` on 8 kHz telephony audio is not good enough.** The
+recording says *"Welcome to FreeSWITCH, the future of telephony"*. The
+transcript says *"The Future Up to Lathany"* — half the sentence, from a clean
+studio recording of clearly enunciated English. This is the accuracy question
+that the browser path explicitly could not answer, because a browser sends
+wideband audio and a phone does not. It is answered now, and the answer is no.
+
+Latency on that turn:
+
+| | |
+|---|---|
+| end-of-utterance | 1308 ms |
+| transcription | 1296 ms |
+| LLM first token | 2953 ms |
+| TTS first audio | 986 ms |
+| **time to first audio** | **5247 ms** |
+
+Better than the browser figures and still too slow, with the LLM now the
+largest single term rather than STT.
+
+**Two things this changes:**
+
+1. **2b.9 gets a concrete next step**: `faster-whisper-base` or `-small`, or
+   hosted STT. `tiny` was chosen for speed on a CPU-only box, and the capacity
+   ceiling measured earlier means a larger local model makes latency worse. The
+   honest options are hosted STT or different hardware — the tradeoff is now
+   measured on both axes instead of assumed on one.
+2. **The test recipe in §9a.8 needs the parked form.** `originate … &playback`
+   hangs up as soon as the file ends, which is 2.6 s — before the agent's
+   greeting finishes. That produced a call with audio flowing both ways, a
+   `COMPLETED` row, and **zero transcript segments**, which reads exactly like
+   a broken pipeline. The working form parks the call, waits for the greeting,
+   then uses `uuid_broadcast`.
+
 #### The agent does hold a conversation — measured over the browser test path
 
 The first complete turn this project has recorded, from `make test-room` plus a

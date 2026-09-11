@@ -226,3 +226,10 @@ browser-test: ## Turn the worker gate on, restart it, and print what to do next
 	@echo "worker restarted with the browser test path on."
 	@echo "  make test-room DID=<number>   then connect the playground to that room"
 	@echo "remember to set it back to false when finished."
+
+refresh-ip: ## Point SIP_NAT_IP at this machine's current LAN address
+	@ip=$$(./scripts/lan-ip.sh) && test -n "$$ip" \
+		&& sed -i.bak "s/^SIP_NAT_IP=.*/SIP_NAT_IP=$$ip/" .env && rm -f .env.bak \
+		&& echo "SIP_NAT_IP=$$ip" \
+		&& echo "restart livekit and livekit-sip for it to take effect:" \
+		&& echo "  $(COMPOSE) up -d --force-recreate livekit livekit-sip"

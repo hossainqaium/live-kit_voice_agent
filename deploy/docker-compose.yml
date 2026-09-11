@@ -82,7 +82,12 @@ services:
       # The LAN address works for both, which is why it is this and not
       # 127.0.0.1: loopback would mean "myself" inside every other container.
       # Empty is allowed and restores the previous behaviour.
-      NODE_IP: ${LIVEKIT_NODE_IP:-}
+      # Defaults to SIP_NAT_IP because they are the same fact — the address
+      # this host is reachable at — and two variables holding it means one of
+      # them goes stale. That is not hypothetical: after this machine changed
+      # network, LiveKit spent an afternoon advertising an address that no
+      # longer existed while SIP_NAT_IP was correct.
+      NODE_IP: ${LIVEKIT_NODE_IP:-${SIP_NAT_IP:-}}
     depends_on:
       redis:
         condition: service_healthy
