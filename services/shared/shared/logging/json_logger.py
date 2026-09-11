@@ -52,6 +52,20 @@ _REDACTED = "***redacted***"
 
 
 def _redact(key: str, value: Any) -> Any:
+    """Redact a field that looks like it carries a secret.
+
+    The name check alone produces false positives, because "token" appears in
+    plenty of harmless field names: ``llm_first_token_ms`` is a latency,
+    ``prompt_tokens`` is a count, ``tokens_valid_from`` is a timestamp. All
+    three were being replaced with ``***redacted***``, which silently destroys
+    the metric you were trying to read.
+
+    So the value's type decides too: only strings and bytes can carry a
+    credential worth hiding. A number never is one, and redacting it loses
+    real information for no security benefit.
+    """
+    if not isinstance(value, str | bytes):
+        return value
     lowered = key.lower()
     if any(hint in lowered for hint in _REDACT_HINTS):
         return _REDACTED

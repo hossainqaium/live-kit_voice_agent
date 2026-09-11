@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 import pgvector.sqlalchemy
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = '5a724fc76c9f'
 down_revision: str | None = '53426916dd3e'

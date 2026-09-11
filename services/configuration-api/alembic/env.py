@@ -11,16 +11,15 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy.ext.asyncio import async_engine_from_config
-from sqlalchemy.engine import Connection
 from sqlalchemy import pool
-
-from app.core.settings import get_settings
-from app.db.base import Base
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Importing the models package registers every table on Base.metadata.
 # Without it, autogenerate would produce an empty diff and silently drop tables.
 import app.db.models  # noqa: F401
+from app.core.settings import get_settings
+from app.db.base import Base
 
 config = context.config
 
@@ -32,7 +31,7 @@ config.set_main_option("sqlalchemy.url", get_settings().sqlalchemy_dsn)
 target_metadata = Base.metadata
 
 
-def _render_item(type_, obj, autogen_context) -> str | bool:  # noqa: ANN001
+def _render_item(type_, obj, autogen_context) -> str | bool:
     """Render third-party column types with the import they need.
 
     Autogenerate writes a fully-qualified type name into the revision but does
@@ -48,15 +47,13 @@ def _render_item(type_, obj, autogen_context) -> str | bool:  # noqa: ANN001
     return False
 
 
-def _include_object(object_, name, type_, reflected, compare_to) -> bool:  # noqa: ANN001
+def _include_object(object_, name, type_, reflected, compare_to) -> bool:
     """Keep extension-owned tables out of autogenerate.
 
     pgvector and similar extensions create their own catalog objects; without
     this filter Alembic would try to drop them on every revision.
     """
-    if type_ == "table" and name in {"spatial_ref_sys"}:
-        return False
-    return True
+    return not (type_ == "table" and name in {"spatial_ref_sys"})
 
 
 def run_migrations_offline() -> None:

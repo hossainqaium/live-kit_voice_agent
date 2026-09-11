@@ -23,6 +23,7 @@ from livekit.agents import Agent, AgentSession, JobContext, RoomInputOptions
 
 from shared.logging import get_logger, log_context
 from shared.models import CallState, HangupReason
+from shared.telemetry import VoiceMetrics
 from worker.call_state import CallStateTracker
 from worker.config_loader import (
     CallConfigLoader,
@@ -35,10 +36,15 @@ from worker.config_loader import (
 )
 from worker.db import get_session_factory
 from worker.health import state as worker_state
+from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
 from worker.settings import get_settings
 
 logger = get_logger(__name__)
+
+#: One instance per process. Prometheus collectors are registered on
+#: creation, so building these per call would raise on the second call.
+voice_metrics = VoiceMetrics()
 
 #: How long to wait for the SIP participant to appear. LiveKit creates the room
 #: and dispatches the agent before the participant is fully joined, so a short
@@ -186,10 +192,33 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
     )
 
     worker_state.active_calls += 1
+    voice_metrics.active_calls.labels(tenant_id=str(context.tenant_id)).inc()
+    _update_utilization()
+
+    observer = CallObserver(
+        factory,
+        call_row_id=context.call_row_id,
+        tenant_id=context.tenant_id,
+        call_id=context.call_id,
+        agent_id=context.agent_name,
+        metrics=voice_metrics,
+        transcription_enabled=context.call_policy.transcription_enabled,
+    )
 
     with log_context(**context.log_fields()):
         try:
             session = _build_session(context)
+
+            # Attached before the session starts so the first turn is not
+            # missed. Wrapped because observability must never be able to end
+            # a call: a failure here should cost visibility, not the
+            # conversation. This bit me immediately — a wrong attribute name
+            # left a call stuck in ANSWERED.
+            try:
+                observer.attach(session)
+                await observer.start()
+            except Exception:
+                logger.exception("observer_start_failed_continuing_without_it")
 
             await tracker.transition(CallState.AI_CONNECTED)
 
@@ -218,6 +247,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
 
             await tracker.transition(CallState.COMPLETED, hangup_reason=HangupReason.CALLER_HANGUP)
             logger.info("conversation_ended")
+            _record_completion(context, tracker, CallState.COMPLETED)
 
         except Exception as exc:
             logger.exception("call_failed")
@@ -227,9 +257,35 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
                     hangup_reason=HangupReason.SYSTEM_ERROR,
                     detail=str(exc)[:500],
                 )
+            _record_completion(context, tracker, CallState.FAILED)
             raise
         finally:
+            # Flushed before the counters drop, so a transcript is complete
+            # even when the call ended badly.
+            await observer.aclose()
             worker_state.active_calls = max(0, worker_state.active_calls - 1)
+            voice_metrics.active_calls.labels(tenant_id=str(context.tenant_id)).dec()
+            _update_utilization()
+
+
+def _update_utilization() -> None:
+    """Publish this worker's load as a ratio (spec 48, 50).
+
+    A ratio rather than a count, because it is what an autoscaler can act on
+    without knowing each worker's configured capacity.
+    """
+    settings = get_settings()
+    capacity = max(1, settings.worker_max_concurrent_calls)
+    voice_metrics.worker_utilization.set(worker_state.active_calls / capacity)
+
+
+def _record_completion(context: CallContext, tracker: CallStateTracker, state: CallState) -> None:
+    """Record the call's outcome and duration (spec 57 business metrics)."""
+    labels = {"tenant_id": str(context.tenant_id), "agent_id": context.agent_name or "unknown"}
+    voice_metrics.calls_total.labels(**labels, state=state.value).inc()
+    duration = tracker.duration_seconds
+    if duration is not None:
+        voice_metrics.call_duration.labels(**labels).observe(duration)
 
 
 async def _wait_for_disconnect(ctx: JobContext) -> None:

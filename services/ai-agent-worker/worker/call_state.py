@@ -64,6 +64,17 @@ class CallStateTracker:
         return self._state
 
     @property
+    def duration_seconds(self) -> float | None:
+        """Wall-clock seconds since the tracker was created.
+
+        Measured from when the worker took the call, which is what the worker
+        can actually observe. The authoritative billable duration is computed
+        in the database from ``answer_time`` and ``end_time``; this is for
+        metrics, where a sub-second discrepancy is irrelevant.
+        """
+        return (datetime.now(UTC) - self._started).total_seconds()
+
+    @property
     def is_terminal(self) -> bool:
         return self._state in TERMINAL_CALL_STATES
 

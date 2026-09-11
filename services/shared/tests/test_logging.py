@@ -130,3 +130,48 @@ class TestCorrelationContext:
                 return await nested()
 
         assert asyncio.run(main())["call_id"] == "call_async"
+
+
+class TestRedactionFalsePositives:
+    """The name heuristic alone over-redacts, and that destroys real data.
+
+    These names all contain a secret-looking substring while carrying nothing
+    sensitive. The first one is not hypothetical: it silently replaced a
+    latency measurement with ``***redacted***`` and made per-turn timing
+    unreadable.
+    """
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("llm_first_token_ms", 412.5),
+            ("prompt_tokens", 1280),
+            ("completion_tokens", 64),
+            ("total_tokens", 1344),
+            ("tokens_valid_from", 1789000000),
+            ("secret_count", 3),
+            ("api_key_rotation_days", 90),
+        ],
+    )
+    def test_numeric_fields_are_never_redacted(self, field: str, value: object) -> None:
+        assert _format({field: value})[field] == value
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("api_key", "sk-proj-realkeyvalue"),
+            ("password", "hunter2"),
+            ("provider_secret", "shhh"),
+            ("auth_token", "bearer-abc"),
+            ("authorization", "Bearer abc"),
+        ],
+    )
+    def test_string_secrets_are_still_redacted(self, field: str, value: str) -> None:
+        document = _format({field: value})
+        assert document[field] == "***redacted***"
+        assert value not in json.dumps(document)
+
+    def test_booleans_and_none_pass_through(self) -> None:
+        document = _format({"has_credential": True, "api_key_present": None})
+        assert document["has_credential"] is True
+        assert document["api_key_present"] is None
