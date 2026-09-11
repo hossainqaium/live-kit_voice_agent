@@ -49,7 +49,12 @@ export function BrowserCall({
   const audioRef = useRef<HTMLDivElement | null>(null);
 
   const hangUp = useCallback(async () => {
-    const room = roomRef.current as { disconnect?: () => Promise<void> } | null;
+    const room = roomRef.current as {
+      disconnect?: () => Promise<void>;
+      localParticipant?: {
+        setMicrophoneEnabled(on: boolean): Promise<unknown>;
+      };
+    } | null;
     roomRef.current = null;
 
     // No room means no call to end, so the phase must not move. React runs
@@ -57,6 +62,20 @@ export function BrowserCall({
     // cleanup calls this. Without the guard the panel opened already reading
     // "ended", offering to "Call again" before the first call.
     if (!room) return;
+
+    // Stop publishing before disconnecting. Tearing down the transport while
+    // a track is still live closes the SDK's lossy data channel out from under
+    // it, and livekit-client reports that as
+    //   publisher data channel 'DATA_TRACK_LOSSY' closed unexpectedly
+    // which Next.js's development overlay then presents as an error on a call
+    // that worked perfectly. The warning is accurate: we were disconnecting
+    // abruptly.
+    try {
+      await room.localParticipant?.setMicrophoneEnabled(false);
+    } catch {
+      // The microphone may never have been granted, or the room may already
+      // be gone. Either way the disconnect below is what matters.
+    }
 
     if (room.disconnect) {
       try {
@@ -97,6 +116,26 @@ export function BrowserCall({
       // when somebody actually places a call. It is by far the largest
       // dependency in the console.
       const { Room, RoomEvent, Track } = await import("livekit-client");
+
+      // A note for whoever sees this in the console and thinks the call broke:
+      //
+      //   publisher data channel 'DATA_TRACK_LOSSY' closed unexpectedly
+      //
+      // is logged by livekit-client at *error* level about a second into a
+      // call that then works perfectly — measured on a healthy one: publish in
+      // 63 ms, agent present, audio in both directions. The SDK creates the
+      // publisher's data channels before the publisher connection exists and
+      // replaces them once it does, reporting the first closing as an error.
+      //
+      // It is not suppressible without silencing the SDK's whole error
+      // channel: `setLogExtension` is additive and leaves the console output
+      // in place, and `setLogLevel` has no per-message granularity. Silencing
+      // all of it would hide the next real fault — and a fault sitting unread
+      // in a log is exactly what cost this project an afternoon.
+      //
+      // Next.js's development overlay promotes any console error to a banner,
+      // which is the only reason it looks alarming. It does not appear in a
+      // production build.
 
       const room = new Room({ adaptiveStream: true, dynacast: true });
       roomRef.current = room;
@@ -156,17 +195,6 @@ export function BrowserCall({
       });
 
       await room.connect(issued.url, issued.token, {
-        // No STUN. The server advertises Twilio's and Google's by default —
-        // verified by reading `iceServers` out of the join response — and it
-        // keeps doing so even with `rtc.stun_servers: []`, because an empty
-        // list means "use the defaults" rather than "use none".
-        //
-        // Everything in this deployment is on this machine or its LAN, so a
-        // reflexive candidate is a round trip to the public internet to learn
-        // an address nothing needs. Gathering against them happens on **every
-        // negotiation**, not just the first, which is why the agent's reply
-        // timed out while the initial connection succeeded.
-        rtcConfig: { iceServers: [] },
         // The SDK default is 15 s, and the first measurement of this path was
         // 14,992 ms — negotiation was losing a race with its own timeout, and
         // reported it as "negotiation timed out" with no mention of time.
