@@ -1562,29 +1562,45 @@ participant arrives and the SIP branch resolves as it always did.
 
 A test now asserts the two waits have not become sequential again, by name.
 
-#### The agent's audio reaches a phone but not a browser — open
+#### Browser audio works; renegotiation is what times out — partly open
 
-Established, and worth writing down because the next person will otherwise
-re-derive it:
+Audio now plays, confirmed by the user. Two fixes got there, both measured:
 
-- The greeting **is** spoken: `session.say()` runs and a transcript segment is
-  written for it, and the worker logs show TTS being invoked.
-- Over SIP the same agent sends real audio: 132 RTP frames out on the PBX call
-  in this section.
-- In a browser room the subscribed track is live, its element plays and
-  `currentTime` advances, and a WebAudio analyser reads **peak RMS 0.00001**
-  over ten seconds. Forcing media over TCP made inbound counters visible: 6
-  then 18 packets, ~26 bytes each at roughly 5/second, which is Opus DTX
-  comfort noise rather than speech.
+| | before | after |
+|---|---|---|
+| agent joins (concurrent waits) | 15 s+ | 2.0 s |
+| room connected (no STUN) | ~7 s | 1.6 s |
+| agent audio audible | never | 2.5 s |
 
-So the transport carries what it is given and what it is given is silence. The
-fault is between the agent's TTS output and the room's published track, in the
-browser case specifically. Not yet found.
+**No STUN.** Every participant here is on this machine or its LAN, and LiveKit's
+default STUN servers are Google's. Both ends were making round trips to the
+public internet to learn a reflexive address nothing needed — visible as
+`srflx 103.197.153.x` candidates — and that was most of the seven seconds.
+`rtc.stun_servers: []`.
 
-Ruled out, each by measurement rather than reasoning: the advertised address
-(candidates now carry the LAN IP and a pair is nominated), the RTC TCP port
-(matched to the published one), the media port count (muxed), audio element
-attachment (the element plays), and autoplay policy (`canPlaybackAudio` true).
+**What is still wrong is renegotiation, not connection.** With both peer
+connections established and stable, publishing a second track — pure SDP
+offer/answer over the signalling socket, no ICE — took **40,622 ms**. That is
+the `NegotiationError: negotiation timed out` the user sees when the agent
+replies: a reply renegotiates, and renegotiation on this setup takes tens of
+seconds.
+
+The client has been saying something relevant the whole time:
+
+```
+v1 RTC path not found. Consider upgrading your LiveKit server version – Retrying
+```
+
+livekit-client 2.22.3 speaks protocol 17; `livekit-server:v1.8` reports
+protocol 15. The client is pinned to **2.15.16** on that basis — the version
+mismatch is a real correctness argument on its own. The timing difference
+measured with it (9.2 s against 12.9 s for one publish) is **a single sample
+each and not evidence**; it is recorded as an observation, not a result.
+
+**The next thing to try is the server, not the client**: `livekit-server:v1.8`
+against a client generation built for a newer protocol. Upgrading it touches
+the SIP path that Phase 1 depends on, so it wants a deliberate decision and a
+re-run of the PBX call afterwards rather than being slipped in.
 
 #### Signalling connects and media never does
 

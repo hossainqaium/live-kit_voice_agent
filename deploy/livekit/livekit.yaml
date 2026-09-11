@@ -27,6 +27,16 @@ rtc:
   # Muxing is also what LiveKit recommends in production; the range was never
   # buying anything here. Keep it 1:1 with the published port, like tcp_port.
   udp_port: 50100
+  # No STUN. Everything here — browser, worker, SIP, LiveKit — is on this
+  # machine or its LAN, so a server-reflexive candidate is a round trip to the
+  # public internet to learn an address nothing needs. LiveKit's default STUN
+  # servers are Google's, and gathering against them was a large part of the
+  # seven seconds a browser peer connection took to establish, which in turn is
+  # what made renegotiation time out when the agent replied.
+  #
+  # A deployment whose clients are not on the LAN needs these back.
+  stun_servers: []
+
   # No external IP discovery locally; the PBX and LiveKit share the bridge
   # network. A remote PBX needs use_external_ip: true and a reachable address.
   use_external_ip: false
