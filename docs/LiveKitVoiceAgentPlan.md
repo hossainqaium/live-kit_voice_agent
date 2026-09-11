@@ -222,6 +222,33 @@ Multi-tenancy, tools, RAG, transfer, autoscaling.
 
 ## 6. Phase 3 — Multi-Tenancy [§76]
 
+### 6.1 Phase 2 carry-over
+
+Phase 2 was left partially complete when work moved to Phase 3. Delivered: the
+observability half — transcript persistence (2.7) and the six spec-56 latency
+measurements (2.5), plus the turn event that makes a conversation visible.
+
+Outstanding, and now debt rather than plan:
+
+| # | Item | Note |
+|---|---|---|
+| 2.1, 2.2 | Barge-in tuning and verification | VAD-driven interruption runs, but has never been verified against real speech |
+| 2.3 | Streaming confirmed end to end | Adapters stream; not measured under load |
+| 2.4 | Silence timeout and max call duration | **`silence_timeout_seconds` and `max_call_duration_seconds` are loaded from the agent version and never used.** The settings appear configurable in the data model and are silently ignored at runtime, which is worse than not offering them. `AgentSession` accepts `user_away_timeout`, `min_interruption_duration`, `min_interruption_words` and `allow_interruptions`, so most of this is a mapping from configuration onto session options rather than new logic; only maximum call duration needs a watchdog. |
+| 2.6 | Recording to object storage | Not started. `recording_enabled` is loaded and likewise unused, so a tenant enabling recording currently gets nothing. |
+| 2.8 | Conversation summarisation | Transcript headers exist; `summary` is never populated |
+| 2.9 | Grafana dashboard for voice latency | Metrics are exposed and scraped; no dashboard yet |
+| 2.10 | 10-concurrent-call harness | Not started |
+
+Two of these — 2.4 and 2.6 — are **configuration that exists in the schema and
+does nothing at runtime.** That is a correctness problem, not a missing
+feature: an agent builder will offer the settings and a tenant will believe
+them. They should be closed before Phase 4 exposes those fields in the UI.
+
+The Phase 2 exit criterion that needs a person rather than code — verifying
+that a real caller is heard and understood — also remains open.
+
+
 ### Goal
 
 Tenants, users, RBAC, and **provably enforced** tenant isolation — before any tenant-facing
