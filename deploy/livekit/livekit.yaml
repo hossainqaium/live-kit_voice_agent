@@ -8,7 +8,14 @@
 port: 7880
 
 rtc:
-  tcp_port: 7881
+  # Must equal the published host port, because LiveKit advertises this number
+  # in its ICE candidates. Published as 7881->7881 previously meant advertising
+  # 7881 while the host listened on 7981, so every browser that fell back to
+  # TCP dialled a closed port and the call failed with "negotiation timed out".
+  #
+  # The UDP range below has always been 1:1 for the same reason. Anything whose
+  # number appears in a candidate has to match on both sides.
+  tcp_port: 7981
   # The development range is deliberately small: every published port becomes a
   # forwarding entry on Docker Desktop, and a 10,000-port range makes
   # `compose up` take minutes. Production widens this in the Helm values.

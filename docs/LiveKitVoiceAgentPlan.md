@@ -1442,6 +1442,31 @@ turned an intermittent 500 into a certain one. A latent fault that only
 triggers on a genuine write is invisible in exactly the tests you would write
 for it.
 
+#### `NegotiationError: negotiation timed out` in the browser
+
+Symptom: the console's **Call Test** panel connects, then fails with
+`NegotiationError: negotiation timed out`. Distinct from the candidate failure
+below: signalling and the initial connection succeed, and it is *publishing*
+the microphone that never completes.
+
+Cause: LiveKit advertises its RTC TCP port number in an ICE candidate, and the
+compose file mapped `7981 -> 7881`. So the candidate read
+`192.168.103.15:7881` while the host was listening on `7981`. A browser whose
+UDP path does not come up — which is common with Docker Desktop's forwarding of
+a fifty-port UDP range — falls back to TCP, dials a closed port, and waits until
+negotiation times out.
+
+Fix: `rtc.tcp_port` and the published port must be the same number.
+`livekit.yaml` now sets `7981` and compose publishes `7981:7981`. The UDP range
+was always 1:1 for exactly this reason, with a comment saying so; the TCP port
+was the one that was not.
+
+**The general rule, which cost two separate failures in one afternoon:** any
+port number that appears in an ICE candidate must be identical on both sides of
+the mapping, and the advertised address must be one the browser can route to.
+Renumbering it, or advertising a Docker bridge address, produces a timeout that
+names neither.
+
 #### Signalling connects and media never does
 
 Symptom: a browser joins the room, the console log shows `signal connected` and

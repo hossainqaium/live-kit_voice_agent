@@ -88,7 +88,9 @@ services:
         condition: service_healthy
     ports:
       - "${LIVEKIT_PORT:-7980}:7880"                 # signalling / WebSocket
-      - "${LIVEKIT_TCP_PORT:-7981}:7881"             # RTC over TCP
+      # 1:1, like the UDP range: this number is advertised in ICE candidates,
+      # so a mapping that renumbers it points the browser at a closed port.
+      - "${LIVEKIT_TCP_PORT:-7981}:${LIVEKIT_TCP_PORT:-7981}"  # RTC over TCP
       - "${LIVEKIT_METRICS_PORT:-6889}:6789"         # Prometheus metrics
       - "50100-50149:50100-50149/udp"                # RTC media (host==container: ICE advertises these)
     volumes:

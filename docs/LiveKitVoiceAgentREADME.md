@@ -1539,6 +1539,13 @@ says nothing about addresses. Set it to this machine's LAN address:
 Loopback does not work: `127.0.0.1` means "myself" inside every other
 container, which breaks the worker and SIP paths.
 
+**Ports that appear in ICE candidates must not be renumbered.** LiveKit
+advertises its RTC TCP port as a candidate, so `rtc.tcp_port` in
+`livekit.yaml` and the published host port have to be the same number — they
+are both `7981`. Mapping `7981 -> 7881` made the browser dial a closed port
+whenever it fell back from UDP, failing with `NegotiationError: negotiation
+timed out`. The UDP media range is 1:1 for the same reason.
+
 **The browser reaches LiveKit on the published port, not the internal one.**
 Services use `ws://livekit:7880`; a browser needs `ws://localhost:7980`. The
 API returns the right one to the console, which is why `LIVEKIT_PUBLIC_URL`
