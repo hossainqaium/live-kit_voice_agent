@@ -250,7 +250,7 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
 | 2b.9 | Move STT to the self-hosted endpoint and re-measure. **Configuration done and measured at the provider** (see §12.1): warm p50 548 ms against 1103 ms on OpenAI. Re-measurement *on a call* is still open, and so is the cold-start cost. | **defect** (partly) | §25, §56 |
 | ~~2b.10~~ | **Browser-based test client.** **Done**: `ALLOW_BROWSER_TEST_PARTICIPANT` (off by default, refused outside development) lets the worker accept a non-SIP participant that declares a DID, in a participant attribute or the room's metadata. `make test-room DID=…` creates the room *and* the agent dispatch; `make playground` starts the client. The DID still resolves the tenant, so isolation holds. | ~~tooling~~ | §70 |
-| 2b.11 | **Synchronous work on the agent event loop.** The worker logs `event loop blocked` from 114 ms to 794 ms, nine times in one call, and in-pipeline transcription costs three times its isolated cost as a result. Every latency figure is inflated by an unknown amount until this is found, so it precedes 2b.7. | **defect** | §28, §56 |
+| 2b.11 | **Synchronous work on the agent event loop.** One block per call between configuration load and session start, 1020 ms. **Partly fixed**: loading Silero in `prewarm_fnc` brings it to 628 ms; the remainder is inside `AgentSession.start` and needs a profiler, the provider constructors having been measured and ruled out. It delays the greeting, not the turn metrics. | **defect** (partly) | §28, §56 |
 | 2b.8 | 10-concurrent-call harness. | feature | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
@@ -398,10 +398,13 @@ So the priority is the enforcement gap, not more screens:
    the picture: the agent now holds a conversation over the browser path, and
    time to first audio is 5854 ms — the first complete measurement rather than
    an improvement on 4744 ms, which was taken from a turn that never replied.
-   **2b.11 comes before 2b.7** because `event loop blocked` warnings inflate
-   every per-stage figure by an unknown amount, and endpointing tuned against
-   inflated figures is tuned to the wrong target. A real PBX call is still
-   needed to confirm the symptom is gone off this path.
+   **2b.8 now comes before 2b.7**, which is a change of position on evidence:
+   transcription time across three identical calls was 2314, 1661 and 11832 ms,
+   so a turn-taking window tuned against any one of them would be fitted to
+   noise. A repeated-measurement harness is the prerequisite, not a later
+   nicety. 2b.11's per-call block is half fixed and affects the greeting rather
+   than the turn, so it is no longer a blocker. A real PBX call is still needed
+   to confirm the symptom is gone off the browser path.
 3. **2b.1–2b.4** — the agent-version settings that are loaded and ignored.
 4. **4b.4** — provider credentials in the console, which is what §77 turns on.
 5. **1b.1** — the usage rollup, so two of the three call limits stop being
@@ -1130,20 +1133,71 @@ The 4744 ms figure was measured on a turn that never produced a reply, so it
 was never a complete measurement to beat. 5854 ms is the first honest one, and
 it is still far too slow to be a conversation.
 
-**The new finding is transcription at 1661 ms inside the pipeline against
-548 ms measured in isolation** — three times the cost for the same model, same
-endpoint, same audio length. The worker log says why:
+**Two things were claimed here on the first pass and both were wrong.** They
+are left described rather than deleted, because the way they were wrong is the
+lesson.
 
-```
-event loop blocked for 794ms; synchronous work on the agent loop
-delays audio and turn handling, move it to a thread or an async client
-```
+*Claimed: nine `event loop blocked` warnings in one call, 114 ms to 794 ms.*
+The count came from `grep -c` over a log tail that also covered worker startup,
+where four inference processes initialise at once. Isolating a single call
+between two timestamps gives **three** blocks, of which one is per-call.
 
-Nine of those in one call, from 114 ms to 794 ms. Something on the hot path is
-synchronous. Until that is found, every per-stage number is inflated by an
-amount that has nothing to do with the provider, which makes tuning
-endpointing against these figures actively misleading. Recorded as **2b.11**,
-and it should be done before 2b.7 rather than after.
+*Claimed: every per-stage latency figure is inflated by it.* The per-call block
+sits between `call_configuration_loaded` and the session starting — **before**
+any turn exists. It delays the greeting the caller hears; it does not touch
+`transcription_delay_ms` or `llm_first_token_ms` for a turn that happens
+afterwards.
+
+Both errors came from reading an aggregate where a timeline was needed. The
+count and the conclusion were available from the same logs, correctly, in about
+the same effort.
+
+**What the per-call block actually was, measured:**
+
+| | Block between config load and session start |
+|---|---|
+| before | 1020 ms |
+| after loading VAD in `prewarm_fnc` | **628 ms** |
+
+Silero is an ONNX model, loading it is synchronous, and it was being loaded
+inside the entrypoint on every call. `prewarm_fnc` loads it once per process;
+the model is stateless and identical for every tenant, so sharing it changes no
+behaviour.
+
+The remaining 628 ms is inside LiveKit's own `AgentSession.start`. The obvious
+suspect was the three provider constructors building HTTP clients and SSL
+contexts, and that was measured and ruled out: 34 ms cold for STT, 3-4 ms for
+LLM and TTS, 3 ms each warm. Finding the rest needs a profiler on the hot path,
+not another guess.
+
+#### Latency on this host is dominated by variance, not by the pipeline
+
+Three browser-path calls against the same published version, same audio, same
+endpoint, minutes apart:
+
+| | call 1 | call 2 | call 3 |
+|---|---|---|---|
+| transcription | 2314 ms | 1661 ms | **11832 ms** |
+| LLM first token | 5311 ms | 2272 ms | 2339 ms |
+| time to first audio | 9220 ms | 5854 ms | 16250 ms |
+
+The isolated benchmark of the same model on the same endpoint gave a warm p50
+of 548 ms — measured against an idle server. These calls were made while that
+server was being repeatedly hit, and `faster-whisper` on CPU is the thing
+being contended.
+
+**So no single-call number here is usable, including the ones quoted
+approvingly earlier in this section.** A 5854 ms time-to-first-audio is not
+evidence of anything except that one call took 5854 ms.
+
+This is a finding about the measuring setup, not the product, and it changes
+what should happen next: **endpointing cannot responsibly be tuned on this
+host until STT latency is stable enough to measure.** Tuning a turn-taking
+window against a transcription time that varies by 7x would fit the window to
+the noise. That makes the repeated-measurement harness in **2b.8** a
+prerequisite for 2b.7 rather than a later nicety, and it makes a second look at
+where `faster-whisper` runs — thread count, model size, whether it has a GPU —
+part of 2b.9 rather than closed.
 
 #### Self-hosted STT is about half the latency, and that is not enough
 

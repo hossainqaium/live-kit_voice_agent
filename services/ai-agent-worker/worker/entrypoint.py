@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, RoomInputOptions
@@ -170,7 +171,7 @@ def _build_agent(context: CallContext) -> Agent:
     return Agent(instructions=instructions)
 
 
-def _build_session(context: CallContext) -> AgentSession:
+def _build_session(context: CallContext, vad: Any) -> AgentSession:
     """Assemble the STT, LLM and TTS pipeline for this call (spec 28, 55).
 
     When a version configures fallback or local tiers, each stage becomes a
@@ -186,7 +187,6 @@ def _build_session(context: CallContext) -> AgentSession:
     from livekit.agents import llm as llm_api
     from livekit.agents import stt as stt_api
     from livekit.agents import tts as tts_api
-    from livekit.plugins import silero
 
     stt_chain = [
         build_stt(config).build_livekit_component()
@@ -216,9 +216,9 @@ def _build_session(context: CallContext) -> AgentSession:
         )
 
     # Voice activity detection drives turn-taking and barge-in (spec 29).
-    # Silero runs locally, so it adds no network latency to the turn decision.
-    vad = silero.VAD.load()
-
+    # Silero runs locally, so it adds no network latency to the turn decision —
+    # but loading it is synchronous, which is why it arrives here already
+    # loaded by ``prewarm`` rather than being loaded per call.
     return AgentSession(stt=stt, llm=llm, tts=tts, vad=vad)
 
 
@@ -361,7 +361,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
 
     with log_context(**context.log_fields()):
         try:
-            session = _build_session(context)
+            session = _build_session(context, ctx.proc.userdata["vad"])
 
             # Attached before the session starts so the first turn is not
             # missed. Wrapped because observability must never be able to end
@@ -461,6 +461,23 @@ async def _wait_for_disconnect(ctx: JobContext) -> None:
         ctx.room.off("participant_disconnected", _on_disconnect)
 
 
+def prewarm(proc: agents.JobProcess) -> None:
+    """Load the VAD model once per process, before any job arrives.
+
+    Silero is an ONNX model and loading it is synchronous. Doing it inside the
+    entrypoint blocked the job's event loop for about a second on every call,
+    measured between ``call_configuration_loaded`` and the session starting —
+    a second of silence the caller hears before the greeting.
+
+    It is process-wide rather than per-call because the model is stateless and
+    identical for every tenant: nothing about it is configuration (spec 23), so
+    sharing it changes no behaviour.
+    """
+    from livekit.plugins import silero
+
+    proc.userdata["vad"] = silero.VAD.load()
+
+
 def worker_options() -> agents.WorkerOptions:
     """Register this worker for agent dispatch.
 
@@ -477,4 +494,5 @@ def worker_options() -> agents.WorkerOptions:
         # Must exceed the longest expected call so a deploy drains rather than
         # cuts conversations off (spec 51).
         drain_timeout=settings.worker_drain_timeout_seconds,
+        prewarm_fnc=prewarm,
     )

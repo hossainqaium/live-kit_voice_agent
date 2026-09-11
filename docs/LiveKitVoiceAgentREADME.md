@@ -967,7 +967,7 @@ misread as a fault:
 | Language model | Working — OpenAI `gpt-4o-mini`, or any OpenAI-compatible endpoint. Verified by exercising the adapter directly (§9c.5). |
 | Text to speech | Working — self-hosted Kokoro, or OpenAI |
 | Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
-| Per-turn latency metrics (STT, LLM first token, TTS first audio) | **Not yet — Phase 2.** Metric definitions exist; the pipeline does not populate them, so a slow turn is not yet measurable. |
+| Per-turn latency metrics (STT, LLM first token, TTS first audio) | Working — populated per turn. **But single-call figures are not usable on this host**: transcription varied 1661-11832 ms across three identical calls, because self-hosted Whisper on CPU is the contended resource. Repeated measurement is Plan 2b.8. |
 | Recording to object storage | Not yet — Phase 2 |
 | Barge-in and interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
