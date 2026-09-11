@@ -70,6 +70,19 @@ services:
     image: livekit/livekit-server:v1.8
     restart: unless-stopped
     command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      # The key pair, not in the config file and not in the repository. The
+      # format is "key: secret" (spec 54).
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}"
+      # The address LiveKit advertises in ICE candidates. Without it LiveKit
+      # offers only its container IP (172.x), which another container can
+      # reach and a browser on the host cannot — signalling connects and media
+      # never does, reported as "could not establish pc connection".
+      #
+      # The LAN address works for both, which is why it is this and not
+      # 127.0.0.1: loopback would mean "myself" inside every other container.
+      # Empty is allowed and restores the previous behaviour.
+      NODE_IP: ${LIVEKIT_NODE_IP:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -171,6 +184,13 @@ services:
       LIVEKIT_URL: ws://livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret-at-least-32-characters-long}
+      # The address a browser uses, which is the published port and not the
+      # compose service name.
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-ws://localhost:${LIVEKIT_PORT:-7980}}
+      # Browser test calls (Plan 2b.10). The endpoint refuses outside
+      # development regardless of this value.
+      ALLOW_BROWSER_TEST_SESSIONS: ${ALLOW_BROWSER_TEST_SESSIONS:-false}
+      WORKER_AGENT_NAME: ${WORKER_AGENT_NAME:-voice-agent}
       LIVEKIT_SIP_URI: ${LIVEKIT_SIP_URI:-sip:livekit-sip:5060}
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET_RECORDINGS: ${S3_BUCKET_RECORDINGS:-recordings}
@@ -296,7 +316,7 @@ services:
       # Read by the browser, so it must be the host-visible address rather
       # than the compose service name — the same trap as the frontend's
       # NEXT_PUBLIC_API_BASE_URL.
-      NEXT_PUBLIC_LIVEKIT_URL: ${PLAYGROUND_LIVEKIT_URL:-ws://localhost:7880}
+      NEXT_PUBLIC_LIVEKIT_URL: ${PLAYGROUND_LIVEKIT_URL:-ws://localhost:${LIVEKIT_PORT:-7980}}
     ports:
       - "${PLAYGROUND_PORT:-3202}:3000"
 

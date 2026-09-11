@@ -249,7 +249,7 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
 | 2b.9 | STT latency. **Reopened on evidence**: self-hosted `faster-whisper-tiny` on this host gives p50 773 ms but p95 2655 ms sequentially, and a realtime factor below 1 at two concurrent calls — it cannot hold a conversation. Hosted measured 1103 ms with a flat tail. The work is no longer "move it local" but "decide per deployment, on measured numbers, and give self-hosted the hardware it needs". See §12.1. | **defect** | §25, §56 |
-| ~~2b.10~~ | **Browser-based test client.** **Done**: `ALLOW_BROWSER_TEST_PARTICIPANT` (off by default, refused outside development) lets the worker accept a non-SIP participant that declares a DID, in a participant attribute or the room's metadata. `make test-room DID=…` creates the room *and* the agent dispatch; `make playground` starts the client. The DID still resolves the tenant, so isolation holds. | ~~tooling~~ | §70 |
+| ~~2b.10~~ | **Browser test call from the console.** **Done**: a *Call from browser* button on any active number with an agent behind it. `POST /browser-test/session` mints a scoped join token — the only endpoint in the platform that issues a credential, so its four guards are asserted rather than reviewed. Needed `LIVEKIT_NODE_IP` and a separate `LIVEKIT_PUBLIC_URL`; see §12.1. | ~~tooling~~ | §70 |
 | 2b.11 | **Synchronous work on the agent event loop.** One block per call between configuration load and session start, 1020 ms. **Partly fixed**: loading Silero in `prewarm_fnc` brings it to 628 ms; the remainder is inside `AgentSession.start` and needs a profiler, the provider constructors having been measured and ruled out. It delays the greeting, not the turn metrics. | **defect** (partly) | §28, §56 |
 | 2b.8 | Repeated-measurement harness, then the 10-concurrent-call one. Must report **realtime factor** per stage and not only latency: it is what says whether a configuration can hold a conversation, and it is what exposed the STT ceiling. Now a prerequisite for 2b.7 rather than a later nicety. | feature | §76 |
 
@@ -1441,6 +1441,39 @@ often a no-op. Adding the provider tiers made every save a real UPDATE and
 turned an intermittent 500 into a certain one. A latent fault that only
 triggers on a genuine write is invisible in exactly the tests you would write
 for it.
+
+#### Signalling connects and media never does
+
+Symptom: a browser joins the room, the console log shows `signal connected` and
+`connected to Livekit Server`, and then the call fails with
+`could not establish pc connection`. The agent is in the room; nobody hears
+anything.
+
+Cause: LiveKit advertises ICE candidates for `172.x`, its address on the Docker
+bridge. Another container can route to that; a browser on the host cannot. The
+candidate-pair stats show every pair `failed` with `responsesReceived: 0`.
+
+Fix: `NODE_IP` set to this machine's LAN address, which both the host's browser
+and the other containers can reach. **Not `127.0.0.1`** — inside every other
+container that means the container itself, so it fixes the browser and breaks
+the worker and SIP.
+
+This is the same class of problem as `SIP_NAT_IP`, and the same fix. Worth
+checking both after this machine changes network: `./scripts/lan-ip.sh`
+reported `192.168.103.15` while `.env` still held `192.168.0.107` from a
+previous network, which would have failed a PBX call in exactly this way.
+
+#### A test that read a comment and reported on the code
+
+The first assertion that the browser-test token grants nothing beyond
+`room_join` searched the function's source text for `room_create`. It failed —
+matching the comment that says *"No room_create, no room_admin, no
+room_list"*. Written the other way round it would have passed for the same
+reason, which is worse.
+
+Rewritten to parse the function with `ast` and read the keywords actually
+passed to `VideoGrants`. Any test that greps source text is really testing the
+prose around it.
 
 #### The Agents Playground connects but no agent ever joins
 

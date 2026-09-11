@@ -58,6 +58,13 @@ class Settings(BaseSettings):
 
     # --- LiveKit ---------------------------------------------------------- #
     livekit_url: str = "ws://livekit:7880"
+
+    #: The address a *browser* uses, which is not the one the services use.
+    #: Inside compose LiveKit is ``livekit:7880``; from the host it is the
+    #: published port, which is 7980 by default because 7880 was already taken.
+    #: Getting this wrong produces a client that hangs on connect with no error
+    #: worth reading.
+    livekit_public_url: str = "ws://localhost:7980"
     livekit_api_key: SecretStr = SecretStr("devkey")
     livekit_api_secret: SecretStr = SecretStr("devsecret-at-least-32-characters-long")
     livekit_sip_uri: str = "sip:livekit-sip:5060"
@@ -111,6 +118,28 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    # --- Browser test calls (Plan 2b.10) ---------------------------------- #
+    #: Allow the console to open a test call from the browser.
+    #:
+    #: This is the only endpoint in the platform that issues a credential: it
+    #: mints a LiveKit join token. So it carries four independent guards —
+    #: this flag, ``environment == "development"``, the ``agents.write``
+    #: permission, and the DID being resolved through the tenant repository.
+    #:
+    #: The code default is False so a deployment that configures nothing is
+    #: safe. Development ``.env`` turns it on, because a test path nobody can
+    #: reach without editing configuration is a test path nobody uses.
+    allow_browser_test_sessions: bool = False
+
+    #: How long a minted join token is valid. Short: it is issued for one test
+    #: call that is about to start, not for a session.
+    browser_test_token_ttl_seconds: int = 600
+
+    #: Agent-dispatch identity, matching the worker's registered name. Needed
+    #: because a browser test room has no SIP trunk and therefore no dispatch
+    #: rule to read it from.
+    worker_agent_name: str = "voice-agent"
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -489,6 +489,22 @@ export interface CredentialVerifyResult {
   verified_at: string | null;
 }
 
+/**
+ * A browser test call (Plan 2b.10).
+ *
+ * `token` is the only credential any endpoint in this API returns: a
+ * short-lived LiveKit join grant for one room. It is not stored anywhere —
+ * used to connect and then discarded with the component.
+ */
+export interface BrowserTestSession {
+  room: string;
+  token: string;
+  url: string;
+  agent_name: string;
+  did: string;
+  expires_at: string;
+}
+
 export interface ValidationIssue {
   field: string;
   message: string;
@@ -1184,6 +1200,22 @@ export const api = {
     },
     disable(id: string): Promise<PhoneNumber> {
       return request<PhoneNumber>(`/phone-numbers/${id}/disable`, { method: "POST" });
+    },
+  },
+
+  browserTest: {
+    /**
+     * Open a test call against one of this tenant's own numbers.
+     *
+     * Development only, and refused unless the platform has it switched on.
+     * The DID is validated against this tenant, so another tenant's number is
+     * a 404 rather than a token.
+     */
+    session(did: string): Promise<BrowserTestSession> {
+      return request<BrowserTestSession>("/browser-test/session", {
+        method: "POST",
+        body: { did },
+      });
     },
   },
 

@@ -885,6 +885,14 @@ recovery procedures.**
 HTTPS/TLS · JWT authentication · RBAC · Tenant isolation · SIP authentication · IP allowlists ·
 Encrypted credentials · Secret management · Audit logging · Secure object storage.
 
+**One endpoint issues a credential, and it is fenced accordingly.**
+`POST /browser-test/session` mints a LiveKit join token so an operator can call their own
+agent from the console. Every other endpoint in the API reads or writes configuration. It is
+gated on the flag, the environment, the `agents.write` permission, and tenant ownership of the
+DID; the token grants `room_join` on one named room for ten minutes. The asymmetry is
+deliberate — a credential-issuing endpoint should look different from the rest, and be
+readable in one file.
+
 ### 15.2 Secret Management [§54]
 
 Production credentials must use **Kubernetes Secrets**, or preferably **HashiCorp Vault,

@@ -616,3 +616,101 @@ class TestProviderSelectionAndCredentials:
         from app.schemas.agent import AgentVersionConfig
 
         assert "llm_local_provider_id" not in AgentVersionConfig.model_fields
+
+
+class TestBrowserTestSessionIsTheOneCredentialEndpoint:
+    """Guards on the only endpoint that issues a credential (Plan 2b.10).
+
+    Every other endpoint reads or writes configuration. This one mints a
+    LiveKit join token, so its guards are asserted rather than reviewed.
+    """
+
+    def _route(self, app):
+        from fastapi.routing import APIRoute
+
+        return next(
+            r
+            for r in app.routes
+            if isinstance(r, APIRoute) and r.path == "/api/v1/browser-test/session"
+        )
+
+    def test_the_endpoint_exists(self, app) -> None:
+        assert self._route(app).methods == {"POST"}
+
+    def test_it_requires_agents_write(self, app) -> None:
+        """Not merely authentication: issuing a token is a write-shaped act."""
+        found: set[Permission] = set()
+        for dependency in self._route(app).dependant.dependencies:
+            for cell in getattr(dependency.call, "__closure__", None) or ():
+                contents = cell.cell_contents
+                if isinstance(contents, tuple):
+                    found.update(c for c in contents if isinstance(c, Permission))
+        assert Permission.AGENTS_WRITE in found
+
+    def test_it_checks_the_environment_and_the_flag(self) -> None:
+        """Two guards, not one. Either alone is a single mistake from wrong."""
+        import inspect
+
+        from app.api.v1 import browser_test
+
+        source = inspect.getsource(browser_test._refuse_unless_development)
+        assert 'settings.environment != "development"' in source
+        assert "allow_browser_test_sessions" in source
+
+    def test_the_flag_defaults_to_off(self) -> None:
+        """Read from the field, not an instance: an instance reads the
+        environment, and the machine running these tests is the one most
+        likely to have it switched on."""
+        from app.core.settings import Settings
+
+        assert Settings.model_fields["allow_browser_test_sessions"].default is False
+
+    def test_the_did_is_resolved_through_the_tenant_repository(self) -> None:
+        """The check that stops this reaching another tenant's agent."""
+        import inspect
+
+        from app.api.v1 import browser_test
+
+        source = inspect.getsource(browser_test.create_session)
+        assert "repository.scoped(PhoneNumber)" in source
+
+    def test_the_token_grants_join_on_one_room_only(self) -> None:
+        """No room_create, no room_admin, no room_list.
+
+        Parsed rather than string-matched. The first version of this test
+        searched the source text and passed on the *comment* that lists the
+        grants being withheld — a test that reads prose and reports on code.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        from app.api.v1 import browser_test
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(browser_test.create_session)))
+        grants = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "VideoGrants"
+        ]
+        assert len(grants) == 1, "exactly one grant set should be constructed"
+
+        passed = {kw.arg for kw in grants[0].keywords}
+        assert passed == {"room_join", "room"}, passed
+
+    def test_the_token_is_short_lived(self) -> None:
+        from app.core.settings import Settings
+
+        ttl = Settings.model_fields["browser_test_token_ttl_seconds"].default
+        assert 0 < ttl <= 900, "a test-call token should not outlive the test call"
+
+    def test_the_response_carries_no_secret_beyond_the_join_token(self) -> None:
+        """The token is the point; a key or secret would not be."""
+        from app.schemas.browser_test import BrowserTestSession
+
+        fields = set(BrowserTestSession.model_fields)
+        assert "token" in fields
+        for forbidden in ("api_key", "api_secret", "secret", "password"):
+            assert forbidden not in fields, forbidden

@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { BrowserCall } from "@/components/BrowserCall";
 import { Shell } from "@/components/Shell";
 import {
   Badge, Button, Dialog, EmptyState, Field, Loading, Notice, ToastStack, useToasts,
@@ -31,6 +32,7 @@ export default function PhoneNumbersPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<PhoneNumber | null>(null);
+  const [calling, setCalling] = useState<{ did: string; agent: string } | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<PhoneNumber | null>(null);
 
@@ -112,6 +114,21 @@ export default function PhoneNumbersPage() {
                   </td>
                   <td>
                     <div className="cell-actions">
+                      {/* Only offered where it can work: a live number with an
+                          agent behind it. Offering it otherwise produces a call
+                          that connects to silence — the very failure this
+                          button exists to help diagnose. */}
+                      {row.status === "ACTIVE" && row.inbound_agent_id && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setCalling({ did: row.number, agent: row.agent_name ?? "the agent" })
+                          }
+                        >
+                          Call from browser
+                        </Button>
+                      )}
                       {canWrite && (
                         <>
                           <Button size="sm" onClick={() => setEditing(row)}>Edit</Button>
@@ -139,6 +156,14 @@ export default function PhoneNumbersPage() {
           </table>
         )}
       </div>
+
+      {calling && (
+        <BrowserCall
+          did={calling.did}
+          agentName={calling.agent}
+          onClose={() => setCalling(null)}
+        />
+      )}
 
       {(creating || editing) && (
         <NumberForm

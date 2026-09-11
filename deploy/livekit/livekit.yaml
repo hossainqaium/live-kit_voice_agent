@@ -21,10 +21,15 @@ rtc:
 redis:
   address: redis:6379
 
-keys:
-  # Development credentials only. Production keys come from a secret manager
-  # (spec 54) and never from a file in the repository.
-  devkey: devsecret-at-least-32-characters-long
+# No `keys:` block. The key pair arrives as the LIVEKIT_KEYS environment
+# variable ("key: secret"), which compose builds from .env.
+#
+# It used to be written here as devkey/devsecret-at-least-32-characters-long —
+# the pair from LiveKit's own examples, committed to this repository. Anyone
+# who could reach port 7880 could mint a token for any room and join any call
+# in progress, because the secret is the only thing a token is signed with.
+# A file saying "development credentials only" does not stop that being true
+# of whatever environment the file is deployed to (spec 54).
 
 turn:
   enabled: false

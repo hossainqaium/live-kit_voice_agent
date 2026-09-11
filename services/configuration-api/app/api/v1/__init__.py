@@ -15,6 +15,7 @@ from app.api.v1 import (
     admin,
     agents,
     auth,
+    browser_test,
     calls,
     catalog,
     pbxs,
@@ -34,6 +35,7 @@ api_router.include_router(sip_trunks.router)
 api_router.include_router(phone_numbers.router)
 api_router.include_router(agents.router)
 api_router.include_router(catalog.router)
+api_router.include_router(browser_test.router)
 api_router.include_router(calls.router)
 api_router.include_router(routing.router)
 api_router.include_router(tools.router)

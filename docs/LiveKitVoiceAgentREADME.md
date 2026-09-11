@@ -1476,74 +1476,76 @@ API keys. That is platform/DevOps controlled under §13 and must never reach a
 tenant administrator — the file's own header says so. Its runtime behaviour is
 observed through Grafana (§12), not edited through a console.
 
-### 9d.7 Testing an agent from a browser
+### 9d.7 Calling an agent from the browser
 
-The pipeline can be exercised with no PBX in the path. This is what makes
-endpointing and latency work measurable in seconds rather than one phone call
-at a time — and it is the only way to test at all when the test PBX is
-unreachable.
+**Phone Numbers → Call from browser.** The button appears on any active number
+that has an agent behind it, and opens a panel that joins the call, publishes
+your microphone and shows the conversation as it happens. No PBX in the path.
 
-**Development only, and off by default.**
+Development only, and off unless configured on:
 
-```bash
-# 1. turn the worker gate on
-#    ALLOW_BROWSER_TEST_PARTICIPANT=true in .env
-make browser-test
-
-# 2. create a room carrying the DID to call, and dispatch the agent into it
-make test-room DID=1001
-
-# 3. start the browser client
-make playground          # http://localhost:3202
+```
+ALLOW_BROWSER_TEST_SESSIONS=true      # the console endpoint
+ALLOW_BROWSER_TEST_PARTICIPANT=true   # the worker accepting a browser caller
 ```
 
-Then connect the client to the room named by step 2 and publish a microphone.
-Set it back to `false` when finished.
+Both are already set in the development `.env`. Both are refused outside
+`environment=development` whatever they say.
 
-#### How the DID gets in
+#### Why it needs two gates and a credential
 
-A browser client mints its own token from its own configuration and cannot tell
-us which DID it is calling, so the DID travels one of two ways, checked in this
-order:
+This is **the only endpoint in the platform that issues a credential**.
+Everything else reads or writes configuration; `POST /browser-test/session`
+mints a LiveKit join token, which grants media access to a room. It carries
+four independent guards, all in one file so none can be dropped without reading
+why:
 
-| Where | Key | Who sets it |
-|---|---|---|
-| Participant attribute | `did`, `test.did`, `sip.trunkPhoneNumber` | a client you control |
-| Room metadata (JSON) | the same keys | `make test-room` |
+| Guard | Stops |
+|---|---|
+| `allow_browser_test_sessions` | an unconfigured deployment |
+| `environment == "development"` | a production deployment, whatever the flag says |
+| `agents.write` | a read-only account minting tokens |
+| the DID resolved through `TenantRepository` | reaching another tenant's agent |
 
-The worker then presents the DID through the same `sip.trunkPhoneNumber`
-attribute the SIP stack would have used, so `SipCallInfo` and everything after
-it takes one code path. A second parsing route for test calls would be a second
-thing to keep correct, and the two would drift in exactly the way that makes a
-test call stop resembling a real one.
+The token grants `room_join` on one named room — no create, no admin, no list —
+and lives ten minutes. A test asserts that by parsing the call rather than
+searching the source text, because the first version of it passed on a
+*comment* listing the grants being withheld.
 
-#### Why the gate is not simply "accept any participant"
+The worker's side is the same idea: it accepts a non-SIP participant only when
+that participant declares a DID, in a participant attribute or the room's
+metadata. It relaxes *where the DID comes from*, not whether there is one, so
+the spec 6 guarantee that every call has a tenant still holds.
 
-The SIP gate is what guarantees every call has a tenant: SIP attributes carry
-the DID, the DID is the only route to a tenant, and a call row with a null
-tenant would violate spec 6. This path relaxes *where the DID comes from*, not
-whether there is one — a participant that declares no DID is refused exactly as
-a SIP-less call is. What it gives up is the assurance that the DID came from the
-telephony network, which is why it is development-only and refused outside it
-regardless of the setting.
+#### Two things that make it work, both easy to get wrong
 
-#### Two traps, both of which produce silence
+**LiveKit must advertise an address the browser can reach.** Without
+`LIVEKIT_NODE_IP` it offers only its container address (`172.x`), which another
+container can route to and a browser on the host cannot. Signalling connects,
+media never does, and the error is `could not establish pc connection` — which
+says nothing about addresses. Set it to this machine's LAN address:
 
-- **`make test-room` also creates the agent dispatch**, because the worker
-  registers with an explicit agent name and LiveKit only auto-dispatches agents
-  that register without one. A room created by hand gets a browser participant,
-  no agent, and silence.
-- **Let the greeting finish before speaking.** The greeting is played by
-  `session.say()` and speech arriving during it is treated as barge-in. A test
-  client that starts talking immediately can produce a call with no caller
-  transcript at all, which looks like an STT failure and is not.
+```bash
+./scripts/lan-ip.sh     # then set LIVEKIT_NODE_IP in .env
+```
+
+Loopback does not work: `127.0.0.1` means "myself" inside every other
+container, which breaks the worker and SIP paths.
+
+**The browser reaches LiveKit on the published port, not the internal one.**
+Services use `ws://livekit:7880`; a browser needs `ws://localhost:7980`. The
+API returns the right one to the console, which is why `LIVEKIT_PUBLIC_URL`
+exists as a separate setting.
 
 #### What it does not replace
 
-Telephony audio is 8 kHz and a browser is not, so this path will not surface
-the accuracy question that matters most for a local Whisper model — a real call
-remains the only way to answer it. It also cannot catch SIP-layer faults. It
-replaces the *iteration*, not the acceptance test.
+Telephony audio is 8 kHz and a browser is not, so speech recognition that
+sounds fine here can still be wrong on a real call — the panel says so on
+screen. It also cannot catch SIP-layer faults. It replaces the *iteration*, not
+the acceptance test.
+
+Microphone capture needs a secure context, so this works on
+`http://localhost:3200` but not over the LAN without HTTPS.
 
 ---
 
