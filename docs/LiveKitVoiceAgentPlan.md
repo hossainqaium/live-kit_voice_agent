@@ -248,7 +248,7 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.5 | Conversation summarisation into `call_transcripts.summary`, which is also what the warm-transfer whisper reads. | feature | §34, §36 |
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
-| 2b.9 | Move STT to the self-hosted endpoint and re-measure. ~1.1s of the 4.7s time-to-first-audio is network transcription latency. | **defect** | §25, §56 |
+| 2b.9 | Move STT to the self-hosted endpoint and re-measure. **Configuration done and measured at the provider** (see §12.1): warm p50 548 ms against 1103 ms on OpenAI. Re-measurement *on a call* is still open, and so is the cold-start cost. | **defect** (partly) | §25, §56 |
 | 2b.10 | **Browser-based test client.** A development-only worker branch that accepts a non-SIP participant carrying a DID, so LiveKit's Agents Playground can exercise the real pipeline with no telephony in the path. Today the worker requires `PARTICIPANT_KIND_SIP` and abandons a browser participant silently. | tooling | §70 |
 | 2b.8 | 10-concurrent-call harness. | feature | §76 |
 
@@ -1095,6 +1095,44 @@ healthy one — it connected, ran the state machine, and completed with a normal
 duration. This entry exists because the observability work is what made the
 failure legible, which is the argument for doing 2b.7 and the latency tuning
 before anything else in Phase 2b.
+
+#### Self-hosted STT is about half the latency, and that is not enough
+
+Measured against the same speaches endpoint the agent now uses, transcribing
+4.3 s of speech, 15 consecutive requests:
+
+| | Local `faster-whisper-tiny` | OpenAI `gpt-4o-mini-transcribe` |
+|---|---|---|
+| p50 | **548 ms** | 1103 ms (from `call_20260911T063710`) |
+| p95 | 733 ms | not measured |
+| min | 489 ms | — |
+| cold | **2.6–3.6 s** | n/a |
+
+So item 2b.9 saves roughly 550 ms per turn. Applied to the failing call that
+gives a projected time-to-first-audio near 4.2 s instead of 4.7 s — **still not
+a conversation.** The dominant terms are unchanged: end-of-utterance detection
+at 2581 ms and LLM time-to-first-token at 2243 ms. 2b.9 was worth doing and it
+does not fix 2b.7.
+
+It may still change the *symptom*, which is worth knowing before the next call
+is judged. The failure was `transcript arrives after turn has been committed` —
+a race between transcription and the endpointing window. Taking 550 ms out of
+transcription makes the transcript more likely to land inside the window, so
+the agent may begin replying without any endpointing change at all. If it does,
+the underlying timing is still marginal and 2b.7 remains necessary.
+
+**The cold start is a separate problem.** The first transcription after the
+model is idle costs 2.6–3.6 s, because speaches unloads it. Every measurement
+above discards the first three requests for that reason. On a real deployment
+that cost lands on a caller, not on a benchmark — the first call after a quiet
+period gets it. A keep-warm ping or a pinned model is the fix; recorded as part
+of 2b.9 rather than discovered again during load testing.
+
+The accuracy question is not answered here. The benchmark transcribed clean
+synthetic speech at full bandwidth and got the sentence back verbatim; a real
+call is 8 kHz telephony audio, where `tiny` is materially worse. If transcripts
+degrade after this change, the answer is a larger local model
+(`faster-whisper-base` or `-small`), not a return to the network.
 
 #### A broken LLM produces a call that sounds fine
 

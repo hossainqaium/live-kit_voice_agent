@@ -963,7 +963,7 @@ misread as a fault:
 | Inbound call from a PBX extension, agent answers, speaks a greeting | Working |
 | Dedicated dialplan entry routing a chosen number to the agent | Working |
 | Call record, state machine, correlation ID across services | Working |
-| Speech to text | Working — OpenAI `gpt-4o-mini-transcribe`, or self-hosted |
+| Speech to text | Working — now **self-hosted** `faster-whisper-tiny` by default (warm p50 548 ms vs 1103 ms hosted). Hosted remains selectable. |
 | Language model | Working — OpenAI `gpt-4o-mini`, or any OpenAI-compatible endpoint. Verified by exercising the adapter directly (§9c.5). |
 | Text to speech | Working — self-hosted Kokoro, or OpenAI |
 | Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
@@ -1127,6 +1127,12 @@ What this environment runs, and why:
 | STT | OpenAI | `gpt-4o-mini-transcribe` | Transcription quality dominates whether a conversation works at all. A tiny local Whisper mis-hears enough to make a correct agent look broken. |
 | LLM | OpenAI | `gpt-4o-mini` | Fast and cheap; latency matters more than raw capability for short spoken turns. |
 | TTS | Self-hosted | Kokoro via speaches | Audio is the highest-volume cost per minute, and local quality is good enough. Switch to `gpt-4o-mini-tts` if you prefer. |
+
+**Since Plan 2b.9 the seeded agent uses self-hosted STT as well.** A credential
+stored against the self-hosted provider with `base_url: https://api.openai.com/v1`
+was overriding its endpoint, so "self-hosted STT" was reaching OpenAI over the
+internet — worth checking in any environment seeded before that fix. Removing
+that credential is what makes the provider use its own endpoint.
 
 Mixing hosted and self-hosted like this is the point of the abstraction: the
 worker cannot tell the difference.
