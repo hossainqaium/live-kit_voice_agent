@@ -64,29 +64,6 @@ def _generate_call_id() -> str:
     return f"call_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
-async def _await_sip_participant(ctx: JobContext) -> rtc.RemoteParticipant | None:
-    """Return the SIP participant, or None if none arrives in time."""
-    for participant in ctx.room.remote_participants.values():
-        if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            return participant
-
-    import asyncio
-
-    joined: asyncio.Future[rtc.RemoteParticipant] = asyncio.get_running_loop().create_future()
-
-    def _on_join(participant: rtc.RemoteParticipant) -> None:
-        if not joined.done() and participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            joined.set_result(participant)
-
-    ctx.room.on("participant_connected", _on_join)
-    try:
-        return await asyncio.wait_for(joined, timeout=_PARTICIPANT_TIMEOUT_SECONDS)
-    except TimeoutError:
-        return None
-    finally:
-        ctx.room.off("participant_connected", _on_join)
-
-
 #: Where a browser test client may declare the DID it is calling. Checked in
 #: order; participant attributes first because a client can set them per
 #: participant without re-creating the room.
@@ -127,32 +104,58 @@ def _browser_test_did(participant: rtc.RemoteParticipant, room: rtc.Room) -> str
     return None
 
 
-async def _await_browser_test_participant(ctx: JobContext) -> rtc.RemoteParticipant | None:
-    """A non-SIP participant, for the development test path (Plan 2b.10).
+async def _await_caller(ctx: JobContext) -> tuple[rtc.RemoteParticipant | None, bool]:
+    """Wait for whoever is calling: a SIP participant, or a browser test one.
 
-    Only reached when the setting is on; see ``allow_browser_test_participant``
-    for why that default matters.
+    Returns ``(participant, is_browser_test)``.
+
+    **Both are awaited together, not one after the other.** They used to be
+    sequential — fifteen seconds for SIP, then five for a browser — so every
+    browser test call sat in silence for fifteen seconds before the agent
+    started, greeted into a conversation the caller had already begun, and
+    ignored everything said in the meantime. The caller experiences that as an
+    agent that does not answer, which is indistinguishable from the defect this
+    path was built to investigate.
+
+    A real call is unaffected: no browser participant arrives, so the SIP
+    branch resolves exactly as before.
     """
     import asyncio
 
     settings = get_settings()
-    deadline = settings.browser_test_participant_timeout_seconds
+    accept_browser = settings.allow_browser_test_participant and (
+        settings.environment == "development"
+    )
+
+    def classify(participant: rtc.RemoteParticipant) -> bool | None:
+        """True for SIP, False for an acceptable browser caller, None to ignore."""
+        if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            return True
+        if accept_browser and _browser_test_did(participant, ctx.room):
+            return False
+        return None
 
     for participant in ctx.room.remote_participants.values():
-        if participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            return participant
+        kind = classify(participant)
+        if kind is not None:
+            return participant, not kind
 
-    joined: asyncio.Future[rtc.RemoteParticipant] = asyncio.get_running_loop().create_future()
+    joined: asyncio.Future[tuple[rtc.RemoteParticipant, bool]] = (
+        asyncio.get_running_loop().create_future()
+    )
 
     def _on_join(participant: rtc.RemoteParticipant) -> None:
-        if not joined.done() and participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            joined.set_result(participant)
+        if joined.done():
+            return
+        kind = classify(participant)
+        if kind is not None:
+            joined.set_result((participant, not kind))
 
     ctx.room.on("participant_connected", _on_join)
     try:
-        return await asyncio.wait_for(joined, timeout=deadline)
+        return await asyncio.wait_for(joined, timeout=_PARTICIPANT_TIMEOUT_SECONDS)
     except TimeoutError:
-        return None
+        return None, False
     finally:
         ctx.room.off("participant_connected", _on_join)
 
@@ -233,52 +236,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
         await ctx.connect()
 
-        participant = await _await_sip_participant(ctx)
-        browser_test = False
-
-        if participant is None and settings.allow_browser_test_participant:
-            # Development test path (Plan 2b.10): accept a browser participant
-            # that declares the DID it is calling, so the pipeline can be
-            # exercised without a PBX. Everything downstream is unchanged — the
-            # DID still resolves the tenant, agent and providers, and the call
-            # still gets a row.
-            if settings.environment != "development":
-                logger.error(
-                    "browser_test_participant_refused_outside_development",
-                    extra={"environment": settings.environment},
-                )
-            else:
-                candidate = await _await_browser_test_participant(ctx)
-                did = _browser_test_did(candidate, ctx.room) if candidate else None
-                if candidate is not None and did:
-                    participant = candidate
-                    browser_test = True
-                    logger.warning(
-                        "browser_test_participant_accepted",
-                        extra={"identity": candidate.identity, "did": did},
-                    )
-                elif candidate is not None:
-                    # Joined but declared nothing. Naming the keys is the whole
-                    # difference between a five-minute fix and an afternoon:
-                    # the failure is silent audio either way.
-                    logger.warning(
-                        "browser_test_participant_has_no_did",
-                        extra={
-                            "identity": candidate.identity,
-                            "checked_attributes": list(_TEST_DID_KEYS),
-                            "hint": (
-                                "set a participant attribute or room metadata JSON "
-                                "naming the DID to call"
-                            ),
-                        },
-                    )
+        participant, browser_test = await _await_caller(ctx)
 
         if participant is None:
             # Nothing to serve. Recorded as a log event rather than a call row,
-            # because without SIP attributes there is no tenant to attribute it
-            # to — and a call row with a null tenant would violate spec 6.
-            logger.warning("no_sip_participant", extra={"room": ctx.room.name})
+            # because without a DID there is no tenant to attribute it to — and
+            # a call row with a null tenant would violate spec 6.
+            logger.warning("no_caller", extra={"room": ctx.room.name})
             return
+
+        if browser_test:
+            logger.warning(
+                "browser_test_participant_accepted",
+                extra={
+                    "identity": participant.identity,
+                    "did": _browser_test_did(participant, ctx.room),
+                },
+            )
 
         attributes = dict(participant.attributes)
         if browser_test:

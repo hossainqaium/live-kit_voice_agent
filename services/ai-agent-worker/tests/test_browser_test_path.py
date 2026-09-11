@@ -45,20 +45,41 @@ class TestTheGateIsOffByDefault:
         production deployment and an unauthenticated participant."""
         assert WorkerSettings.model_fields["environment"].default == "development"
 
-    def test_the_entrypoint_checks_both_the_setting_and_the_environment(self) -> None:
+    def test_both_the_setting_and_the_environment_are_checked(self) -> None:
         """Either guard alone is one configuration mistake from being wrong.
 
         Read from the source because the branch needs a live JobContext to
         exercise: this asserts the guards are present and paired, which is the
-        part a refactor would silently drop.
+        part a refactor would silently drop — and did. The guards moved from
+        ``entrypoint`` into ``_await_caller`` when the two waits were made
+        concurrent, and this test caught that it had to follow them.
         """
         import inspect
 
         from worker import entrypoint
 
-        source = inspect.getsource(entrypoint.entrypoint)
+        source = inspect.getsource(entrypoint._await_caller)
         assert "settings.allow_browser_test_participant" in source
-        assert 'settings.environment != "development"' in source
+        assert 'settings.environment == "development"' in source
+
+    def test_a_real_call_does_not_wait_for_a_browser_participant(self) -> None:
+        """The two waits are concurrent, not sequential.
+
+        They were sequential first: fifteen seconds for SIP, then five for a
+        browser. Every browser test call therefore sat silent for fifteen
+        seconds before the agent started, greeted over a caller who had already
+        spoken, and dropped what was said in between — which presents exactly
+        as an agent that does not answer.
+        """
+        import inspect
+
+        from worker import entrypoint
+
+        source = inspect.getsource(entrypoint)
+        assert "_await_browser_test_participant" not in source, (
+            "a second sequential wait has come back"
+        )
+        assert "async def _await_caller" in source
 
 
 class TestDidResolution:

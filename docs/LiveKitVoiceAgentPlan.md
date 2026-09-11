@@ -1542,6 +1542,50 @@ symptom with a plausible cause is not evidence. Two ports were misconfigured
 and neither was the problem; the problem was a duration, and it took ten
 seconds to measure once the path was reproducible.
 
+#### A browser test call waited fifteen seconds before the agent did anything
+
+Symptom, as reported: the agent "asks a question after connected" — but only
+after a long pause — then does not answer what the caller says next.
+
+Cause: the two waits were **sequential**. `_await_sip_participant` blocked for
+its full fifteen-second timeout before the browser branch was even reached, so
+every browser test call sat in silence for fifteen seconds, then greeted into a
+conversation the caller had already started, having discarded whatever was said
+in the meantime. It presents exactly as an agent that will not answer — which
+is the defect this path was built to investigate, so the tool was manufacturing
+the symptom it existed to study.
+
+Fix: `_await_caller` waits for both kinds at once and takes the first. Measured
+from the browser: agent joins at **2.0 s** and publishes audio at **4.0 s**,
+against fifteen-plus before. A real call is unaffected, because no browser
+participant arrives and the SIP branch resolves as it always did.
+
+A test now asserts the two waits have not become sequential again, by name.
+
+#### The agent's audio reaches a phone but not a browser — open
+
+Established, and worth writing down because the next person will otherwise
+re-derive it:
+
+- The greeting **is** spoken: `session.say()` runs and a transcript segment is
+  written for it, and the worker logs show TTS being invoked.
+- Over SIP the same agent sends real audio: 132 RTP frames out on the PBX call
+  in this section.
+- In a browser room the subscribed track is live, its element plays and
+  `currentTime` advances, and a WebAudio analyser reads **peak RMS 0.00001**
+  over ten seconds. Forcing media over TCP made inbound counters visible: 6
+  then 18 packets, ~26 bytes each at roughly 5/second, which is Opus DTX
+  comfort noise rather than speech.
+
+So the transport carries what it is given and what it is given is silence. The
+fault is between the agent's TTS output and the room's published track, in the
+browser case specifically. Not yet found.
+
+Ruled out, each by measurement rather than reasoning: the advertised address
+(candidates now carry the LAN IP and a pair is nominated), the RTC TCP port
+(matched to the published one), the media port count (muxed), audio element
+attachment (the element plays), and autoplay policy (`canPlaybackAudio` true).
+
 #### Signalling connects and media never does
 
 Symptom: a browser joins the room, the console log shows `signal connected` and
