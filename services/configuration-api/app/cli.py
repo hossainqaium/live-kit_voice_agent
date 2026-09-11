@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -41,7 +42,12 @@ from app.db.models import (
     UserRole,
 )
 from app.db.session import dispose_engine, get_session_factory
-from app.livekit import LiveKitError, LiveKitUnsupportedError, SipResourceManager
+from app.livekit import (
+    LiveKitAdminClient,
+    LiveKitError,
+    LiveKitUnsupportedError,
+    SipResourceManager,
+)
 from app.services.seed import (
     DevTenantSpec,
     seed_dev_tenant,
@@ -50,7 +56,13 @@ from app.services.seed import (
 )
 from shared.crypto import CredentialCipher, CredentialEncryptionError
 from shared.logging import configure_logging, get_logger
-from shared.models import PlatformRole, ProviderKind, SyncStatus, TenantRole
+from shared.models import (
+    PlatformRole,
+    ProviderKind,
+    ResourceStatus,
+    SyncStatus,
+    TenantRole,
+)
 
 settings = get_settings()
 configure_logging(service="configuration-api-cli", level=settings.log_level)
@@ -644,6 +656,103 @@ async def cmd_create_user(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_create_test_room(args: argparse.Namespace) -> int:
+    """Create a LiveKit room carrying a DID, for the browser test path.
+
+    Plan 2b.10. A browser client mints its own token from its own configuration
+    and cannot declare which DID it is calling, so the DID travels in the
+    room's metadata and the worker reads it there when no SIP participant
+    arrives. Connect the test client to this room name and the call resolves
+    the same tenant, agent and providers a real call would.
+
+    Refused outside development, and refused for a DID that is not active:
+    creating a room for a number nothing answers produces a call that connects
+    to silence, which is the failure this whole path exists to avoid.
+    """
+    if settings.environment != "development":
+        print(
+            f"refused: the browser test path is development-only "
+            f"(environment={settings.environment})",
+            file=sys.stderr,
+        )
+        return 2
+
+    factory = get_session_factory()
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(
+                    PhoneNumber.number,
+                    PhoneNumber.inbound_agent_id,
+                    PhoneNumber.tenant_id,
+                    Tenant.slug,
+                )
+                .join(Tenant, Tenant.id == PhoneNumber.tenant_id)
+                .where(
+                    PhoneNumber.number == args.did,
+                    PhoneNumber.status == ResourceStatus.ACTIVE,
+                )
+            )
+        ).first()
+
+        # Taken from the tenant's own dispatch rule rather than a default here.
+        # The name has to match what the worker registered, and two places
+        # holding it independently is how they come to disagree.
+        dispatch_name = None
+        if row is not None:
+            dispatch_name = (
+                await session.execute(
+                    select(LiveKitDispatchRule.agent_dispatch_name).where(
+                        LiveKitDispatchRule.tenant_id == row.tenant_id
+                    )
+                )
+            ).scalar_one_or_none()
+
+    if row is None:
+        print(f"refused: no active DID {args.did!r}", file=sys.stderr)
+        return 2
+    if row.inbound_agent_id is None:
+        print(f"refused: DID {args.did!r} has no inbound agent", file=sys.stderr)
+        return 2
+
+    metadata = json.dumps({"did": args.did, "source": "browser-test"})
+    client = LiveKitAdminClient()
+    try:
+        name = await client.create_room_with_metadata(args.room, metadata)
+    except LiveKitError as exc:
+        print(f"could not create the room: {exc}", file=sys.stderr)
+        return 2
+
+    # The worker registers with an explicit agent name, so LiveKit will not
+    # dispatch it into a room on its own. Without this the browser joins, no
+    # agent arrives, and the failure looks identical to every other one on
+    # this path.
+    agent_name = args.agent_name or dispatch_name
+    if not agent_name:
+        print(
+            "refused: no dispatch rule for this tenant names an agent, so there is "
+            "nothing to dispatch; pass --agent-name to override",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        await client.dispatch_agent(name, agent_name)
+    except LiveKitError as exc:
+        print(f"room created but the agent could not be dispatched: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"room created: {name}")
+    print(f"  did      {args.did}  (tenant {row.slug})")
+    print(f"  metadata {metadata}")
+    print(f"  agent    {agent_name} dispatched")
+    print()
+    print("next:")
+    print("  1. set ALLOW_BROWSER_TEST_PARTICIPANT=true and restart the worker")
+    print(f"  2. connect a browser client to room {name!r} and publish a microphone")
+    print("  3. the worker resolves this DID exactly as an inbound call would")
+    return 0
+
+
 async def cmd_show_config() -> int:
     """Print what LiveKit currently holds, next to what we recorded."""
     manager = SipResourceManager()
@@ -741,6 +850,18 @@ def main() -> int:
     agentp.add_argument("--provider", required=True, help="provider slug")
     agentp.add_argument("--model", required=True, help="model slug")
 
+    testroom = sub.add_parser(
+        "create-test-room",
+        help="create a LiveKit room carrying a DID, for the browser test path (dev only)",
+    )
+    testroom.add_argument("--did", required=True, help="the DID the test call should resolve")
+    testroom.add_argument("--room", default="browser-test", help="room name to create")
+    testroom.add_argument(
+        "--agent-name",
+        default=None,
+        help="override the dispatch identity; defaults to the tenant's dispatch rule",
+    )
+
     args = parser.parse_args()
 
     async def run() -> int:
@@ -761,6 +882,8 @@ def main() -> int:
                 return await cmd_set_credential(args)
             if args.command == "set-agent-provider":
                 return await cmd_set_agent_provider(args)
+            if args.command == "create-test-room":
+                return await cmd_create_test_room(args)
             parser.error(f"unknown command {args.command}")
             return 2
         finally:

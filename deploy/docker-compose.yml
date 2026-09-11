@@ -231,6 +231,9 @@ services:
       WORKER_AGENT_NAME: ${WORKER_AGENT_NAME:-voice-agent}
       WORKER_MAX_CONCURRENT_CALLS: ${WORKER_MAX_CONCURRENT_CALLS:-10}
       WORKER_DRAIN_TIMEOUT_SECONDS: ${WORKER_DRAIN_TIMEOUT_SECONDS:-600}
+      # Browser test path (Plan 2b.10). Off unless explicitly set, and refused
+      # by the worker outside development regardless of this value.
+      ALLOW_BROWSER_TEST_PARTICIPANT: ${ALLOW_BROWSER_TEST_PARTICIPANT:-false}
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET_RECORDINGS: ${S3_BUCKET_RECORDINGS:-recordings}
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
@@ -271,6 +274,31 @@ services:
       - ../services/frontend:/app
       - frontend-node-modules:/app/node_modules
       - frontend-next-cache:/app/.next
+
+  # ----------------------------------------------------------------------- #
+  # Browser test client (Plan 2b.10) — development only
+  #
+  # Behind a profile, so `make up` does not start it: it is a measuring
+  # instrument, not part of the platform. It also only reaches an agent when
+  # the worker's ALLOW_BROWSER_TEST_PARTICIPANT is on and the room carries a
+  # DID — see `make test-room`.
+  # ----------------------------------------------------------------------- #
+  playground:
+    profiles: ["testing"]
+    build:
+      context: playground
+      args:
+        PLAYGROUND_REF: ${PLAYGROUND_REF:-main}
+    restart: unless-stopped
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret-at-least-32-characters-long}
+      # Read by the browser, so it must be the host-visible address rather
+      # than the compose service name — the same trap as the frontend's
+      # NEXT_PUBLIC_API_BASE_URL.
+      NEXT_PUBLIC_LIVEKIT_URL: ${PLAYGROUND_LIVEKIT_URL:-ws://localhost:7880}
+    ports:
+      - "${PLAYGROUND_PORT:-3202}:3000"
 
   # ----------------------------------------------------------------------- #
   # Object storage — recordings never go in PostgreSQL (spec 3, 39)

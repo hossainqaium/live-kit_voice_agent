@@ -1476,53 +1476,74 @@ API keys. That is platform/DevOps controlled under §13 and must never reach a
 tenant administrator — the file's own header says so. Its runtime behaviour is
 observed through Grafana (§12), not edited through a console.
 
-### 9d.7 Testing an agent from a browser — the Agents Playground
+### 9d.7 Testing an agent from a browser
 
-LiveKit's Agents Playground is a browser client that joins a room and talks to
-an agent over WebRTC with no telephony in the path. It is a separate LiveKit
-application, not something `livekit-server` serves:
+The pipeline can be exercised with no PBX in the path. This is what makes
+endpointing and latency work measurable in seconds rather than one phone call
+at a time — and it is the only way to test at all when the test PBX is
+unreachable.
 
-| Where | What it is |
-|---|---|
-| https://agents-playground.livekit.io | Hosted demo. Still up, though LiveKit now steers people to the Cloud Agent Console. |
-| https://github.com/livekit/agents-playground | The open-source Next.js app. Wants exactly `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` and `NEXT_PUBLIC_LIVEKIT_URL`. |
-| https://github.com/livekit-examples/agent-starter-react | Newer, slimmer, voice-only. Same purpose. |
+**Development only, and off by default.**
 
-All three values it needs already exist here: `devkey` and
-`devsecret-at-least-32-characters-long` from `.env`, and `ws://localhost:7880`
-from a browser (`ws://livekit:7880` from inside the compose network). Port 3202
-is free if it is added to `deploy/docker-compose.yml`.
+```bash
+# 1. turn the worker gate on
+#    ALLOW_BROWSER_TEST_PARTICIPANT=true in .env
+make browser-test
 
-**It will not work against this worker yet, and the failure is silent.**
-`worker/entrypoint.py` gates every job on a SIP participant:
+# 2. create a room carrying the DID to call, and dispatch the agent into it
+make test-room DID=1001
 
-```python
-participant = await _await_sip_participant(ctx)
-if participant is None:
-    # Nothing to serve. Recorded as a log event rather than a call row,
-    # because without SIP attributes there is no tenant to attribute it
-    # to — and a call row with a null tenant would violate spec 6.
-    logger.warning("no_sip_participant", extra={"room": ctx.room.name})
-    return
+# 3. start the browser client
+make playground          # http://localhost:3202
 ```
 
-`_await_sip_participant` matches only `PARTICIPANT_KIND_SIP`. A browser joins
-as `PARTICIPANT_KIND_STANDARD`, so the playground connects to the room, the
-worker waits out the participant timeout, logs `no_sip_participant`, and
-leaves. What a tester hears is silence — the same symptom as the barge-in
-defect in §9a.11, which makes this the worst possible failure mode for a tool
-whose whole purpose is diagnosis.
+Then connect the client to the room named by step 2 and publish a microphone.
+Set it back to `false` when finished.
 
-The comment states the reason, and it is a good one, so the gate stays. Making
-the playground usable therefore needs a **development-only** branch: accept a
-non-SIP participant that carries a DID in its participant attributes or room
-metadata, resolve configuration from that DID exactly as a call does, and gate
-the branch behind a setting that defaults to off so it cannot reach production.
-That is Plan item 2b.10.
+#### How the DID gets in
 
-Until then the only way to exercise the pipeline is a real call (§9a.8), which
-measures telephony and the pipeline together — the specific reason 2b.10 is
-worth doing before the endpointing work in 2b.7.
+A browser client mints its own token from its own configuration and cannot tell
+us which DID it is calling, so the DID travels one of two ways, checked in this
+order:
+
+| Where | Key | Who sets it |
+|---|---|---|
+| Participant attribute | `did`, `test.did`, `sip.trunkPhoneNumber` | a client you control |
+| Room metadata (JSON) | the same keys | `make test-room` |
+
+The worker then presents the DID through the same `sip.trunkPhoneNumber`
+attribute the SIP stack would have used, so `SipCallInfo` and everything after
+it takes one code path. A second parsing route for test calls would be a second
+thing to keep correct, and the two would drift in exactly the way that makes a
+test call stop resembling a real one.
+
+#### Why the gate is not simply "accept any participant"
+
+The SIP gate is what guarantees every call has a tenant: SIP attributes carry
+the DID, the DID is the only route to a tenant, and a call row with a null
+tenant would violate spec 6. This path relaxes *where the DID comes from*, not
+whether there is one — a participant that declares no DID is refused exactly as
+a SIP-less call is. What it gives up is the assurance that the DID came from the
+telephony network, which is why it is development-only and refused outside it
+regardless of the setting.
+
+#### Two traps, both of which produce silence
+
+- **`make test-room` also creates the agent dispatch**, because the worker
+  registers with an explicit agent name and LiveKit only auto-dispatches agents
+  that register without one. A room created by hand gets a browser participant,
+  no agent, and silence.
+- **Let the greeting finish before speaking.** The greeting is played by
+  `session.say()` and speech arriving during it is treated as barge-in. A test
+  client that starts talking immediately can produce a call with no caller
+  transcript at all, which looks like an STT failure and is not.
+
+#### What it does not replace
+
+Telephony audio is 8 kHz and a browser is not, so this path will not surface
+the accuracy question that matters most for a local Whisper model — a real call
+remains the only way to answer it. It also cannot catch SIP-layer faults. It
+replaces the *iteration*, not the acceptance test.
 
 ---
 

@@ -249,7 +249,8 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
 | 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
 | 2b.9 | Move STT to the self-hosted endpoint and re-measure. **Configuration done and measured at the provider** (see §12.1): warm p50 548 ms against 1103 ms on OpenAI. Re-measurement *on a call* is still open, and so is the cold-start cost. | **defect** (partly) | §25, §56 |
-| 2b.10 | **Browser-based test client.** A development-only worker branch that accepts a non-SIP participant carrying a DID, so LiveKit's Agents Playground can exercise the real pipeline with no telephony in the path. Today the worker requires `PARTICIPANT_KIND_SIP` and abandons a browser participant silently. | tooling | §70 |
+| ~~2b.10~~ | **Browser-based test client.** **Done**: `ALLOW_BROWSER_TEST_PARTICIPANT` (off by default, refused outside development) lets the worker accept a non-SIP participant that declares a DID, in a participant attribute or the room's metadata. `make test-room DID=…` creates the room *and* the agent dispatch; `make playground` starts the client. The DID still resolves the tenant, so isolation holds. | ~~tooling~~ | §70 |
+| 2b.11 | **Synchronous work on the agent event loop.** The worker logs `event loop blocked` from 114 ms to 794 ms, nine times in one call, and in-pipeline transcription costs three times its isolated cost as a result. Every latency figure is inflated by an unknown amount until this is found, so it precedes 2b.7. | **defect** | §28, §56 |
 | 2b.8 | 10-concurrent-call harness. | feature | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
@@ -393,11 +394,14 @@ So the priority is the enforcement gap, not more screens:
 
 1. **4b.3** — routing evaluation. The largest gap between what the console
    shows and what a call does.
-2. **2b.7 and 2b.9** — endpointing and STT latency. The agent transcribes and
-   does not reply; see §12.1. Nothing else in the product matters while that
-   holds. **2b.10 goes first inside this step**: reproducing the defect from a
-   browser costs seconds, where a PBX call costs minutes and adds variables
-   that cannot be separated from the pipeline's own.
+2. **2b.11, then 2b.7.** 2b.9 and 2b.10 are done, and together they changed
+   the picture: the agent now holds a conversation over the browser path, and
+   time to first audio is 5854 ms — the first complete measurement rather than
+   an improvement on 4744 ms, which was taken from a turn that never replied.
+   **2b.11 comes before 2b.7** because `event loop blocked` warnings inflate
+   every per-stage figure by an unknown amount, and endpointing tuned against
+   inflated figures is tuned to the wrong target. A real PBX call is still
+   needed to confirm the symptom is gone off this path.
 3. **2b.1–2b.4** — the agent-version settings that are loaded and ignored.
 4. **4b.4** — provider credentials in the console, which is what §77 turns on.
 5. **1b.1** — the usage rollup, so two of the three call limits stop being
@@ -1095,6 +1099,51 @@ healthy one — it connected, ran the state machine, and completed with a normal
 duration. This entry exists because the observability work is what made the
 failure legible, which is the argument for doing 2b.7 and the latency tuning
 before anything else in Phase 2b.
+
+#### The agent does hold a conversation — measured over the browser test path
+
+The first complete turn this project has recorded, from `make test-room` plus a
+browser participant against published v2 (self-hosted STT, hosted LLM,
+self-hosted TTS):
+
+```
+AI     : Hello. You are through to the development voice agent. How can I help?
+CALLER : Hello, I would like to book a table for two people tomorrow evening.
+AI     : Sure! What time would you like to book the table for?
+```
+
+So the 2b.7 symptom — caller segments and no AI segments — is **gone on this
+path**. Whether it is gone on a PBX call is a separate question and needs a
+real call to answer; this audio is 24 kHz from Kokoro, not 8 kHz from a phone.
+
+**The latency is worse than the failing call, and that is not a contradiction.**
+
+| | Failing PBX call | Browser, warm |
+|---|---|---|
+| end-of-utterance | 2581 ms | 1682 ms |
+| transcription | 1103 ms | 1661 ms |
+| LLM first token | 2243 ms | 2272 ms |
+| TTS first audio | not reached | 1899 ms |
+| **time to first audio** | 4744 ms | **5854 ms** |
+
+The 4744 ms figure was measured on a turn that never produced a reply, so it
+was never a complete measurement to beat. 5854 ms is the first honest one, and
+it is still far too slow to be a conversation.
+
+**The new finding is transcription at 1661 ms inside the pipeline against
+548 ms measured in isolation** — three times the cost for the same model, same
+endpoint, same audio length. The worker log says why:
+
+```
+event loop blocked for 794ms; synchronous work on the agent loop
+delays audio and turn handling, move it to a thread or an async client
+```
+
+Nine of those in one call, from 114 ms to 794 ms. Something on the hot path is
+synchronous. Until that is found, every per-stage number is inflated by an
+amount that has nothing to do with the provider, which makes tuning
+endpointing against these figures actively misleading. Recorded as **2b.11**,
+and it should be done before 2b.7 rather than after.
 
 #### Self-hosted STT is about half the latency, and that is not enough
 

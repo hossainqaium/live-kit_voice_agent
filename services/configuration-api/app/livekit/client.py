@@ -136,6 +136,48 @@ class LiveKitAdminClient:
         rooms = await self.call("room_count", lambda api: api.room.list_rooms(ListRoomsRequest()))
         return len(getattr(rooms, "rooms", None) or [])
 
+    async def create_room_with_metadata(self, name: str, metadata: str) -> str:
+        """Create (or update) a room carrying ``metadata``.
+
+        Used only by the development test path (Plan 2b.10). A browser client
+        cannot declare which DID it is calling — it mints its own token from
+        its own configuration — so the DID travels in the room's metadata
+        instead, which the worker reads when no SIP participant arrives.
+
+        Idempotent in the way that matters here: ``create_room`` on an existing
+        name returns the existing room, so re-running the command after a
+        failed attempt does not error.
+        """
+        from livekit.api import CreateRoomRequest
+
+        room = await self.call(
+            "create_room",
+            lambda api: api.room.create_room(CreateRoomRequest(name=name, metadata=metadata)),
+        )
+        return str(getattr(room, "name", name))
+
+    async def dispatch_agent(self, room: str, agent_name: str) -> None:
+        """Ask LiveKit to dispatch a named agent into ``room``.
+
+        Needed for the browser test path, and easy to miss: the worker
+        registers with an explicit ``agent_name``, and LiveKit only
+        auto-dispatches agents that register without one. A room created
+        without this gets a browser participant, no agent, and silence — the
+        same symptom as every other failure on this path, which is why the
+        room-creation command does both.
+
+        Real calls do not need it: the dispatch rule attached to the SIP trunk
+        already names the agent (spec 21).
+        """
+        from livekit.api import CreateAgentDispatchRequest
+
+        await self.call(
+            "dispatch_agent",
+            lambda api: api.agent_dispatch.create_dispatch(
+                CreateAgentDispatchRequest(room=room, agent_name=agent_name)
+            ),
+        )
+
     async def health(self) -> bool:
         """Whether the LiveKit admin API is answering.
 

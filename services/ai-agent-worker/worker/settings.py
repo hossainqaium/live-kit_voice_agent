@@ -51,6 +51,25 @@ class WorkerSettings(BaseSettings):
     #: in production, or a deploy will cut conversations off mid-sentence.
     worker_drain_timeout_seconds: int = 600
 
+    # --- Development test path (Plan 2b.10) -------------------------------- #
+    #: Accept a browser participant that supplies a DID, so the pipeline can be
+    #: exercised without a PBX.
+    #:
+    #: **Defaults to off, and is refused outside development.** The SIP gate it
+    #: relaxes is what guarantees every call has a tenant: SIP attributes carry
+    #: the DID, the DID is the only route to a tenant, and a call row with a
+    #: null tenant would violate spec 6. This path still resolves a DID — it
+    #: accepts one from a participant instead of from the SIP stack — so the
+    #: isolation guarantee holds. What it gives up is the assurance that the
+    #: DID came from the telephony network, which is why it is not a production
+    #: configuration.
+    allow_browser_test_participant: bool = False
+
+    #: How long to wait for a browser participant once no SIP one arrived.
+    #: Short: by this point the job is already past the SIP timeout, and a
+    #: browser client that is coming has usually arrived first.
+    browser_test_participant_timeout_seconds: float = 5.0
+
     # --- Configuration source --------------------------------------------- #
     postgres_host: str = "postgresql"
     postgres_port: int = 5432

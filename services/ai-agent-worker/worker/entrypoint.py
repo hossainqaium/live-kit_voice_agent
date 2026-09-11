@@ -15,6 +15,7 @@ The worker holds no tenant logic. Everything above step 3 is data.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -79,6 +80,76 @@ async def _await_sip_participant(ctx: JobContext) -> rtc.RemoteParticipant | Non
     ctx.room.on("participant_connected", _on_join)
     try:
         return await asyncio.wait_for(joined, timeout=_PARTICIPANT_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return None
+    finally:
+        ctx.room.off("participant_connected", _on_join)
+
+
+#: Where a browser test client may declare the DID it is calling. Checked in
+#: order; participant attributes first because a client can set them per
+#: participant without re-creating the room.
+_TEST_DID_KEYS = ("did", "test.did", "sip.trunkPhoneNumber")
+
+
+def _browser_test_did(participant: rtc.RemoteParticipant, room: rtc.Room) -> str | None:
+    """The DID a browser participant claims, from its attributes or the room.
+
+    Returns None when nothing declares one, which is the correct outcome: a
+    participant with no DID cannot be attributed to a tenant, and this path
+    exists to relax where the DID comes from, not whether there is one.
+    """
+    attributes = dict(participant.attributes)
+    for key in _TEST_DID_KEYS:
+        value = attributes.get(key)
+        if value:
+            return str(value).strip()
+
+    # Room metadata, for a client that cannot set participant attributes. The
+    # Playground can set room metadata at token-mint time, so this is the path
+    # that needs no fork of it.
+    raw = (room.metadata or "").strip()
+    if not raw:
+        return None
+    try:
+        metadata = json.loads(raw)
+    except json.JSONDecodeError:
+        # Metadata is free-form and may legitimately hold something else.
+        # Treating that as an error would turn an unrelated convention into a
+        # failed call.
+        return None
+    if isinstance(metadata, dict):
+        for key in _TEST_DID_KEYS:
+            value = metadata.get(key)
+            if value:
+                return str(value).strip()
+    return None
+
+
+async def _await_browser_test_participant(ctx: JobContext) -> rtc.RemoteParticipant | None:
+    """A non-SIP participant, for the development test path (Plan 2b.10).
+
+    Only reached when the setting is on; see ``allow_browser_test_participant``
+    for why that default matters.
+    """
+    import asyncio
+
+    settings = get_settings()
+    deadline = settings.browser_test_participant_timeout_seconds
+
+    for participant in ctx.room.remote_participants.values():
+        if participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            return participant
+
+    joined: asyncio.Future[rtc.RemoteParticipant] = asyncio.get_running_loop().create_future()
+
+    def _on_join(participant: rtc.RemoteParticipant) -> None:
+        if not joined.done() and participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            joined.set_result(participant)
+
+    ctx.room.on("participant_connected", _on_join)
+    try:
+        return await asyncio.wait_for(joined, timeout=deadline)
     except TimeoutError:
         return None
     finally:
@@ -163,6 +234,45 @@ async def entrypoint(ctx: JobContext) -> None:
         await ctx.connect()
 
         participant = await _await_sip_participant(ctx)
+        browser_test = False
+
+        if participant is None and settings.allow_browser_test_participant:
+            # Development test path (Plan 2b.10): accept a browser participant
+            # that declares the DID it is calling, so the pipeline can be
+            # exercised without a PBX. Everything downstream is unchanged — the
+            # DID still resolves the tenant, agent and providers, and the call
+            # still gets a row.
+            if settings.environment != "development":
+                logger.error(
+                    "browser_test_participant_refused_outside_development",
+                    extra={"environment": settings.environment},
+                )
+            else:
+                candidate = await _await_browser_test_participant(ctx)
+                did = _browser_test_did(candidate, ctx.room) if candidate else None
+                if candidate is not None and did:
+                    participant = candidate
+                    browser_test = True
+                    logger.warning(
+                        "browser_test_participant_accepted",
+                        extra={"identity": candidate.identity, "did": did},
+                    )
+                elif candidate is not None:
+                    # Joined but declared nothing. Naming the keys is the whole
+                    # difference between a five-minute fix and an afternoon:
+                    # the failure is silent audio either way.
+                    logger.warning(
+                        "browser_test_participant_has_no_did",
+                        extra={
+                            "identity": candidate.identity,
+                            "checked_attributes": list(_TEST_DID_KEYS),
+                            "hint": (
+                                "set a participant attribute or room metadata JSON "
+                                "naming the DID to call"
+                            ),
+                        },
+                    )
+
         if participant is None:
             # Nothing to serve. Recorded as a log event rather than a call row,
             # because without SIP attributes there is no tenant to attribute it
@@ -171,6 +281,13 @@ async def entrypoint(ctx: JobContext) -> None:
             return
 
         attributes = dict(participant.attributes)
+        if browser_test:
+            # Present the declared DID through the same attribute the SIP stack
+            # would have used, so SipCallInfo and everything after it takes one
+            # code path. A second parsing route for test calls would be a
+            # second thing to keep correct.
+            attributes["sip.trunkPhoneNumber"] = _browser_test_did(participant, ctx.room) or ""
+            attributes.setdefault("sip.phoneNumber", f"browser:{participant.identity}")
 
         # The full attribute set at debug level. LiveKit's SIP attribute names
         # have changed across versions, and a routing failure caused by a
