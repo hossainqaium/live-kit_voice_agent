@@ -13,7 +13,8 @@ import { useCallback, useEffect, useState } from "react";
 import { BrowserCall } from "@/components/BrowserCall";
 import { Shell } from "@/components/Shell";
 import {
-  Badge, Button, Dialog, EmptyState, Field, Loading, Notice, ToastStack, useToasts,
+  Badge, Button, Dialog, EmptyState, Field, Loading, Notice, PhoneIcon,
+  ToastStack, useToasts,
 } from "@/components/ui";
 import {
   ApiError, api,
@@ -126,7 +127,8 @@ export default function PhoneNumbersPage() {
                             setCalling({ did: row.number, agent: row.agent_name ?? "the agent" })
                           }
                         >
-                          Call from browser
+                          <PhoneIcon />
+                          Call Test
                         </Button>
                       )}
                       {canWrite && (

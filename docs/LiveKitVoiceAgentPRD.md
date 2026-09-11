@@ -1009,6 +1009,7 @@ Transcripts · Analytics · Users · Usage · Settings.
 | PBXs [§14] | `/pbxs` | `/pbxs/**` | `pbxs.read` / `pbxs.write` |
 | SIP Trunks [§15] | `/sip-trunks` | `/sip-trunks/**` | `sip_trunks.read` / `sip_trunks.write` |
 | Phone Numbers [§17] | `/phone-numbers` | `/phone-numbers/**` | `sip_trunks.*` |
+| Call Test (browser call) [§70] | `/phone-numbers` (per row) | `/browser-test/session` | `agents.write`, development only |
 | Routing [§20, §38] | `/routing` | `/routing-rules/**` | `agents.read` / `agents.write` |
 | Business Hours [§37] | `/business-hours` | `/business-hours/**` | `agents.read` / `agents.write` |
 | Transfer Targets [§35, CR-1] | `/transfer-destinations` | `/transfer-destinations/**` | `agents.read` / `agents.write` |

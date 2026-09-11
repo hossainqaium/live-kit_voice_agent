@@ -1252,7 +1252,7 @@ navigation and a platform account has no tenant to act in.
 | Dashboard | `/` | Counts, connection-test state, API reachability |
 | PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
-| Phone Numbers | `/phone-numbers` | DIDs, their trunk and the agent that answers |
+| Phone Numbers | `/phone-numbers` | DIDs, their trunk and the agent that answers, plus **Call Test** — a browser call to that number (§9d.7) |
 | Agents | `/agents` | The builder: providers and models per tier, keys with a connection test, versions, validation, publish, rollback |
 | Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |
 | Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
@@ -1478,9 +1478,16 @@ observed through Grafana (§12), not edited through a console.
 
 ### 9d.7 Calling an agent from the browser
 
-**Phone Numbers → Call from browser.** The button appears on any active number
-that has an agent behind it, and opens a panel that joins the call, publishes
-your microphone and shows the conversation as it happens. No PBX in the path.
+**Phone Numbers → Call Test** — the green handset in the Actions column.
+
+It appears on any active number that has an agent behind it, and opens a panel
+that joins the call, publishes your microphone and shows the conversation as it
+happens. No PBX in the path.
+
+The button is deliberately absent on a disabled number or one with no agent:
+either would produce a call that connects to silence, which is the exact
+failure this button exists to diagnose. The handset is drawn from the `--ok`
+token rather than a literal green, so it stays legible in dark mode.
 
 Development only, and off unless configured on:
 
