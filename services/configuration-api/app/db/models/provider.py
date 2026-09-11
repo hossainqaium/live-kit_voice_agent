@@ -67,6 +67,17 @@ class Provider(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: (spec 25 requires local/self-hosted LLM support).
     default_base_url: Mapped[str | None] = mapped_column(String(512))
 
+    #: Whether this provider needs an API credential.
+    #:
+    #: False for a self-hosted endpoint — ollama, vLLM, speaches — which
+    #: authenticates by network reachability rather than by key. Pre-publish
+    #: validation (spec 63) must not demand a credential for these, or a valid
+    #: self-hosted configuration becomes unpublishable and the local-model
+    #: support spec 25 requires is unusable in practice.
+    requires_credential: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
     notes: Mapped[str | None] = mapped_column(Text)
 
     def __repr__(self) -> str:

@@ -1,0 +1,979 @@
+"""Agent and agent-version endpoints (spec 18, 19, 62, 63, 64, 67).
+
+The versioning rules are the whole point of this module, and they are what the
+rest of the platform depends on:
+
+* An agent holds identity. A **version** holds everything the worker executes.
+* Publishing sets a pointer. It never mutates a running call's configuration,
+  because a call records its ``agent_version_id`` and the worker caches that
+  version for the call's lifetime (spec 19, 45).
+* A published version is **immutable**. Editing one would change what a call
+  already in progress is doing, so an edit to a published version creates a new
+  draft instead.
+* Publishing runs validation first (spec 63). An invalid configuration must not
+  become production-active.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from sqlalchemy import func, select
+
+from app.core.dependencies import ClientIp, CurrentTenant, require_permission
+from app.db.models import (
+    Agent,
+    AgentVersion,
+    KnowledgeBase,
+    Model,
+    PhoneNumber,
+    Provider,
+    ProviderCredential,
+    Voice,
+)
+from app.db.repository import TenantRepository
+from app.db.util import as_lookup
+from app.schemas.agent import (
+    AgentCreate,
+    AgentResponse,
+    AgentUpdate,
+    AgentVersionConfig,
+    AgentVersionResponse,
+    PublishRequest,
+    RollbackRequest,
+    ValidationIssue,
+    ValidationReport,
+)
+from app.schemas.common import Page
+from app.services import audit
+from shared.logging import get_logger
+from shared.models import AgentVersionState, Permission, ProviderKind, ResourceStatus
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/agents", tags=["agents"])
+
+_AGENT_AUDITED = ("name", "description", "status", "published_version_id")
+_VERSION_AUDITED = (
+    "version_number",
+    "state",
+    "language",
+    "greeting",
+    "system_prompt",
+    "temperature",
+    "interruption_enabled",
+    "silence_timeout_seconds",
+    "max_call_duration_seconds",
+    "recording_enabled",
+    "transcription_enabled",
+    "transfer_enabled",
+)
+
+
+def _agent_not_found(agent_id: uuid.UUID) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND, detail=f"no agent with id {agent_id}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Agents
+# --------------------------------------------------------------------------- #
+
+
+async def _agent_summary(tenant: CurrentTenant, rows: list[Agent]) -> list[AgentResponse]:
+    """Attach version counts and the published/draft numbers.
+
+    The list view needs to answer "is this agent live, and is there unpublished
+    work" at a glance; without these the rows all look identical.
+    """
+    if not rows:
+        return []
+
+    agent_ids = [row.id for row in rows]
+
+    counts = as_lookup(
+        (
+            await tenant.session.execute(
+                select(AgentVersion.agent_id, func.count())
+                .where(
+                    AgentVersion.tenant_id == tenant.tenant_id,
+                    AgentVersion.agent_id.in_(agent_ids),
+                )
+                .group_by(AgentVersion.agent_id)
+            )
+        ).all()
+    )
+
+    published_numbers = as_lookup(
+        (
+            await tenant.session.execute(
+                select(AgentVersion.id, AgentVersion.version_number).where(
+                    AgentVersion.tenant_id == tenant.tenant_id,
+                    AgentVersion.id.in_(
+                        [r.published_version_id for r in rows if r.published_version_id]
+                    ),
+                )
+            )
+        ).all()
+    )
+
+    latest_drafts = as_lookup(
+        (
+            await tenant.session.execute(
+                select(AgentVersion.agent_id, func.max(AgentVersion.version_number))
+                .where(
+                    AgentVersion.tenant_id == tenant.tenant_id,
+                    AgentVersion.agent_id.in_(agent_ids),
+                    AgentVersion.state == AgentVersionState.DRAFT,
+                )
+                .group_by(AgentVersion.agent_id)
+            )
+        ).all()
+    )
+
+    return [
+        AgentResponse.model_validate(row, from_attributes=True).model_copy(
+            update={
+                "version_count": counts.get(row.id, 0),
+                "published_version_number": published_numbers.get(row.published_version_id)
+                if row.published_version_id
+                else None,
+                "latest_draft_version_number": latest_drafts.get(row.id),
+            }
+        )
+        for row in rows
+    ]
+
+
+@router.get(
+    "",
+    response_model=Page[AgentResponse],
+    summary="List agents",
+    dependencies=[Depends(require_permission(Permission.AGENTS_READ))],
+)
+async def list_agents(
+    tenant: CurrentTenant,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[AgentResponse]:
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    rows = await repository.list(Agent, limit=limit, offset=offset, order_by=Agent.name)
+    total = await repository.count(Agent)
+    return Page(items=await _agent_summary(tenant, rows), total=total, limit=limit, offset=offset)
+
+
+@router.get(
+    "/{agent_id}",
+    response_model=AgentResponse,
+    summary="Fetch one agent",
+    dependencies=[Depends(require_permission(Permission.AGENTS_READ))],
+)
+async def get_agent(agent_id: uuid.UUID, tenant: CurrentTenant) -> AgentResponse:
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    row = await repository.get(Agent, agent_id)
+    if row is None:
+        raise _agent_not_found(agent_id)
+    return (await _agent_summary(tenant, [row]))[0]
+
+
+@router.post(
+    "",
+    response_model=AgentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an agent and its first draft version",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def create_agent(
+    payload: AgentCreate,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> AgentResponse:
+    """Create an agent.
+
+    A first draft version is created alongside it, because an agent with no
+    version cannot be configured and would present an empty builder with no
+    obvious next step.
+    """
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+
+    clash = await tenant.session.execute(repository.scoped(Agent).where(Agent.name == payload.name))
+    if clash.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"an agent named {payload.name!r} already exists",
+        )
+
+    agent = Agent(name=payload.name, description=payload.description)
+    repository.add(agent)
+    await tenant.session.flush()
+
+    draft = AgentVersion(
+        agent_id=agent.id,
+        version_number=1,
+        state=AgentVersionState.DRAFT,
+        system_prompt="",
+        change_note="Initial draft",
+    )
+    repository.add(draft)
+    await tenant.session.flush()
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="agent.created",
+        resource_type="agent",
+        resource_id=agent.id,
+        new_value=audit.snapshot(agent, *_AGENT_AUDITED),
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+
+    logger.info("agent_created", extra={"agent_name": agent.name})
+    return (await _agent_summary(tenant, [agent]))[0]
+
+
+@router.put(
+    "/{agent_id}",
+    response_model=AgentResponse,
+    summary="Update an agent's identity",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def update_agent(
+    agent_id: uuid.UUID,
+    payload: AgentUpdate,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> AgentResponse:
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    row = await repository.get(Agent, agent_id)
+    if row is None:
+        raise _agent_not_found(agent_id)
+
+    before = audit.snapshot(row, *_AGENT_AUDITED)
+    changes = payload.model_dump(exclude_unset=True)
+
+    if "name" in changes and changes["name"] != row.name:
+        clash = await tenant.session.execute(
+            repository.scoped(Agent).where(Agent.name == changes["name"], Agent.id != agent_id)
+        )
+        if clash.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"an agent named {changes['name']!r} already exists",
+            )
+
+    for field, value in changes.items():
+        setattr(row, field, value)
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="agent.updated",
+        resource_type="agent",
+        resource_id=row.id,
+        old_value=before,
+        new_value=audit.snapshot(row, *_AGENT_AUDITED),
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return (await _agent_summary(tenant, [row]))[0]
+
+
+@router.delete(
+    "/{agent_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Delete an agent",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def delete_agent(
+    agent_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> Response:
+    """Delete an agent and all its versions.
+
+    Refused while a phone number routes to it: deleting would leave a DID whose
+    inbound agent is null, and the failure would appear at the next inbound
+    call rather than here.
+
+    Call history survives — ``calls.agent_id`` is SET NULL, so deleting an
+    agent does not erase the record of what it did.
+    """
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    row = await repository.get(Agent, agent_id)
+    if row is None:
+        raise _agent_not_found(agent_id)
+
+    routed = await tenant.session.execute(
+        repository.scoped(PhoneNumber).where(PhoneNumber.inbound_agent_id == agent_id)
+    )
+    numbers = [number.number for number in routed.scalars().all()]
+    if numbers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "this agent still answers phone number(s): "
+                f"{', '.join(sorted(numbers))}. Reassign them first."
+            ),
+        )
+
+    before = audit.snapshot(row, *_AGENT_AUDITED)
+    await repository.delete(Agent, agent_id)
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="agent.deleted",
+        resource_type="agent",
+        resource_id=agent_id,
+        old_value=before,
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --------------------------------------------------------------------------- #
+# Versions
+# --------------------------------------------------------------------------- #
+
+
+async def _version_labels(tenant: CurrentTenant, version: AgentVersion) -> dict[str, str | None]:
+    """Human-readable provider, model and voice names for the builder."""
+
+    async def provider_model(
+        provider_id: uuid.UUID | None, model_id: uuid.UUID | None
+    ) -> str | None:
+        if provider_id is None:
+            return None
+        provider = (
+            await tenant.session.execute(select(Provider).where(Provider.id == provider_id))
+        ).scalar_one_or_none()
+        if provider is None:
+            return None
+        if model_id is None:
+            return provider.display_name
+        model = (
+            await tenant.session.execute(select(Model).where(Model.id == model_id))
+        ).scalar_one_or_none()
+        return f"{provider.display_name} / {model.slug}" if model else provider.display_name
+
+    voice_label: str | None = None
+    if version.voice_id:
+        voice = (
+            await tenant.session.execute(select(Voice).where(Voice.id == version.voice_id))
+        ).scalar_one_or_none()
+        voice_label = voice.name if voice else None
+
+    return {
+        "stt_label": await provider_model(version.stt_provider_id, version.stt_model_id),
+        "llm_label": await provider_model(version.llm_provider_id, version.llm_model_id),
+        "tts_label": await provider_model(version.tts_provider_id, version.tts_model_id),
+        "voice_label": voice_label,
+    }
+
+
+async def _version_response(tenant: CurrentTenant, version: AgentVersion) -> AgentVersionResponse:
+    payload = AgentVersionResponse.model_validate(version, from_attributes=True)
+    return payload.model_copy(update=await _version_labels(tenant, version))
+
+
+@router.get(
+    "/{agent_id}/versions",
+    response_model=list[AgentVersionResponse],
+    summary="List an agent's versions, newest first",
+    dependencies=[Depends(require_permission(Permission.AGENTS_READ))],
+)
+async def list_versions(agent_id: uuid.UUID, tenant: CurrentTenant) -> list[AgentVersionResponse]:
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    if not await repository.exists(Agent, agent_id):
+        raise _agent_not_found(agent_id)
+
+    rows = (
+        (
+            await tenant.session.execute(
+                repository.scoped(AgentVersion)
+                .where(AgentVersion.agent_id == agent_id)
+                .order_by(AgentVersion.version_number.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    return [await _version_response(tenant, row) for row in rows]
+
+
+async def _editable_draft(
+    tenant: CurrentTenant, repository: TenantRepository, agent: Agent
+) -> AgentVersion:
+    """The draft to write into, creating one if the latest version is published.
+
+    This is what keeps a published version immutable (spec 19): editing a live
+    agent produces a new draft seeded from the published configuration, so a
+    call already running on the published version is unaffected.
+    """
+    latest = (
+        await tenant.session.execute(
+            repository.scoped(AgentVersion)
+            .where(AgentVersion.agent_id == agent.id)
+            .order_by(AgentVersion.version_number.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if latest is not None and latest.state == AgentVersionState.DRAFT:
+        return latest
+
+    next_number = (latest.version_number + 1) if latest else 1
+
+    # Copy the published configuration forward, so an edit starts from what is
+    # live rather than from an empty form.
+    copied: dict = {}
+    if latest is not None:
+        for column in (c.name for c in AgentVersion.__table__.columns):
+            if column in {
+                "id",
+                "tenant_id",
+                "agent_id",
+                "version_number",
+                "state",
+                "published_at",
+                "published_by_user_id",
+                "created_at",
+                "updated_at",
+                "change_note",
+                "validation_errors",
+            }:
+                continue
+            copied[column] = getattr(latest, column)
+
+    draft = AgentVersion(
+        agent_id=agent.id,
+        version_number=next_number,
+        state=AgentVersionState.DRAFT,
+        change_note=f"Draft from v{latest.version_number}" if latest else "Initial draft",
+        **copied,
+    )
+    repository.add(draft)
+    await tenant.session.flush()
+    logger.info(
+        "agent_draft_created",
+        extra={"agent_id": str(agent.id), "version_number": next_number},
+    )
+    return draft
+
+
+@router.put(
+    "/{agent_id}/draft",
+    response_model=AgentVersionResponse,
+    summary="Save the agent's draft configuration",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def save_draft(
+    agent_id: uuid.UUID,
+    payload: AgentVersionConfig,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> AgentVersionResponse:
+    """Write the builder's fields into the current draft (spec 62 "Save Draft").
+
+    If the latest version is published, a new draft is created first — a
+    published version is never edited in place.
+    """
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    agent = await repository.get(Agent, agent_id)
+    if agent is None:
+        raise _agent_not_found(agent_id)
+
+    draft = await _editable_draft(tenant, repository, agent)
+    before = audit.snapshot(draft, *_VERSION_AUDITED)
+
+    changes = payload.model_dump(exclude_unset=True)
+    await _validate_references(tenant, repository, changes)
+
+    for field, value in changes.items():
+        setattr(draft, field, value)
+
+    # The stored validation result is now stale; recompute so the builder can
+    # show the current state without a second request.
+    report = await _validate_version(tenant, repository, draft)
+    draft.validation_errors = [issue.model_dump() for issue in report.issues]
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="agent.draft_saved",
+        resource_type="agent_version",
+        resource_id=draft.id,
+        old_value=before,
+        new_value=audit.snapshot(draft, *_VERSION_AUDITED),
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return await _version_response(tenant, draft)
+
+
+async def _validate_references(
+    tenant: CurrentTenant, repository: TenantRepository, changes: dict
+) -> None:
+    """Check provider, model, voice and knowledge-base ids exist.
+
+    Providers, models and voices are platform-level, so they are looked up
+    without tenant scoping; the knowledge base is tenant-owned and goes through
+    the repository.
+    """
+    for field, model in (
+        ("stt_provider_id", Provider),
+        ("llm_provider_id", Provider),
+        ("tts_provider_id", Provider),
+        ("stt_model_id", Model),
+        ("llm_model_id", Model),
+        ("tts_model_id", Model),
+        ("voice_id", Voice),
+    ):
+        value = changes.get(field)
+        if value is None:
+            continue
+        exists = (
+            await tenant.session.execute(select(model.id).where(model.id == value))
+        ).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{field}: no such record in the platform catalog",
+            )
+
+    knowledge_base_id = changes.get("knowledge_base_id")
+    if knowledge_base_id is not None and not await repository.exists(
+        KnowledgeBase, knowledge_base_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="that knowledge base does not exist in this tenant",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Validation (spec 63, 64)
+# --------------------------------------------------------------------------- #
+
+
+async def _validate_version(
+    tenant: CurrentTenant, repository: TenantRepository, version: AgentVersion
+) -> ValidationReport:
+    """Decide whether a version may become production-active (spec 63).
+
+    Each issue names the field so the builder can highlight the control rather
+    than only showing a message — the difference between an error a
+    non-developer can act on and one they cannot.
+
+    The dependency list is spec 64's tree, flattened: it reports not just
+    whether something is chosen but whether the chosen thing is usable, which
+    is what catches a disabled provider or a missing credential.
+    """
+    issues: list[ValidationIssue] = []
+    dependencies: list[ValidationIssue] = []
+
+    if not (version.system_prompt or "").strip():
+        issues.append(
+            ValidationIssue(
+                field="system_prompt",
+                message="a system prompt is required; without one the agent has no instructions",
+            )
+        )
+
+    async def check_provider(
+        kind: ProviderKind, provider_id: uuid.UUID | None, model_id: uuid.UUID | None, field: str
+    ) -> None:
+        if provider_id is None:
+            issues.append(ValidationIssue(field=field, message=f"choose a {kind.value} provider"))
+            dependencies.append(ValidationIssue(field=field, message=f"{kind.value}: not selected"))
+            return
+
+        provider = (
+            await tenant.session.execute(select(Provider).where(Provider.id == provider_id))
+        ).scalar_one_or_none()
+
+        if provider is None:
+            issues.append(
+                ValidationIssue(field=field, message=f"the selected {kind.value} provider is gone")
+            )
+            return
+
+        if provider.status is not ResourceStatus.ACTIVE:
+            # Spec 64: a disabled provider must show clearly as the problem.
+            issues.append(
+                ValidationIssue(
+                    field=field,
+                    message=(
+                        f"{provider.display_name} is {provider.status.value.lower()} "
+                        "and cannot be used"
+                    ),
+                )
+            )
+            dependencies.append(
+                ValidationIssue(
+                    field=field,
+                    message=f"{kind.value}: {provider.display_name} is disabled",
+                )
+            )
+            return
+
+        credential = (
+            (
+                await tenant.session.execute(
+                    repository.scoped(ProviderCredential).where(
+                        ProviderCredential.provider_id == provider_id,
+                        ProviderCredential.status == ResourceStatus.ACTIVE,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+        # A self-hosted provider authenticates by network reachability rather
+        # than by an API key, so demanding a credential here would make a valid
+        # self-hosted configuration unpublishable — and spec 25 requires
+        # supporting exactly that.
+        if credential is None and provider.requires_credential:
+            issues.append(
+                ValidationIssue(
+                    field=field,
+                    message=(
+                        f"no API credential is configured for {provider.display_name}, "
+                        "so a call using it would fail"
+                    ),
+                )
+            )
+            dependencies.append(
+                ValidationIssue(
+                    field=field, message=f"{kind.value}: {provider.display_name} has no credential"
+                )
+            )
+            return
+
+        if model_id is None:
+            issues.append(
+                ValidationIssue(
+                    field=field.replace("provider", "model"), message=f"choose a {kind.value} model"
+                )
+            )
+            return
+
+        dependencies.append(
+            ValidationIssue(
+                field=field,
+                message=f"{kind.value}: {provider.display_name} ready",
+                severity="ok",
+            )
+        )
+
+    await check_provider(
+        ProviderKind.STT, version.stt_provider_id, version.stt_model_id, "stt_provider_id"
+    )
+    await check_provider(
+        ProviderKind.LLM, version.llm_provider_id, version.llm_model_id, "llm_provider_id"
+    )
+    await check_provider(
+        ProviderKind.TTS, version.tts_provider_id, version.tts_model_id, "tts_provider_id"
+    )
+
+    if version.tts_provider_id is not None and version.voice_id is None:
+        issues.append(ValidationIssue(field="voice_id", message="choose a voice"))
+    elif version.voice_id is not None:
+        voice = (
+            await tenant.session.execute(select(Voice).where(Voice.id == version.voice_id))
+        ).scalar_one_or_none()
+        if voice is None:
+            issues.append(ValidationIssue(field="voice_id", message="the selected voice is gone"))
+        elif voice.status is not ResourceStatus.ACTIVE:
+            issues.append(
+                ValidationIssue(
+                    field="voice_id",
+                    message=f"the voice {voice.name!r} is disabled and cannot be used",
+                )
+            )
+        else:
+            dependencies.append(
+                ValidationIssue(field="voice_id", message=f"Voice: {voice.name}", severity="ok")
+            )
+
+    if version.transfer_enabled and not (version.transfer_announcement_text or "").strip():
+        # CR-1 TR-2: the caller must hear something when a transfer starts.
+        issues.append(
+            ValidationIssue(
+                field="transfer_announcement_text",
+                message=(
+                    "transfer is enabled but there is no announcement, so the caller "
+                    "would hear silence while the agent is reached"
+                ),
+            )
+        )
+
+    if version.knowledge_base_id is not None:
+        base = await repository.get(KnowledgeBase, version.knowledge_base_id)
+        if base is None:
+            issues.append(
+                ValidationIssue(field="knowledge_base_id", message="the knowledge base is gone")
+            )
+        elif base.status is not ResourceStatus.ACTIVE:
+            issues.append(
+                ValidationIssue(
+                    field="knowledge_base_id",
+                    message=f"the knowledge base {base.name!r} is disabled",
+                )
+            )
+
+    return ValidationReport(
+        publishable=not any(issue.severity == "error" for issue in issues),
+        issues=issues,
+        dependencies=dependencies,
+    )
+
+
+@router.get(
+    "/{agent_id}/versions/{version_number}/validate",
+    response_model=ValidationReport,
+    summary="Validate a version before publishing",
+    dependencies=[Depends(require_permission(Permission.AGENTS_READ))],
+)
+async def validate_version(
+    agent_id: uuid.UUID, version_number: int, tenant: CurrentTenant
+) -> ValidationReport:
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    version = await _load_version(tenant, repository, agent_id, version_number)
+    return await _validate_version(tenant, repository, version)
+
+
+async def _load_version(
+    tenant: CurrentTenant,
+    repository: TenantRepository,
+    agent_id: uuid.UUID,
+    version_number: int,
+) -> AgentVersion:
+    if not await repository.exists(Agent, agent_id):
+        raise _agent_not_found(agent_id)
+    version = (
+        await tenant.session.execute(
+            repository.scoped(AgentVersion).where(
+                AgentVersion.agent_id == agent_id,
+                AgentVersion.version_number == version_number,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"this agent has no version {version_number}",
+        )
+    return version
+
+
+# --------------------------------------------------------------------------- #
+# Publish and rollback (spec 19)
+# --------------------------------------------------------------------------- #
+
+
+@router.post(
+    "/{agent_id}/publish",
+    response_model=AgentVersionResponse,
+    summary="Publish the current draft",
+    dependencies=[Depends(require_permission(Permission.AGENTS_PUBLISH))],
+)
+async def publish_agent(
+    agent_id: uuid.UUID,
+    payload: PublishRequest,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> AgentVersionResponse:
+    """Publish the latest draft (spec 19).
+
+    Validation runs first and a failure is a 422 listing every issue, because
+    spec 63 forbids an invalid configuration becoming production-active.
+
+    Calls already in progress are untouched: each recorded its
+    ``agent_version_id`` at start and the worker cached that version, so this
+    only affects calls that arrive afterwards.
+    """
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    agent = await repository.get(Agent, agent_id)
+    if agent is None:
+        raise _agent_not_found(agent_id)
+
+    draft = (
+        await tenant.session.execute(
+            repository.scoped(AgentVersion)
+            .where(
+                AgentVersion.agent_id == agent_id,
+                AgentVersion.state == AgentVersionState.DRAFT,
+            )
+            .order_by(AgentVersion.version_number.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if draft is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="there is no draft to publish; edit the agent to create one",
+        )
+
+    report = await _validate_version(tenant, repository, draft)
+    draft.validation_errors = [issue.model_dump() for issue in report.issues]
+
+    if not report.publishable:
+        await tenant.session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "this version cannot be published yet",
+                "issues": [issue.model_dump() for issue in report.issues],
+            },
+        )
+
+    previously_published = agent.published_version_id
+
+    # Archive the version being replaced, so the state list stays truthful:
+    # exactly one PUBLISHED version per agent at any time.
+    if previously_published:
+        old = (
+            await tenant.session.execute(
+                repository.scoped(AgentVersion).where(AgentVersion.id == previously_published)
+            )
+        ).scalar_one_or_none()
+        if old is not None and old.state == AgentVersionState.PUBLISHED:
+            old.state = AgentVersionState.ARCHIVED
+
+    draft.state = AgentVersionState.PUBLISHED
+    draft.published_at = datetime.now(UTC)
+    draft.published_by_user_id = tenant.principal.user_id
+    if payload.change_note:
+        draft.change_note = payload.change_note
+    agent.published_version_id = draft.id
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="agent.published",
+        resource_type="agent_version",
+        resource_id=draft.id,
+        old_value={
+            "published_version_id": str(previously_published) if previously_published else None
+        },
+        new_value={
+            "published_version_id": str(draft.id),
+            "version_number": draft.version_number,
+            "change_note": draft.change_note,
+        },
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+
+    logger.info(
+        "agent_published",
+        extra={"agent_name": agent.name, "version_number": draft.version_number},
+    )
+    return await _version_response(tenant, draft)
+
+
+@router.post(
+    "/{agent_id}/rollback",
+    response_model=AgentVersionResponse,
+    summary="Publish an earlier version instead",
+    dependencies=[Depends(require_permission(Permission.AGENTS_PUBLISH))],
+)
+async def rollback_agent(
+    agent_id: uuid.UUID,
+    payload: RollbackRequest,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> AgentVersionResponse:
+    """Roll back to a named version (spec 18, 19).
+
+    The version is named explicitly rather than inferred as "the previous one":
+    after several rollbacks, "previous" is ambiguous, and guessing wrong here
+    changes which configuration answers every new call.
+
+    Re-validated before publishing, because the world may have moved since:
+    a provider it depends on could have been disabled or lost its credential.
+    """
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    agent = await repository.get(Agent, agent_id)
+    if agent is None:
+        raise _agent_not_found(agent_id)
+
+    target = await _load_version(tenant, repository, agent_id, payload.version_number)
+
+    if target.id == agent.published_version_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"v{payload.version_number} is already the published version",
+        )
+
+    report = await _validate_version(tenant, repository, target)
+    if not report.publishable:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": (
+                    f"v{payload.version_number} is no longer valid, so rolling back to it "
+                    "would publish a configuration that cannot serve a call"
+                ),
+                "issues": [issue.model_dump() for issue in report.issues],
+            },
+        )
+
+    previous = agent.published_version_id
+    if previous:
+        old = (
+            await tenant.session.execute(
+                repository.scoped(AgentVersion).where(AgentVersion.id == previous)
+            )
+        ).scalar_one_or_none()
+        if old is not None and old.state == AgentVersionState.PUBLISHED:
+            old.state = AgentVersionState.ARCHIVED
+
+    target.state = AgentVersionState.PUBLISHED
+    target.published_at = datetime.now(UTC)
+    target.published_by_user_id = tenant.principal.user_id
+    agent.published_version_id = target.id
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="agent.rolled_back",
+        resource_type="agent_version",
+        resource_id=target.id,
+        old_value={"published_version_id": str(previous) if previous else None},
+        new_value={
+            "published_version_id": str(target.id),
+            "version_number": target.version_number,
+        },
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+
+    logger.info(
+        "agent_rolled_back",
+        extra={"agent_name": agent.name, "version_number": target.version_number},
+    )
+    return await _version_response(tenant, target)

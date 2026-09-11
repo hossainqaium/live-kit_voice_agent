@@ -228,6 +228,14 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
                 display_name=display_name,
                 default_base_url=base_url,
                 supports_streaming=True,
+                # A base URL pointing somewhere other than a vendor's public
+                # API means a self-hosted endpoint, which authenticates by
+                # network reachability rather than by key. Seeding it as
+                # credential-required would make the local-model path
+                # unpublishable out of the box.
+                requires_credential=not (
+                    base_url and "://" in base_url and "api.openai.com" not in base_url
+                ),
                 notes=(
                     "Development stand-in. Refused outside development."
                     if slug == spec.llm_provider_slug
