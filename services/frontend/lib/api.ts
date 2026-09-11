@@ -265,6 +265,206 @@ export interface PbxTestOutcome {
   latency_ms: number | null;
 }
 
+
+// --- SIP trunks (spec 15) -------------------------------------------------- //
+
+export type TrunkDirection = "INBOUND" | "OUTBOUND" | "BIDIRECTIONAL";
+export type SyncStatus = "SYNCED" | "PENDING" | "FAILED" | "DRIFTED";
+
+export interface SipTrunk {
+  id: string;
+  name: string;
+  pbx_id: string | null;
+  direction: TrunkDirection;
+  sip_host: string;
+  port: number;
+  transport: SipTransport;
+  allowed_ips: string[];
+  auth_username: string | null;
+  media_encryption_required: boolean;
+  codecs: string[];
+  dtmf_mode: string | null;
+  status: ResourceStatus;
+  has_credential: boolean;
+  /** Derived from the DIDs assigned to this trunk, not stored on it. */
+  accepted_numbers: string[];
+  livekit_resource_id: string | null;
+  sync_status: SyncStatus;
+  last_synced_at: string | null;
+  sync_error: string | null;
+  sync_attempts: number;
+  last_test_result: ConnectionTestResult;
+  last_tested_at: string | null;
+  last_test_detail: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SipTrunkInput {
+  name: string;
+  pbx_id?: string | null;
+  direction: TrunkDirection;
+  sip_host: string;
+  port: number;
+  transport: SipTransport;
+  allowed_ips?: string[];
+  auth_username?: string | null;
+  auth_password?: string | null;
+  media_encryption_required?: boolean;
+  codecs?: string[];
+  dtmf_mode?: string | null;
+}
+
+// --- Phone numbers (spec 17) ---------------------------------------------- //
+
+export interface PhoneNumber {
+  id: string;
+  number: string;
+  label: string | null;
+  pbx_id: string | null;
+  sip_trunk_id: string | null;
+  inbound_agent_id: string | null;
+  routing_rule_id: string | null;
+  business_hours_id: string | null;
+  status: ResourceStatus;
+  pbx_name: string | null;
+  sip_trunk_name: string | null;
+  agent_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PhoneNumberInput {
+  number: string;
+  label?: string | null;
+  pbx_id?: string | null;
+  sip_trunk_id?: string | null;
+  inbound_agent_id?: string | null;
+}
+
+// --- Agents (spec 18, 19) ------------------------------------------------- //
+
+export type AgentVersionState = "DRAFT" | "TESTING" | "PUBLISHED" | "ARCHIVED";
+
+export interface Agent {
+  id: string;
+  name: string;
+  description: string | null;
+  status: ResourceStatus;
+  published_version_id: string | null;
+  version_count: number;
+  published_version_number: number | null;
+  latest_draft_version_number: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentVersion {
+  id: string;
+  agent_id: string;
+  version_number: number;
+  state: AgentVersionState;
+  language: string;
+  greeting: string | null;
+  system_prompt: string;
+  stt_provider_id: string | null;
+  stt_model_id: string | null;
+  llm_provider_id: string | null;
+  llm_model_id: string | null;
+  tts_provider_id: string | null;
+  tts_model_id: string | null;
+  voice_id: string | null;
+  temperature: number | null;
+  interruption_enabled: boolean;
+  interruption_min_words: number;
+  silence_timeout_seconds: number | null;
+  max_call_duration_seconds: number | null;
+  recording_enabled: boolean;
+  transcription_enabled: boolean;
+  transfer_enabled: boolean;
+  transfer_announcement_text: string | null;
+  transfer_summary_template: string | null;
+  transfer_summary_max_seconds: number;
+  transfer_skip_dtmf: string | null;
+  knowledge_base_id: string | null;
+  published_at: string | null;
+  change_note: string | null;
+  validation_errors: ValidationIssue[];
+  stt_label: string | null;
+  llm_label: string | null;
+  tts_label: string | null;
+  voice_label: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ValidationIssue {
+  field: string;
+  message: string;
+  severity: string;
+}
+
+export interface ValidationReport {
+  publishable: boolean;
+  issues: ValidationIssue[];
+  dependencies: ValidationIssue[];
+}
+
+// --- Calls (spec 41) ------------------------------------------------------ //
+
+export type CallState =
+  | "NEW" | "RINGING" | "ANSWERED" | "AI_CONNECTED" | "IN_PROGRESS"
+  | "TRANSFERRING" | "HUMAN_AGENT" | "COMPLETED"
+  | "FAILED" | "TIMEOUT" | "CANCELLED" | "BUSY" | "NO_ANSWER";
+
+export interface Call {
+  id: string;
+  call_id: string;
+  agent_id: string | null;
+  agent_version_id: string | null;
+  did: string | null;
+  room_id: string | null;
+  caller_number: string | null;
+  destination_number: string | null;
+  direction: string;
+  start_time: string | null;
+  answer_time: string | null;
+  end_time: string | null;
+  duration_seconds: number | null;
+  state: CallState;
+  hangup_reason: string | null;
+  failure_detail: string | null;
+  transfer_status: string;
+  agent_name: string | null;
+  agent_version_number: number | null;
+  has_transcript: boolean;
+  has_recording: boolean;
+}
+
+export interface TranscriptSegment {
+  sequence: number;
+  speaker: "CALLER" | "AI" | "HUMAN_AGENT";
+  spoken_at: string;
+  text: string;
+  confidence: number | null;
+  offset_seconds: number | null;
+  is_private_to_agent: boolean;
+}
+
+export interface CallEvent {
+  event_type: string;
+  occurred_at: string;
+  from_state: CallState | null;
+  to_state: CallState | null;
+  payload: Record<string, unknown>;
+}
+
+export interface CallDetail extends Call {
+  segments: TranscriptSegment[];
+  events: CallEvent[];
+  summary: string | null;
+}
+
 export interface HealthResponse {
   status: string;
   service: string;
@@ -325,7 +525,106 @@ export const api = {
       return request<Pbx>(`/pbxs/${id}/disable`, { method: "POST" });
     },
   },
+
+  sipTrunks: {
+    list(limit = 100, offset = 0): Promise<Page<SipTrunk>> {
+      return request<Page<SipTrunk>>(`/sip-trunks?limit=${limit}&offset=${offset}`);
+    },
+    create(input: SipTrunkInput): Promise<SipTrunk> {
+      return request<SipTrunk>("/sip-trunks", { method: "POST", body: input });
+    },
+    update(id: string, input: Partial<SipTrunkInput>): Promise<SipTrunk> {
+      return request<SipTrunk>(`/sip-trunks/${id}`, { method: "PUT", body: input });
+    },
+    remove(id: string): Promise<void> {
+      return request<void>(`/sip-trunks/${id}`, { method: "DELETE" });
+    },
+    test(id: string): Promise<PbxTestOutcome> {
+      return request<PbxTestOutcome>(`/sip-trunks/${id}/test`, { method: "POST" });
+    },
+    sync(id: string): Promise<SipTrunk> {
+      return request<SipTrunk>(`/sip-trunks/${id}/sync`, { method: "POST" });
+    },
+    enable(id: string): Promise<SipTrunk> {
+      return request<SipTrunk>(`/sip-trunks/${id}/enable`, { method: "POST" });
+    },
+    disable(id: string): Promise<SipTrunk> {
+      return request<SipTrunk>(`/sip-trunks/${id}/disable`, { method: "POST" });
+    },
+  },
+
+  phoneNumbers: {
+    list(limit = 100, offset = 0): Promise<Page<PhoneNumber>> {
+      return request<Page<PhoneNumber>>(`/phone-numbers?limit=${limit}&offset=${offset}`);
+    },
+    create(input: PhoneNumberInput): Promise<PhoneNumber> {
+      return request<PhoneNumber>("/phone-numbers", { method: "POST", body: input });
+    },
+    update(id: string, input: Partial<PhoneNumberInput>): Promise<PhoneNumber> {
+      return request<PhoneNumber>(`/phone-numbers/${id}`, { method: "PUT", body: input });
+    },
+    remove(id: string): Promise<void> {
+      return request<void>(`/phone-numbers/${id}`, { method: "DELETE" });
+    },
+    enable(id: string): Promise<PhoneNumber> {
+      return request<PhoneNumber>(`/phone-numbers/${id}/enable`, { method: "POST" });
+    },
+    disable(id: string): Promise<PhoneNumber> {
+      return request<PhoneNumber>(`/phone-numbers/${id}/disable`, { method: "POST" });
+    },
+  },
+
+  agents: {
+    list(limit = 100, offset = 0): Promise<Page<Agent>> {
+      return request<Page<Agent>>(`/agents?limit=${limit}&offset=${offset}`);
+    },
+    get(id: string): Promise<Agent> {
+      return request<Agent>(`/agents/${id}`);
+    },
+    create(input: { name: string; description?: string | null }): Promise<Agent> {
+      return request<Agent>("/agents", { method: "POST", body: input });
+    },
+    update(id: string, input: { name?: string; description?: string | null }): Promise<Agent> {
+      return request<Agent>(`/agents/${id}`, { method: "PUT", body: input });
+    },
+    remove(id: string): Promise<void> {
+      return request<void>(`/agents/${id}`, { method: "DELETE" });
+    },
+    versions(id: string): Promise<AgentVersion[]> {
+      return request<AgentVersion[]>(`/agents/${id}/versions`);
+    },
+    saveDraft(id: string, config: Partial<AgentVersion>): Promise<AgentVersion> {
+      return request<AgentVersion>(`/agents/${id}/draft`, { method: "PUT", body: config });
+    },
+    validate(id: string, versionNumber: number): Promise<ValidationReport> {
+      return request<ValidationReport>(`/agents/${id}/versions/${versionNumber}/validate`);
+    },
+    publish(id: string, changeNote?: string): Promise<AgentVersion> {
+      return request<AgentVersion>(`/agents/${id}/publish`, {
+        method: "POST",
+        body: { change_note: changeNote ?? null },
+      });
+    },
+    rollback(id: string, versionNumber: number): Promise<AgentVersion> {
+      return request<AgentVersion>(`/agents/${id}/rollback`, {
+        method: "POST",
+        body: { version_number: versionNumber },
+      });
+    },
+  },
+
+  calls: {
+    list(limit = 50, offset = 0, state?: string): Promise<Page<Call>> {
+      const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (state) query.set("state", state);
+      return request<Page<Call>>(`/calls?${query.toString()}`);
+    },
+    get(id: string): Promise<CallDetail> {
+      return request<CallDetail>(`/calls/${id}`);
+    },
+  },
 };
+
 
 /** Liveness of the API, for the status indicator. Needs no token. */
 export async function fetchApiHealth(): Promise<HealthResponse> {

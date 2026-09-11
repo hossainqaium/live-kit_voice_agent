@@ -54,6 +54,17 @@ _FLUSH_INTERVAL_SECONDS = 1.0
 _BATCH_SIZE = 50
 
 
+def _reported_confidence(value: Any) -> float | None:
+    """Return a confidence only when the provider actually reported one."""
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric > 0 else None
+
+
 def _positive(value: Any) -> float | None:
     """Return a latency only when it is a real measurement.
 
@@ -298,7 +309,11 @@ class CallObserver:
                 "sequence": self._sequence,
                 "speaker": speaker.value,
                 "text": text_value,
-                "confidence": getattr(item, "transcript_confidence", None),
+                # 0.0 means the provider did not report a confidence, not
+                # that it was certain the transcript was wrong. Storing it
+                # verbatim makes the UI say "0% confident", which is worse
+                # than saying nothing.
+                "confidence": _reported_confidence(getattr(item, "transcript_confidence", None)),
                 "spoken_at": datetime.now(UTC),
                 "interrupted": bool(getattr(item, "interrupted", False)),
             },

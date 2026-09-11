@@ -247,7 +247,8 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.4 | Map `interruption_enabled` and `interruption_min_words` onto the session's own options rather than reimplementing them. | mapping | §29 |
 | 2b.5 | Conversation summarisation into `call_transcripts.summary`, which is also what the warm-transfer whisper reads. | feature | §34, §36 |
 | 2b.6 | Grafana dashboard for the six voice-latency metrics. They are exposed and scraped; nothing charts them. | feature | §56, §57 |
-| 2b.7 | Barge-in verified against real speech, not synthetic audio. | verification | §29 |
+| 2b.7 | Barge-in and endpointing verified against real speech. **Now evidence-backed and the highest priority in this phase**: a real call produced three caller utterances and no reply, because transcripts arrived after their turn was committed. See §12.1. | **defect** | §29, §56 |
+| 2b.9 | Move STT to the self-hosted endpoint and re-measure. ~1.1s of the 4.7s time-to-first-audio is network transcription latency. | **defect** | §25, §56 |
 | 2b.8 | 10-concurrent-call harness. | feature | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
@@ -906,6 +907,58 @@ WHERE (domain_uuid = '<domain uuid>' OR domain_uuid IS NULL)
 The general lesson: when inserting into an application's schema directly, the
 row has to satisfy that application's *queries*, not just its constraints. The
 database will accept a row the UI can never show.
+
+#### The agent transcribes the caller but does not reply
+
+**Symptom:** a live call produces caller transcript segments — real speech,
+correctly transcribed — and **no AI segments at all**. The caller hears
+nothing and says "can you hear me?". One `turn_completed` event fires for
+several caller utterances.
+
+**Evidence from a real call** (`call_20260911T063710`):
+
+```
+caller: "Hello?"
+caller: "..."
+caller: "Can you hear me?"
+  → 0 AI segments
+  → 1 turn_completed: eou=2581ms transcription=1103ms llm_ttft=2243ms
+                      time_to_first_audio=4744ms
+```
+
+Two warnings in the worker log name the cause:
+
+```
+transcript arrives after turn has been committed.
+  consider raising `min_delay` in the endpointing
+skipping user input, speech scheduling is paused
+```
+
+**Cause (configuration, not a defect):** the pipeline is too slow for its own
+endpointing window. Transcription takes ~1.1s and end-of-utterance detection
+~2.6s, so a transcript lands **after** the turn it belongs to has already been
+committed, and the utterance is dropped rather than answered.
+
+**Time to first audio of 4.7 seconds is not a conversation.** A caller
+experiences that as a dead line, which is exactly what happened.
+
+**What to change:**
+
+1. **Move STT off the public internet.** `gpt-4o-mini-transcribe` over the
+   network costs ~1.1s per turn before the model has even seen the words. The
+   self-hosted endpoint already configured for TTS is the obvious candidate.
+2. **Tune endpointing** — raise `min_delay` so a late transcript still joins
+   its turn, and measure `min_endpointing_delay` / `max_endpointing_delay`
+   against real speech rather than defaults.
+3. **Only then judge the model.** Until a turn survives its own endpointing
+   window, LLM latency is not the binding constraint.
+
+**Why this was invisible until now:** without transcript persistence and
+per-turn latency (Phase 2, both landed), a call like this looked identical to a
+healthy one — it connected, ran the state machine, and completed with a normal
+duration. This entry exists because the observability work is what made the
+failure legible, which is the argument for doing 2b.7 and the latency tuning
+before anything else in Phase 2b.
 
 #### A broken LLM produces a call that sounds fine
 

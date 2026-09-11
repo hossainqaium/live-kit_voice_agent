@@ -39,15 +39,14 @@ const TENANT_NAV: NavGroup[] = [
     label: "Telephony",
     entries: [
       { label: "PBXs", href: "/pbxs", permission: "pbxs.read" },
-      { label: "SIP Trunks", permission: "sip_trunks.read", pending: "Phase 4" },
-      { label: "Phone Numbers", permission: "sip_trunks.read", pending: "Phase 4" },
+      { label: "SIP Trunks", href: "/sip-trunks", permission: "sip_trunks.read" },
+      { label: "Phone Numbers", href: "/phone-numbers", permission: "sip_trunks.read" },
     ],
   },
   {
     label: "AI Agents",
     entries: [
-      { label: "Agents", permission: "agents.read", pending: "Phase 4" },
-      { label: "Agent Versions", permission: "agents.read", pending: "Phase 4" },
+      { label: "Agents", href: "/agents", permission: "agents.read" },
       { label: "Routing", permission: "agents.read", pending: "Phase 4" },
       { label: "Business Hours", permission: "agents.read", pending: "Phase 4" },
       { label: "Tools", permission: "agents.read", pending: "Phase 6" },
@@ -57,9 +56,9 @@ const TENANT_NAV: NavGroup[] = [
   {
     label: "Activity",
     entries: [
-      { label: "Calls", permission: "calls.read", pending: "Phase 4" },
+      { label: "Calls", href: "/calls", permission: "calls.read" },
       { label: "Recordings", permission: "recordings.read", pending: "Phase 2b" },
-      { label: "Transcripts", permission: "calls.read", pending: "Phase 4" },
+      { label: "Transcripts", href: "/calls", permission: "calls.read" },
       { label: "Analytics", permission: "analytics.read", pending: "Phase 4" },
     ],
   },
