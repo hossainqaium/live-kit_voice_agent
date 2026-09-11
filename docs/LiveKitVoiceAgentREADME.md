@@ -1113,21 +1113,31 @@ that connects, greets correctly, and only fails once somebody speaks — so
 
 ### 9d.1 What exists today
 
-Be clear about this before opening a browser: **the administration consoles are
-not built yet.** They are Phase 4 work (spec 60, 61) and the frontend currently
-serves only a landing page. What is testable today is the API, and the API is
-fully testable.
+The tenant console is real: sign in at http://localhost:3200 with one of the
+development accounts below. It covers PBX management end to end. The platform
+console has its shell but no sections yet, and most tenant sections are still
+to come — both are marked in the navigation.
 
 | Interface | URL | State |
 |---|---|---|
-| **Swagger UI** | http://localhost:8200/docs | **Working — the real way to drive the platform today** |
+| **Tenant console** | http://localhost:3200 | **Working** — sign-in, dashboard, PBX management |
+| Platform console | http://localhost:3200/platform | Shell and identity only; sections land in Phase 4–5 |
+| Swagger UI | http://localhost:8200/docs | Working — still the fastest way to reach an endpoint the console does not cover yet |
 | ReDoc | http://localhost:8200/redoc | Working, read-only reference |
-| Frontend | http://localhost:3200 | Landing page only; shows API reachability |
 | Grafana | http://localhost:3201 | Working; no voice dashboard yet (Phase 2b.6) |
 | Prometheus | http://localhost:9290 | Working, metrics scraped |
 | MinIO console | http://localhost:9201 | Working, empty until recording lands (Phase 2b.3) |
-| Platform console | — | Not built (spec 60, Phase 4) |
-| Tenant console | — | Not built (spec 61, Phase 4) |
+
+**What the console covers.** Sign in, the tenant dashboard, and full PBX
+management — create, edit, delete, enable, disable and connection-test. Every
+other section appears in the navigation **greyed out with the phase that will
+build it**, rather than hidden: hiding would misrepresent how much of the
+console exists.
+
+The navigation adapts to the signed-in role. As `viewer@dev.example.com` the
+Register button disappears, row actions reduce to Test, and sections the role
+cannot read drop out entirely. That is presentation only — the API enforces
+every permission independently, so a hidden control is not a missing check.
 
 Ports come from `.env`; the defaults above avoid the common collisions. Run
 `python3 scripts/preflight.py` if anything refuses to bind.
@@ -1211,6 +1221,26 @@ an earlier version of the CLI and then never sign in. The CLI now validates
 with the same rules as the API.
 
 ### 9d.5 Working on the frontend
+
+Layout:
+
+| Path | Role |
+|---|---|
+| `app/login/page.tsx` | Sign-in screen |
+| `app/page.tsx` | Tenant dashboard |
+| `app/pbxs/page.tsx` | PBX management — the reference screen |
+| `app/platform/page.tsx` | Platform console shell |
+| `components/Shell.tsx` | Sidebar, navigation, identity |
+| `components/ui.tsx` | Button, Field, Badge, Dialog, toasts, empty and loading states |
+| `lib/auth.tsx` | Session state; identity always from `GET /auth/me`, never by decoding the token client-side |
+| `lib/api.ts` | Typed client with silent token refresh |
+| `app/globals.css` | Design tokens; dark mode comes from the token indirection |
+
+Tokens are kept in `localStorage`, which is a deliberate development-stage
+choice with a real tradeoff: anything achieving script execution on this origin
+can read them. The production answer is httpOnly, SameSite cookies with a CSRF
+token, which needs backend cookie support — recorded as Phase 7 work rather
+than left implicit.
 
 The container runs `next dev` with the source bind-mounted, so an edit to
 `services/frontend/app` reloads in the browser without a rebuild:

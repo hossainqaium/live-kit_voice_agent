@@ -1,124 +1,150 @@
-import { ServiceStatus } from "@/components/ServiceStatus";
+"use client";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 
-/**
- * Phase 0 landing page.
- *
- * Replaced in Phase 4 by the platform console (spec 60) and tenant console
- * (spec 61). For now it exists so the frontend service is real, reachable and
- * wired to the API rather than a placeholder image.
- */
-export default function Home() {
-  const consoles = [
-    {
-      title: "Platform Console",
-      spec: "spec 60",
-      phase: "Phase 4",
-      sections:
-        "Dashboard · Tenants · LiveKit · Infrastructure · AI Providers · Models · Voices · System Users · Monitoring · Audit Logs · Settings",
-    },
-    {
-      title: "Tenant Console",
-      spec: "spec 61",
-      phase: "Phase 4",
-      sections:
-        "Dashboard · AI Agents · Agent Versions · PBXs · SIP Trunks · Phone Numbers · Routing · Business Hours · Knowledge Bases · Tools · Calls · Recordings · Transcripts · Analytics · Users · Usage · Settings",
-    },
-  ];
+import { Shell } from "@/components/Shell";
+import { Badge, Loading, Notice } from "@/components/ui";
+import { api, fetchApiHealth, type Pbx } from "@/lib/api";
+import { useRequireAuth } from "@/lib/auth";
+
+interface Overview {
+  pbxCount: number;
+  pbxUntested: number;
+  pbxFailing: number;
+  recent: Pbx[];
+}
+
+export default function TenantDashboard() {
+  const { principal, loading } = useRequireAuth();
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [apiHealthy, setApiHealthy] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!principal) return;
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const page = await api.pbxs.list(200, 0);
+        if (cancelled) return;
+        setOverview({
+          pbxCount: page.total,
+          pbxUntested: page.items.filter((p) => p.last_test_result === "UNTESTED").length,
+          pbxFailing: page.items.filter((p) => p.last_test_result === "FAILED").length,
+          recent: [...page.items]
+            .sort((a, b) => b.created_at.localeCompare(a.created_at))
+            .slice(0, 5),
+        });
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "could not load");
+      }
+    }
+
+    void load();
+    fetchApiHealth()
+      .then(() => !cancelled && setApiHealthy(true))
+      .catch(() => !cancelled && setApiHealthy(false));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [principal]);
+
+  if (loading || !principal) return <div className="auth-screen"><Loading /></div>;
 
   return (
-    <main
-      style={{
-        maxWidth: 860,
-        margin: "0 auto",
-        padding: "56px 24px 80px",
-      }}
-    >
-      <p
-        style={{
-          margin: 0,
-          color: "var(--text-muted)",
-          fontSize: 13,
-          letterSpacing: "0.06em",
-          textTransform: "uppercase",
-        }}
-      >
-        Phase 0 — Foundations
-      </p>
-
-      <h1 style={{ fontSize: 30, lineHeight: 1.2, margin: "10px 0 12px" }}>
-        Multi-Tenant AI Voice Agent Platform
-      </h1>
-
-      <p style={{ color: "var(--text-muted)", margin: "0 0 28px", maxWidth: 620 }}>
-        Control Plane and Voice Execution Plane are running as separate services.
-        Agent behaviour is loaded from configuration at call start — nothing
-        tenant-specific is compiled in.
-      </p>
-
-      <section
-        style={{
-          background: "var(--surface)",
-          border: "1px solid var(--border)",
-          borderRadius: 10,
-          padding: "16px 18px",
-          marginBottom: 28,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 16,
-            flexWrap: "wrap",
-          }}
-        >
-          <strong style={{ fontSize: 14 }}>Configuration API</strong>
-          <ServiceStatus />
+    <Shell>
+      <div className="page-header">
+        <div>
+          <h1>Dashboard</h1>
+          <p className="page-subtitle">
+            Telephony and agent configuration for your tenant. Calls, analytics
+            and the agent builder arrive later in Phase 4.
+          </p>
         </div>
-        <div style={{ marginTop: 12, display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <a href={`${API_BASE_URL}/docs`} style={{ color: "var(--accent)", fontSize: 13 }}>
-            OpenAPI docs
-          </a>
-          <a href={`${API_BASE_URL}/health`} style={{ color: "var(--accent)", fontSize: 13 }}>
-            /health
-          </a>
-          <a href={`${API_BASE_URL}/ready`} style={{ color: "var(--accent)", fontSize: 13 }}>
-            /ready
-          </a>
-          <a href={`${API_BASE_URL}/metrics`} style={{ color: "var(--accent)", fontSize: 13 }}>
-            /metrics
-          </a>
-        </div>
-      </section>
-
-      <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>Coming in later phases</h2>
-      <div style={{ display: "grid", gap: 12 }}>
-        {consoles.map((console) => (
-          <article
-            key={console.title}
-            style={{
-              background: "var(--surface)",
-              border: "1px solid var(--border)",
-              borderRadius: 10,
-              padding: "14px 18px",
-            }}
-          >
-            <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
-              <strong style={{ fontSize: 14 }}>{console.title}</strong>
-              <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                {console.spec} · {console.phase}
-              </span>
-            </div>
-            <p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 13 }}>
-              {console.sections}
-            </p>
-          </article>
-        ))}
       </div>
-    </main>
+
+      {error && <Notice tone="err">{error}</Notice>}
+
+      <div className="card-grid" style={{ marginBottom: 20 }}>
+        <div className="card">
+          <div className="stat-label">PBXs</div>
+          <div className="stat-value">{overview?.pbxCount ?? "—"}</div>
+          <div className="stat-note">
+            <Link href="/pbxs">Manage →</Link>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Untested</div>
+          <div className="stat-value">{overview?.pbxUntested ?? "—"}</div>
+          <div className="stat-note">
+            {overview?.pbxUntested
+              ? "A saved PBX is not a reachable one"
+              : "All PBXs have been probed"}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Failing</div>
+          <div className="stat-value" style={{ color: overview?.pbxFailing ? "var(--err)" : undefined }}>
+            {overview?.pbxFailing ?? "—"}
+          </div>
+          <div className="stat-note">Last connection test failed</div>
+        </div>
+
+        <div className="card">
+          <div className="stat-label">Configuration API</div>
+          <div className="stat-value" style={{ fontSize: 17, paddingTop: 6 }}>
+            {apiHealthy === null ? (
+              "checking…"
+            ) : apiHealthy ? (
+              <Badge tone="ok" dot>reachable</Badge>
+            ) : (
+              <Badge tone="err" dot>unreachable</Badge>
+            )}
+          </div>
+          <div className="stat-note">Control plane</div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="row-between" style={{ marginBottom: 12 }}>
+          <h2>Recently added PBXs</h2>
+          <Link href="/pbxs" className="small">View all</Link>
+        </div>
+
+        {overview === null ? (
+          <Loading />
+        ) : overview.recent.length === 0 ? (
+          <p className="muted small" style={{ margin: 0 }}>
+            No PBXs yet. <Link href="/pbxs">Register one</Link> to begin routing
+            calls to an AI agent.
+          </p>
+        ) : (
+          <div className="stack" style={{ gap: 8 }}>
+            {overview.recent.map((pbx) => (
+              <div key={pbx.id} className="row-between">
+                <div className="truncate">
+                  <strong style={{ fontWeight: 500 }}>{pbx.name}</strong>{" "}
+                  <span className="subtle mono small">
+                    {pbx.host}:{pbx.port}
+                  </span>
+                </div>
+                <TestBadge result={pbx.last_test_result} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Shell>
   );
+}
+
+function TestBadge({ result }: { result: Pbx["last_test_result"] }) {
+  if (result === "PASSED") return <Badge tone="ok" dot>reachable</Badge>;
+  if (result === "FAILED") return <Badge tone="err" dot>unreachable</Badge>;
+  return <Badge tone="neutral">untested</Badge>;
 }
