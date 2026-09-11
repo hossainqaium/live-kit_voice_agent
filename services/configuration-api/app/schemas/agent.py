@@ -54,6 +54,22 @@ class AgentVersionConfig(BaseModel):
     tts_model_id: uuid.UUID | None = None
     voice_id: uuid.UUID | None = None
 
+    # --- Fallback tier (spec 55) ------------------------------------------ #
+    stt_fallback_provider_id: uuid.UUID | None = None
+    stt_fallback_model_id: uuid.UUID | None = None
+    llm_fallback_provider_id: uuid.UUID | None = None
+    llm_fallback_model_id: uuid.UUID | None = None
+    tts_fallback_provider_id: uuid.UUID | None = None
+    tts_fallback_model_id: uuid.UUID | None = None
+    tts_fallback_voice_id: uuid.UUID | None = None
+
+    # --- Local last resort (spec 25, 55) ---------------------------------- #
+    stt_local_provider_id: uuid.UUID | None = None
+    stt_local_model_id: uuid.UUID | None = None
+    tts_local_provider_id: uuid.UUID | None = None
+    tts_local_model_id: uuid.UUID | None = None
+    tts_local_voice_id: uuid.UUID | None = None
+
     temperature: float | None = Field(default=None, ge=0, le=2)
 
     # --- Conversation behaviour (spec 29) --------------------------------- #
@@ -93,6 +109,21 @@ class AgentVersionResponse(TimestampedResponse):
     tts_provider_id: uuid.UUID | None
     tts_model_id: uuid.UUID | None
     voice_id: uuid.UUID | None
+
+    stt_fallback_provider_id: uuid.UUID | None = None
+    stt_fallback_model_id: uuid.UUID | None = None
+    llm_fallback_provider_id: uuid.UUID | None = None
+    llm_fallback_model_id: uuid.UUID | None = None
+    tts_fallback_provider_id: uuid.UUID | None = None
+    tts_fallback_model_id: uuid.UUID | None = None
+    tts_fallback_voice_id: uuid.UUID | None = None
+
+    stt_local_provider_id: uuid.UUID | None = None
+    stt_local_model_id: uuid.UUID | None = None
+    tts_local_provider_id: uuid.UUID | None = None
+    tts_local_model_id: uuid.UUID | None = None
+    tts_local_voice_id: uuid.UUID | None = None
+
     temperature: float | None
 
     interruption_enabled: bool
@@ -121,6 +152,14 @@ class AgentVersionResponse(TimestampedResponse):
     llm_label: str | None = None
     tts_label: str | None = None
     voice_label: str | None = None
+
+    #: Same idea for the other two tiers, so the builder can render a chain
+    #: without resolving twelve more foreign keys itself.
+    stt_fallback_label: str | None = None
+    llm_fallback_label: str | None = None
+    tts_fallback_label: str | None = None
+    stt_local_label: str | None = None
+    tts_local_label: str | None = None
 
 
 class AgentResponse(TimestampedResponse):

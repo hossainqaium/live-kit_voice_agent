@@ -131,6 +131,19 @@ class CallContext:
 
     knowledge_base_id: uuid.UUID | None = None
 
+    #: Further tiers to try when the primary fails, in order (spec 55). Empty
+    #: for a version that configures only a primary, which is why these are
+    #: separate fields rather than a chain replacing ``stt``/``llm``/``tts``:
+    #: every existing caller keeps reading the primary without knowing that
+    #: tiers exist.
+    #:
+    #: Declared here rather than beside the primaries because this is a frozen
+    #: dataclass and a defaulted field cannot precede a required one — placing
+    #: them next to their own stage made the class impossible to construct.
+    stt_fallbacks: tuple[ProviderConfig, ...] = ()
+    llm_fallbacks: tuple[ProviderConfig, ...] = ()
+    tts_fallbacks: tuple[ProviderConfig, ...] = ()
+
     #: Correlation fields for every log line this call produces (spec 58).
     def log_fields(self) -> dict[str, str]:
         return {
@@ -233,17 +246,34 @@ _VERSION_SQL = text(
         av.transfer_summary_max_seconds, av.transfer_skip_dtmf,
         av.knowledge_base_id,
 
-        stt_p.slug AS stt_slug, stt_p.default_base_url AS stt_base_url,
+        COALESCE(stt_p.adapter, stt_p.slug) AS stt_slug, stt_p.default_base_url AS stt_base_url,
         stt_m.slug AS stt_model,
-        llm_p.slug AS llm_slug, llm_p.default_base_url AS llm_base_url,
+        COALESCE(llm_p.adapter, llm_p.slug) AS llm_slug, llm_p.default_base_url AS llm_base_url,
         llm_m.slug AS llm_model,
-        tts_p.slug AS tts_slug, tts_p.default_base_url AS tts_base_url,
+        COALESCE(tts_p.adapter, tts_p.slug) AS tts_slug, tts_p.default_base_url AS tts_base_url,
         tts_m.slug AS tts_model,
         v.voice_id AS voice_external_id,
 
         stt_p.id AS stt_provider_id,
         llm_p.id AS llm_provider_id,
-        tts_p.id AS tts_provider_id
+        tts_p.id AS tts_provider_id,
+
+        -- Fallback tier (spec 55). Every join is LEFT: a version that names
+        -- only a primary provider must resolve exactly as it did before.
+        COALESCE(sttf_p.adapter, sttf_p.slug) AS sttf_slug, sttf_p.default_base_url AS sttf_base_url,
+        sttf_m.slug AS sttf_model, sttf_p.id AS sttf_provider_id,
+        COALESCE(llmf_p.adapter, llmf_p.slug) AS llmf_slug, llmf_p.default_base_url AS llmf_base_url,
+        llmf_m.slug AS llmf_model, llmf_p.id AS llmf_provider_id,
+        COALESCE(ttsf_p.adapter, ttsf_p.slug) AS ttsf_slug, ttsf_p.default_base_url AS ttsf_base_url,
+        ttsf_m.slug AS ttsf_model, ttsf_p.id AS ttsf_provider_id,
+        vf.voice_id AS ttsf_voice,
+
+        -- Local last resort (spec 25, 55).
+        COALESCE(sttl_p.adapter, sttl_p.slug) AS sttl_slug, sttl_p.default_base_url AS sttl_base_url,
+        sttl_m.slug AS sttl_model, sttl_p.id AS sttl_provider_id,
+        COALESCE(ttsl_p.adapter, ttsl_p.slug) AS ttsl_slug, ttsl_p.default_base_url AS ttsl_base_url,
+        ttsl_m.slug AS ttsl_model, ttsl_p.id AS ttsl_provider_id,
+        vl.voice_id AS ttsl_voice
     FROM agent_versions av
     LEFT JOIN providers stt_p ON stt_p.id = av.stt_provider_id
     LEFT JOIN models    stt_m ON stt_m.id = av.stt_model_id
@@ -252,6 +282,20 @@ _VERSION_SQL = text(
     LEFT JOIN providers tts_p ON tts_p.id = av.tts_provider_id
     LEFT JOIN models    tts_m ON tts_m.id = av.tts_model_id
     LEFT JOIN voices    v     ON v.id     = av.voice_id
+
+    LEFT JOIN providers sttf_p ON sttf_p.id = av.stt_fallback_provider_id
+    LEFT JOIN models    sttf_m ON sttf_m.id = av.stt_fallback_model_id
+    LEFT JOIN providers llmf_p ON llmf_p.id = av.llm_fallback_provider_id
+    LEFT JOIN models    llmf_m ON llmf_m.id = av.llm_fallback_model_id
+    LEFT JOIN providers ttsf_p ON ttsf_p.id = av.tts_fallback_provider_id
+    LEFT JOIN models    ttsf_m ON ttsf_m.id = av.tts_fallback_model_id
+    LEFT JOIN voices    vf     ON vf.id     = av.tts_fallback_voice_id
+
+    LEFT JOIN providers sttl_p ON sttl_p.id = av.stt_local_provider_id
+    LEFT JOIN models    sttl_m ON sttl_m.id = av.stt_local_model_id
+    LEFT JOIN providers ttsl_p ON ttsl_p.id = av.tts_local_provider_id
+    LEFT JOIN models    ttsl_m ON ttsl_m.id = av.tts_local_model_id
+    LEFT JOIN voices    vl     ON vl.id     = av.tts_local_voice_id
     WHERE av.id = :version_id
     """
 )
@@ -347,6 +391,41 @@ class CallConfigLoader:
             voice_id=version["voice_external_id"],
         )
 
+        # Optional tiers. ``_optional_provider_config`` returns None when the
+        # version does not name one, so the chains are exactly as long as what
+        # was configured.
+        stt_fallbacks = self._chain(
+            (
+                self._optional_provider_config(
+                    ProviderKind.STT, version, "sttf", credentials, language=version["language"]
+                ),
+                self._optional_provider_config(
+                    ProviderKind.STT, version, "sttl", credentials, language=version["language"]
+                ),
+            )
+        )
+        llm_fallbacks = self._chain(
+            (
+                self._optional_provider_config(
+                    ProviderKind.LLM,
+                    version,
+                    "llmf",
+                    credentials,
+                    temperature=version["temperature"],
+                ),
+            )
+        )
+        tts_fallbacks = self._chain(
+            (
+                self._optional_provider_config(
+                    ProviderKind.TTS, version, "ttsf", credentials, voice_id=version["ttsf_voice"]
+                ),
+                self._optional_provider_config(
+                    ProviderKind.TTS, version, "ttsl", credentials, voice_id=version["ttsl_voice"]
+                ),
+            )
+        )
+
         call_row_id = await self._create_call_row(
             session,
             call_id=call_id,
@@ -377,6 +456,9 @@ class CallConfigLoader:
             stt=stt,
             llm=llm,
             tts=tts,
+            stt_fallbacks=stt_fallbacks,
+            llm_fallbacks=llm_fallbacks,
+            tts_fallbacks=tts_fallbacks,
             call_policy=CallPolicy(
                 silence_timeout_seconds=version["silence_timeout_seconds"],
                 max_call_duration_seconds=version["max_call_duration_seconds"],
@@ -429,7 +511,20 @@ class CallConfigLoader:
         """
         provider_ids = [
             version[key]
-            for key in ("stt_provider_id", "llm_provider_id", "tts_provider_id")
+            for key in (
+                "stt_provider_id",
+                "llm_provider_id",
+                "tts_provider_id",
+                # A fallback the tenant has no key for is not a fallback, so
+                # every tier's provider is resolved here rather than only the
+                # primary's. Absent credentials stay absent — correct for a
+                # self-hosted endpoint that needs none.
+                "sttf_provider_id",
+                "llmf_provider_id",
+                "ttsf_provider_id",
+                "sttl_provider_id",
+                "ttsl_provider_id",
+            )
             if version[key] is not None
         ]
         if not provider_ids:
@@ -461,6 +556,40 @@ class CallConfigLoader:
             resolved[record["provider_id"]] = (plaintext, record["base_url"])
 
         return resolved
+
+    @staticmethod
+    def _chain(configs: tuple[ProviderConfig | None, ...]) -> tuple[ProviderConfig, ...]:
+        """Drop the tiers this version did not configure, keeping the order."""
+        return tuple(config for config in configs if config is not None)
+
+    def _optional_provider_config(
+        self,
+        kind: ProviderKind,
+        version: Any,
+        prefix: str,
+        credentials: dict[uuid.UUID, tuple[str, str | None]],
+        *,
+        language: str | None = None,
+        temperature: float | None = None,
+        voice_id: str | None = None,
+    ) -> ProviderConfig | None:
+        """A tier's configuration, or None when the version does not name one.
+
+        The difference from ``_provider_config`` is the missing case: no
+        primary provider is a configuration error that must stop the call, and
+        no fallback is the ordinary state of most agents.
+        """
+        if version[f"{prefix}_slug"] is None:
+            return None
+        return self._provider_config(
+            kind,
+            version,
+            prefix,
+            credentials,
+            language=language,
+            temperature=temperature,
+            voice_id=voice_id,
+        )
 
     def _provider_config(
         self,

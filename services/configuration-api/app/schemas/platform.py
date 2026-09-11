@@ -114,6 +114,13 @@ class ProviderCreate(BaseModel):
 
     kind: ProviderKind
     slug: str = Field(min_length=2, max_length=64)
+
+    #: Which worker adapter drives it. Defaults to the slug, which is what
+    #: every provider seeded before this field existed relies on. Set it when
+    #: registering a second endpoint for a protocol that already has one — a
+    #: self-hosted OpenAI-compatible server alongside the hosted service.
+    adapter: str | None = Field(default=None, min_length=2, max_length=64)
+
     display_name: str = Field(min_length=1, max_length=128)
 
     supports_streaming: bool = True
@@ -146,6 +153,7 @@ class ProviderUpdate(BaseModel):
 class ProviderResponse(TimestampedResponse):
     kind: ProviderKind
     slug: str
+    adapter: str | None
     display_name: str
     status: ResourceStatus
     supports_streaming: bool

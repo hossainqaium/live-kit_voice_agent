@@ -165,6 +165,9 @@ class TestSchemasAcceptDatabaseValues:
         row = base_row(
             kind=ProviderKind.TTS,
             slug="cartesia",
+            # A row's name and its adapter are separate columns, so a provider
+            # can be registered twice for two endpoints (spec 25, 55).
+            adapter="cartesia",
             display_name="Cartesia",
             status=ResourceStatus.ACTIVE,
             supports_streaming=True,
@@ -474,3 +477,142 @@ class TestPermissionsAreDeclaredForEverySection:
         """
         route = next(r for r in _console_routes(app) if r.path == path and "GET" in r.methods)
         assert permission in self.required_permissions(route)
+
+
+class TestProviderSelectionAndCredentials:
+    """The agent builder's provider controls (spec 24, 25, 26, 55, 62).
+
+    These exist because the fields were reachable through the CLI long before
+    they were reachable through the API, and the two drifted: the version table
+    carried columns the API would not accept and the builder could not show.
+    """
+
+    def test_the_catalog_has_a_tenant_route(self, app) -> None:
+        """Without it, the builder has nothing to populate a dropdown from."""
+        assert any(route.path == "/api/v1/catalog" for route in _console_routes(app))
+
+    def test_credentials_can_be_set_through_the_api(self, app) -> None:
+        """Spec 77: no CLI step may be required to configure a tenant."""
+        routes = {
+            (route.path, method)
+            for route in _console_routes(app)
+            for method in route.methods
+        }
+        assert ("/api/v1/catalog/credentials", "PUT") in routes
+        assert ("/api/v1/catalog/credentials/{credential_id}/verify", "POST") in routes
+        assert ("/api/v1/catalog/credentials/{credential_id}", "DELETE") in routes
+
+    def test_no_response_model_can_carry_an_api_key(self, app) -> None:
+        """Spec 26 makes a stored key write-only.
+
+        Asserted against every response model on every route rather than
+        against the credential endpoints alone: the rule is that no endpoint
+        anywhere returns a key, and a future endpoint that did would be exactly
+        the kind of mistake nobody reviews for twice.
+        """
+        from fastapi.routing import APIRoute
+
+        forbidden = {"api_key", "api_key_ciphertext", "password", "secret"}
+        offenders: list[str] = []
+        for route in app.routes:
+            if not isinstance(route, APIRoute) or route.response_model is None:
+                continue
+            fields = getattr(route.response_model, "model_fields", {})
+            leaked = forbidden & set(fields)
+            if leaked:
+                offenders.append(f"{route.path} returns {sorted(leaked)}")
+        assert not offenders, "; ".join(offenders)
+
+    def test_the_request_model_accepts_a_key(self) -> None:
+        """The other half: write-only means writable, not absent."""
+        from app.schemas.catalog import CredentialUpsert
+
+        assert "api_key" in CredentialUpsert.model_fields
+
+    def test_a_short_key_is_refused(self) -> None:
+        """A blank or truncated paste is the most common way this goes wrong."""
+        import pydantic
+
+        from app.schemas.catalog import CredentialUpsert
+
+        with pytest.raises(pydantic.ValidationError):
+            CredentialUpsert(provider_id=uuid.uuid4(), api_key="abc")
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "stt_fallback_provider_id",
+            "stt_fallback_model_id",
+            "llm_fallback_provider_id",
+            "llm_fallback_model_id",
+            "tts_fallback_provider_id",
+            "tts_fallback_model_id",
+            "tts_fallback_voice_id",
+            "stt_local_provider_id",
+            "stt_local_model_id",
+            "tts_local_provider_id",
+            "tts_local_model_id",
+            "tts_local_voice_id",
+        ],
+    )
+    def test_every_tier_is_accepted_by_the_api(self, field: str) -> None:
+        """``extra="forbid"`` means an unlisted field is a 422, not a no-op.
+
+        The failure this catches is a column added to the table and the
+        migration, rendered in the builder, and silently rejected by the
+        request model — which reads to an operator as a form that does not save.
+        """
+        from app.schemas.agent import AgentVersionConfig
+
+        assert field in AgentVersionConfig.model_fields
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "stt_fallback_provider_id",
+            "llm_fallback_provider_id",
+            "tts_fallback_provider_id",
+            "stt_local_provider_id",
+            "tts_local_provider_id",
+        ],
+    )
+    def test_every_tier_is_validated_against_the_catalog(self, field: str) -> None:
+        """A tier rendered but not validated accepts a dangling foreign key.
+
+        Both the label resolution and the reference check are derived from
+        ``_PROVIDER_TIERS``, so this asserts the table covers the columns rather
+        than that two hand-written lists happen to agree.
+        """
+        from app.api.v1.agents import _PROVIDER_TIERS
+
+        columns = {provider for _label, provider, _model, _voice in _PROVIDER_TIERS}
+        columns |= {model for _label, _provider, model, _voice in _PROVIDER_TIERS}
+        assert field in columns
+
+    def test_the_version_response_labels_every_tier(self) -> None:
+        """The builder shows a chain; it cannot resolve twelve keys itself."""
+        from app.schemas.agent import AgentVersionResponse
+
+        for label in (
+            "stt_label",
+            "llm_label",
+            "tts_label",
+            "voice_label",
+            "stt_fallback_label",
+            "llm_fallback_label",
+            "tts_fallback_label",
+            "stt_local_label",
+            "tts_local_label",
+        ):
+            assert label in AgentVersionResponse.model_fields, label
+
+    def test_the_llm_stage_has_no_local_tier(self) -> None:
+        """Deliberate, and asserted so it is not "fixed" by accident.
+
+        A self-hosted language model is a deployment decision with its own
+        hardware, not a switch a tenant can flip. Offering the control without
+        that would be a promise the platform cannot keep.
+        """
+        from app.schemas.agent import AgentVersionConfig
+
+        assert "llm_local_provider_id" not in AgentVersionConfig.model_fields

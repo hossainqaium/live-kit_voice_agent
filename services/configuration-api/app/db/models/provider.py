@@ -48,9 +48,29 @@ class Provider(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     kind: Mapped[ProviderKind] = enum_column(ProviderKind, nullable=False, index=True)
 
-    #: Adapter key, e.g. "deepgram". This is what selects the code path in the
-    #: worker's provider registry, so it is a contract value, not a label.
+    #: Stable name for this row, unique within its kind, e.g.
+    #: "openai_hosted" or "selfhosted_speech". Used by the CLI and by an
+    #: operator to name a provider; it is not the code path.
     slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    #: Adapter key, e.g. "openai_compatible". This is what selects the code
+    #: path in the worker's provider registry, so it is a contract value.
+    #:
+    #: Separate from ``slug`` because one adapter serves many endpoints: spec
+    #: 25 requires a tenant to choose between a hosted model and a local one,
+    #: and both speak the same protocol. While the two were the same column, a
+    #: catalog could hold only one row per adapter per kind, which made
+    #: "hosted or local" unrepresentable — and made the local fallback tier in
+    #: spec 55 impossible to configure.
+    #:
+    #: Null means "use the slug", so every row seeded before this column
+    #: existed keeps resolving to the adapter it always did.
+    adapter: Mapped[str | None] = mapped_column(String(64))
+
+    @property
+    def adapter_key(self) -> str:
+        """The registry key the worker builds from."""
+        return self.adapter or self.slug
 
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
 

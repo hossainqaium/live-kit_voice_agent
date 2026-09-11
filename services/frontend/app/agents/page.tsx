@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { ProviderChain } from "@/components/ProviderChain";
 import { Shell } from "@/components/Shell";
 import {
   Badge, Button, Dialog, EmptyState, Field, Loading, Notice,
@@ -24,7 +25,8 @@ import {
 } from "@/components/ui";
 import {
   ApiError, api,
-  type Agent, type AgentVersion, type ValidationReport,
+  type Agent, type AgentVersion, type Catalog, type ProviderCredential,
+  type ValidationReport,
 } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 
@@ -270,6 +272,32 @@ function AgentBuilder({
   const [report, setReport] = useState<ValidationReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<"config" | "history">("config");
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
+
+  const loadCredentials = useCallback(async () => {
+    try {
+      setCredentials(await api.catalog.credentials());
+    } catch {
+      // A tenant with no credentials yet is the normal starting state, and a
+      // failure here must not stop the builder rendering: every other control
+      // still works, and each provider row says "no key" either way.
+      setCredentials([]);
+    }
+  }, []);
+
+  const loadCatalog = useCallback(async () => {
+    try {
+      setCatalog(await api.catalog.get());
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "could not load the provider catalog");
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    void loadCatalog();
+    void loadCredentials();
+  }, [loadCatalog, loadCredentials]);
 
   const load = useCallback(async () => {
     const list = await api.agents.versions(agent.id);
@@ -299,6 +327,29 @@ function AgentBuilder({
         greeting: draft.greeting,
         system_prompt: draft.system_prompt,
         temperature: draft.temperature,
+
+        // Every tier, including the ones cleared back to null: omitting a null
+        // would make "remove the fallback" indistinguishable from "leave it
+        // alone", and the draft would keep a tier the operator deleted.
+        stt_provider_id: draft.stt_provider_id ?? null,
+        stt_model_id: draft.stt_model_id ?? null,
+        llm_provider_id: draft.llm_provider_id ?? null,
+        llm_model_id: draft.llm_model_id ?? null,
+        tts_provider_id: draft.tts_provider_id ?? null,
+        tts_model_id: draft.tts_model_id ?? null,
+        voice_id: draft.voice_id ?? null,
+        stt_fallback_provider_id: draft.stt_fallback_provider_id ?? null,
+        stt_fallback_model_id: draft.stt_fallback_model_id ?? null,
+        llm_fallback_provider_id: draft.llm_fallback_provider_id ?? null,
+        llm_fallback_model_id: draft.llm_fallback_model_id ?? null,
+        tts_fallback_provider_id: draft.tts_fallback_provider_id ?? null,
+        tts_fallback_model_id: draft.tts_fallback_model_id ?? null,
+        tts_fallback_voice_id: draft.tts_fallback_voice_id ?? null,
+        stt_local_provider_id: draft.stt_local_provider_id ?? null,
+        stt_local_model_id: draft.stt_local_model_id ?? null,
+        tts_local_provider_id: draft.tts_local_provider_id ?? null,
+        tts_local_model_id: draft.tts_local_model_id ?? null,
+        tts_local_voice_id: draft.tts_local_voice_id ?? null,
         interruption_enabled: draft.interruption_enabled,
         silence_timeout_seconds: draft.silence_timeout_seconds,
         max_call_duration_seconds: draft.max_call_duration_seconds,
@@ -480,19 +531,15 @@ function AgentBuilder({
               </Field>
             </div>
 
-            <div className="card" style={{ marginBottom: 14, padding: "10px 13px" }}>
-              <div className="stat-label" style={{ marginBottom: 6 }}>Speech and reasoning</div>
-              <div className="stack small" style={{ gap: 3 }}>
-                <div><span className="subtle">STT</span> {draft.stt_label ?? "not selected"}</div>
-                <div><span className="subtle">LLM</span> {draft.llm_label ?? "not selected"}</div>
-                <div><span className="subtle">TTS</span> {draft.tts_label ?? "not selected"}</div>
-                <div><span className="subtle">Voice</span> {draft.voice_label ?? "not selected"}</div>
-              </div>
-              <p className="subtle small" style={{ margin: "8px 0 0" }}>
-                Provider selection is not editable here yet — it is set through
-                the CLI or API until the platform provider catalog screen lands.
-              </p>
-            </div>
+            <ProviderChain
+              draft={draft}
+              catalog={catalog}
+              credentials={credentials}
+              disabled={!canWrite}
+              onSet={set}
+              onCredentialsChanged={loadCredentials}
+              onError={onError}
+            />
 
             <div className="field-row">
               <Field label="Silence timeout (s)"

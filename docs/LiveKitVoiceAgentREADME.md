@@ -973,6 +973,10 @@ misread as a fault:
 | Warm transfer to a human agent | Not yet — Phase 6 |
 | Tools, function calling, RAG | Not yet — Phase 6 |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
+| Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
+| Entering a provider API key and testing it in the UI | Working — §9c.2. The last CLI-only tenant step is gone. |
+| Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
+| Provider timeout, retry, backoff, circuit breaker | **Not yet — Plan 4b.10.** A *slow* provider does not trigger fallover. |
 | Testing the agent from a browser instead of a phone | **Not yet.** The worker requires a SIP participant, so LiveKit's Agents Playground connects and is ignored — §9d.7, Plan 2b.10. |
 
 Two honest caveats about interpreting a test call:
@@ -1009,11 +1013,56 @@ The base URL is per credential, so two tenants can point the same adapter at
 different endpoints. That is what satisfies spec 25's local/self-hosted
 requirement without a second code path.
 
+**A provider row is an endpoint; the adapter is the code that talks to it.**
+These are separate columns:
+
+| Column | Means | Example |
+|---|---|---|
+| `providers.slug` | The row's name, unique within its kind | `openai_hosted` |
+| `providers.adapter` | The worker's registry key | `openai_compatible` |
+
+They used to be one column, and because it is unique per kind the catalog could
+hold only **one row per protocol per kind**. "OpenAI-compatible hosted" and
+"OpenAI-compatible self-hosted" could not both exist, which meant the local
+fallback tier (§9c.7) had nothing distinct to point at. `adapter` is nullable
+and falls back to the slug, so a row registered before the split resolves
+exactly as it always did.
+
+The development seed now registers both for speech:
+
+| Kind | Slug | Endpoint | Key |
+|---|---|---|---|
+| STT | `openai_compatible` | speaches, self-hosted | none needed |
+| STT | `openai_hosted` | `https://api.openai.com/v1` | required |
+| TTS | `openai_compatible` | Kokoro, self-hosted | none needed |
+| TTS | `openai_hosted` | `https://api.openai.com/v1` | required |
+
 ### 9c.2 Storing a credential
 
 Keys are stored **encrypted** (Fernet, with key versioning) and never returned
-by the API or written to a log. The CLI reads the key from **stdin**, so it
-never appears in a process listing or a shell history file:
+by the API or written to a log.
+
+**From the console**, which is now the normal path: open an agent, and beside
+whichever provider needs one, use **Set key**. Then **Test connection** —
+it makes one real request (`GET {base_url}/models`) with the stored key and
+reports the status, the latency and the URL it checked. A key is write-only by
+construction: `api_key` appears on the request model and on no response model
+anywhere in the API, which a test asserts across every route rather than only
+the credential ones.
+
+One key per provider, shared by every tier and every agent that names it.
+Replacing it clears the verified mark until it is tested again — a rotated key
+nobody has tried should not show a green tick.
+
+What *Test connection* proves: the endpoint is reachable from this deployment,
+DNS and TLS work, and the key is accepted. What it does not prove: that a
+particular model is available to that key. That is a different request with a
+different failure mode, and reporting them as one result would put a tick beside
+a model the key cannot reach.
+
+**From the CLI**, still supported and still the right tool for scripted setup.
+It reads the key from **stdin**, so it never appears in a process listing or a
+shell history file:
 
 ```bash
 printf %s "$OPENAI_API_KEY" | docker compose -f deploy/docker-compose.yml --env-file .env exec -T configuration-api python -m app.cli set-credential --kind LLM --provider openai_compatible --base-url https://api.openai.com/v1
@@ -1032,6 +1081,28 @@ Only a four-character `key_hint` is kept for display. Re-running
 `set-credential` rotates the key in place and records `rotated_at`.
 
 ### 9c.3 Pointing an agent at a provider
+
+**In the console:** Agents → Configure. Each of the three stages — speech to
+text, language model, text to speech — offers a provider and a model, and TTS
+also offers a voice. Choosing a provider filters the model list to that
+provider and pre-selects the catalog's default, so the common case is one
+click. Only `ACTIVE` catalog rows are offered: a retired provider would be
+refused by pre-publish validation, so offering it would produce a choice that
+cannot be published.
+
+Each stage has up to three tiers, tried in order (§9c.7):
+
+| Tier | When it is used |
+|---|---|
+| Primary | Every call. |
+| Fallback | The primary errored or timed out. |
+| Local | Nothing hosted answered. STT and TTS only. |
+
+Saving creates or updates a **draft**; the live version is untouched until you
+publish, so a call in progress keeps the configuration it started with (spec
+19, 45).
+
+**From the CLI**, unchanged:
 
 ```bash
 docker compose -f deploy/docker-compose.yml --env-file .env exec configuration-api python -m app.cli set-agent-provider --kind LLM --provider openai_compatible --model gpt-4o-mini
@@ -1107,6 +1178,42 @@ by `session.say()`, not by the model. A broken LLM therefore produces a call
 that connects, greets correctly, and only fails once somebody speaks — so
 "the greeting worked" is not evidence the model works. Use §9c.5.
 
+### 9c.7 Fallback and local tiers
+
+§55 requires a fallback provider for every AI provider. It is configured per
+agent as an ordered chain, and the worker resolves it into LiveKit's own
+`FallbackAdapter` for each stage — LiveKit's adapters already know which errors
+are worth failing over for and recover to the primary when it returns, which is
+better than a retry wrapper written here.
+
+The tiers are **named rather than numbered** because they insure against
+different things: a fallback covers a vendor having a bad day, a local endpoint
+covers the internet being unavailable. An anonymous ordered list would hide
+that from whoever operates it.
+
+**LLM has no local tier.** A self-hosted language model is a deployment
+decision with its own hardware, not a switch a tenant can flip, and offering
+the control without that would be a promise the platform cannot keep.
+
+A tier only helps if it can fail independently:
+
+- **Each tier uses its own provider's key.** A chain whose fallback inherited
+  the primary's credential would pass every test against one vendor and 401 the
+  first time it was needed.
+- **A local tier must name a self-hosted provider.** The builder tags each
+  option `· self-hosted` and warns if a public API is selected as Local, because
+  a hosted fallback behind a hosted primary fails for the same reasons.
+- **A credential's `base_url` overrides the provider default.** That is how a
+  tenant points at its own endpoint — and it is also how a provider named
+  "self-hosted" ends up calling OpenAI, if a key was stored against it with a
+  vendor URL. Check this before concluding a local tier is unused.
+
+**What is not implemented, stated plainly.** §55 lists timeout, retry,
+exponential backoff, circuit breaker and fallback. Only the last is configured.
+A provider that *errors* fails over; one that has become *slow* does not,
+because there is no timeout policy to trip, and there is no circuit breaker, so
+a dying provider is retried on every call. That is Plan item 4b.10.
+
 ---
 
 ---
@@ -1140,7 +1247,7 @@ navigation and a platform account has no tenant to act in.
 | PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
 | Phone Numbers | `/phone-numbers` | DIDs, their trunk and the agent that answers |
-| Agents | `/agents` | The builder: versions, validation, publish, rollback |
+| Agents | `/agents` | The builder: providers and models per tier, keys with a connection test, versions, validation, publish, rollback |
 | Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |
 | Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
 | Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |

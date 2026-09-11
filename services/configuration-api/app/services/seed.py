@@ -183,16 +183,38 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
     provider the code cannot construct would let an operator publish an agent
     that fails at call time rather than at validation time (spec 63).
     """
+    #: (kind, slug, adapter, display name, default base URL, model slugs).
+    #:
+    #: ``slug`` names the row and ``adapter`` names the code path, which is
+    #: what lets a hosted endpoint and a self-hosted one both exist for the
+    #: same protocol. Without the split there could be only one row per
+    #: adapter per kind, and the local tier in spec 55 would have nothing
+    #: distinct to point at.
+    #:
+    #: The existing ``openai_compatible`` rows keep their slug: they are the
+    #: self-hosted speech endpoints and are referenced by agent versions
+    #: already published. Renaming them would invalidate a live configuration
+    #: to make a naming scheme tidier.
     definitions = [
         (
             ProviderKind.STT,
             "openai_compatible",
-            "OpenAI-compatible STT",
+            "openai_compatible",
+            "Self-hosted STT (speaches)",
             spec.speech_base_url,
             [spec.stt_model, "whisper-1"],
         ),
         (
+            ProviderKind.STT,
+            "openai_hosted",
+            "openai_compatible",
+            "OpenAI STT (hosted)",
+            "https://api.openai.com/v1",
+            ["gpt-4o-mini-transcribe", "whisper-1"],
+        ),
+        (
             ProviderKind.LLM,
+            "openai_compatible",
             "openai_compatible",
             "OpenAI-compatible LLM",
             None,
@@ -201,6 +223,7 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
         (
             ProviderKind.LLM,
             spec.llm_provider_slug,
+            spec.llm_provider_slug,
             "Development echo model",
             None,
             [spec.llm_model],
@@ -208,13 +231,22 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
         (
             ProviderKind.TTS,
             "openai_compatible",
-            "OpenAI-compatible TTS",
+            "openai_compatible",
+            "Self-hosted TTS (Kokoro)",
             spec.speech_base_url,
             [spec.tts_model, "tts-1"],
         ),
+        (
+            ProviderKind.TTS,
+            "openai_hosted",
+            "openai_compatible",
+            "OpenAI TTS (hosted)",
+            "https://api.openai.com/v1",
+            ["tts-1"],
+        ),
     ]
 
-    for kind, slug, display_name, base_url, model_slugs in definitions:
+    for kind, slug, adapter, display_name, base_url, model_slugs in definitions:
         provider = (
             await session.execute(
                 select(Provider).where(Provider.kind == kind, Provider.slug == slug)
@@ -225,6 +257,7 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
             provider = Provider(
                 kind=kind,
                 slug=slug,
+                adapter=adapter,
                 display_name=display_name,
                 default_base_url=base_url,
                 supports_streaming=True,
@@ -244,6 +277,11 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
             )
             session.add(provider)
             await session.flush()
+        elif provider.adapter is None:
+            # Seeded before the column existed. Backfilling is safe because
+            # the fallback is the slug, which is what it resolved to anyway.
+            provider.adapter = adapter
+            provider.display_name = display_name
 
         existing_models = {
             m.slug

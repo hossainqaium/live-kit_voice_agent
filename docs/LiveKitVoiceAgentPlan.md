@@ -293,7 +293,11 @@ is left here is specific and bounded rather than "finish the UI".
 
 | # | Item | Kind | Spec |
 |---|---|---|---|
-| 4b.4 | **Tenant provider credentials through the API and console.** CLI-only today (`set-credential`), so a new tenant cannot reach a cloud provider without shell access. This is the one item blocking §77. Write-only field, Fernet at rest, never returned, key hint only — the constraints the CLI already honours. | feature | §26, §62, §77 |
+| ~~4b.4~~ | **Tenant provider credentials through the API and console.** **Done**: `GET /catalog`, `PUT /catalog/credentials`, `POST /catalog/credentials/{id}/verify`, `DELETE /catalog/credentials/{id}`, with the key entry and a live *Test connection* inside the agent builder. Write-only field, Fernet at rest, never returned by any response model — asserted across every route, not just the credential ones. | ~~feature~~ | §26, §62, §77 |
+| ~~4b.7~~ | **Model selection in the agent builder.** **Done**: STT, LLM, TTS and voice are selectable per tier, cascading provider → model → voice, with the catalog's default pre-selected. The columns existed from the start and the builder showed them read-only, pointing the operator at the CLI. | ~~gap~~ | §18, §62 |
+| ~~4b.8~~ | **Fallback and local tiers (§55 fallback provider).** **Done**: primary → fallback → local per stage, resolved by the worker into LiveKit's own `FallbackAdapter`. Required separating `providers.adapter` from `providers.slug` — see 4b.9. | ~~feature~~ | §55, §25 |
+| ~~4b.9~~ | **A provider's adapter is no longer its name.** **Done**: `providers.slug` is unique per kind and was also the worker's registry key, so a catalog could hold only one row per protocol per kind — "OpenAI-compatible hosted" and "OpenAI-compatible self-hosted" could not coexist, which made the local tier unconfigurable. `adapter` is now a separate nullable column falling back to the slug. | ~~defect~~ | §24, §25 |
+| 4b.10 | **The rest of §55: timeout, retry, exponential backoff, circuit breaker.** `worker/resilience/__init__.py` is still a docstring and nothing else. Fallback alone covers the case where a provider fails outright; it does not cover one that is slow, nor stop a dying provider being retried on every call. | **gap** | §55 |
 | 4b.3 | **Routing engine evaluation at call setup.** Rules, business hours and the fallback chain are all configurable and none is consulted when a call arrives; the DID's directly assigned agent answers. A tenant building a rule today gets a row, not a behaviour. | **defect** | §20, §37, §38 |
 | 4b.2 | DID form fields for routing rule, business hours and fallback. The columns exist and the API accepts them; the form does not offer them. | gap | §17 |
 | 4b.1 | SIP Configuration Wizard — the 10 steps in §16 as a guided sequence. Every field is already reachable through the trunk and DID forms, so this is onboarding ergonomics, not capability. | feature | §16 |
@@ -301,9 +305,24 @@ is left here is specific and bounded rather than "finish the UI".
 | 4b.6 | ElevenLabs TTS adapter with streaming. Only the OpenAI-compatible adapter exists, and the catalog will happily offer a provider nothing can drive. | feature | §26 |
 
 **4b.3 is the most consequential and is listed as a defect for the same reason
-as 2b.1–2b.3:** the console now presents routing rules, business hours and a
-fallback chain as working configuration. A screen that writes a row nothing
-reads is worse than no screen, because the operator has no way to tell.
+as 2b.1–2b.3:** the console presents routing rules and business hours as
+working configuration. A screen that writes a row nothing reads is worse than
+no screen, because the operator has no way to tell.
+
+**4b.7–4b.9 were built the other way round, deliberately.** The provider
+controls went in with the worker change that reads them in the same commit: the
+chain the builder writes is resolved by `_VERSION_SQL`, credentials are
+decrypted per tier, and the tiers become a `FallbackAdapter`. A worker test
+asserts each prefix appears in the query, because a tier the console writes and
+the loader drops would be invisible until the primary failed — the worst
+possible moment to discover it.
+
+**What that still leaves is 4b.10, and it should not be oversold.** §55 lists
+five things; the console now configures one of them. A provider that returns
+errors fails over. A provider that has become *slow* does not, because there is
+no timeout policy to trip, and there is no circuit breaker, so every call pays
+the same stall. The fallback tier is worth having and is not the same as the
+resilience §55 asks for.
 
 **Exit criteria**
 
@@ -316,6 +335,11 @@ reads is worse than no screen, because the operator has no way to tell.
 - A call arriving outside a schedule's hours follows the closed action.
 - A provider credential is never returned by any endpoint, and the audit trail
   records that one was set without recording its value.
+- A tenant administrator selects STT, LLM, TTS and voice for an agent, stores
+  the key for each provider, and confirms each one answers — without leaving
+  the console. **Met.**
+- An agent with a fallback tier keeps talking when its primary provider returns
+  errors. Fallover on *error* is met; fallover on *latency* is 4b.10.
 
 ### Phase 3b — Isolation and Account Hardening
 
@@ -387,6 +411,14 @@ was built first because it was the visible half. The test named in Phase 2b's
 exit criteria — *no setting is loaded at runtime and then ignored* — should be
 extended to cover configuration the console writes, not only fields the worker
 loads.
+
+**4b.7–4b.9 are the counter-example, and they cost more up front.** Making the
+provider controls real meant a migration, a column split in the catalog, a
+widened resolution query, per-tier credential decryption, and a change to how
+the session is assembled — before any of it could be rendered. It also surfaced
+two faults that had nothing to do with the feature: a dataclass that could not
+be constructed, and a 500 on every draft save. Both would have been shipped by
+a UI-first approach and found by whoever next placed a call.
 
 ## 6. Phase 3 — Multi-Tenancy [§76]
 
@@ -1161,6 +1193,60 @@ invisible in development and obvious in production.
 **Assessment:** expected on a laptop, and a capacity signal rather than a bug.
 It is exactly the kind of thing Phase 8 must measure on production-shaped
 hardware instead of extrapolating from here (spec 75).
+
+#### A provider row cannot be registered twice for two endpoints
+
+Symptom: a self-hosted STT endpoint and the hosted service both need to be
+selectable, and the second `INSERT` violates `uq_providers_kind_slug`. Renaming
+one of them makes the worker raise `ProviderUnavailableError: no STT adapter for
+provider 'selfhosted_speech'`.
+
+Cause: `providers.slug` was doing two jobs — the row's unique name *and* the key
+into the worker's adapter registry. One adapter therefore meant one row per
+kind, and §25's "hosted or local, same protocol" could not be expressed at all.
+The local fallback tier in §55 had nothing distinct to point at.
+
+Fix: `providers.adapter`, nullable, falling back to the slug so every existing
+row keeps resolving as before; `_VERSION_SQL` selects
+`COALESCE(p.adapter, p.slug)`. The general lesson is worth keeping: a column
+that is both a human name and a code contract will eventually need to be two
+columns, and the constraint that reveals it will look unrelated.
+
+#### A tenant credential quietly overrides a self-hosted provider's endpoint
+
+A credential's `base_url` wins over the provider's `default_base_url`, which is
+deliberate — it is how a tenant points at its own endpoint (§25). The surprise
+is what it does to a *no-key* provider: the development seed stored an OpenAI
+key with `base_url: https://api.openai.com/v1` against the self-hosted speech
+row, because at that time there was only one row per kind. The result is a
+provider called "self-hosted" whose calls go to OpenAI.
+
+There is no bug to fix in the precedence; the fix is data. With distinct hosted
+and self-hosted rows now seeded, move the key to the hosted row and leave the
+self-hosted one without one. Worth checking before concluding that a local tier
+is not being used: the tier may be resolving exactly as configured, to the
+wrong place.
+
+#### `MissingGreenlet` while serialising a saved draft
+
+Symptom: `PUT /agents/{id}/draft` returns 500 with
+`greenlet_spawn has not been called; can't call await_only() here`, naming
+`updated_at`. The draft *is* saved — the audit row is written and the
+transaction commits — so the console shows "could not save the draft" over a
+change that landed.
+
+Cause: `updated_at` carries `onupdate=func.now()`, so after an UPDATE its value
+is in PostgreSQL and not in the instance. Pydantic then reads it from a
+synchronous context and SQLAlchemy attempts lazy IO. `expire_on_commit=False`
+does not help: the attribute is not expired, it was never loaded.
+
+Fix: `await session.refresh(version)` before validating. What makes this worth
+recording is *why it appeared when it did*: `onupdate` only fires when a column
+actually changes, and the builder previously sent so few fields that a save was
+often a no-op. Adding the provider tiers made every save a real UPDATE and
+turned an intermittent 500 into a certain one. A latent fault that only
+triggers on a genuine write is invisible in exactly the tests you would write
+for it.
 
 #### The Agents Playground connects but no agent ever joins
 

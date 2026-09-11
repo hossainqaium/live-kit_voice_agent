@@ -100,12 +100,49 @@ def _build_agent(context: CallContext) -> Agent:
 
 
 def _build_session(context: CallContext) -> AgentSession:
-    """Assemble the STT, LLM and TTS pipeline for this call (spec 28)."""
+    """Assemble the STT, LLM and TTS pipeline for this call (spec 28, 55).
+
+    When a version configures fallback or local tiers, each stage becomes a
+    ``FallbackAdapter`` over the chain. LiveKit's own adapters are used rather
+    than a retry wrapper of our own: they already know which errors are worth
+    failing over for, they recover to the primary when it comes back, and they
+    do it inside one turn — which is the only place a caller would tolerate it.
+
+    A single-tier chain is passed through unwrapped. Wrapping one provider adds
+    a layer that can only ever fail the same way, and it would show up in every
+    trace for no reason.
+    """
+    from livekit.agents import llm as llm_api
+    from livekit.agents import stt as stt_api
+    from livekit.agents import tts as tts_api
     from livekit.plugins import silero
 
-    stt = build_stt(context.stt).build_livekit_component()
-    llm = build_llm(context.llm).build_livekit_component()
-    tts = build_tts(context.tts).build_livekit_component()
+    stt_chain = [
+        build_stt(config).build_livekit_component()
+        for config in (context.stt, *context.stt_fallbacks)
+    ]
+    llm_chain = [
+        build_llm(config).build_livekit_component()
+        for config in (context.llm, *context.llm_fallbacks)
+    ]
+    tts_chain = [
+        build_tts(config).build_livekit_component()
+        for config in (context.tts, *context.tts_fallbacks)
+    ]
+
+    stt = stt_chain[0] if len(stt_chain) == 1 else stt_api.FallbackAdapter(stt_chain)
+    llm = llm_chain[0] if len(llm_chain) == 1 else llm_api.FallbackAdapter(llm_chain)
+    tts = tts_chain[0] if len(tts_chain) == 1 else tts_api.FallbackAdapter(tts_chain)
+
+    if len(stt_chain) > 1 or len(llm_chain) > 1 or len(tts_chain) > 1:
+        logger.info(
+            "provider_fallback_configured",
+            extra={
+                "stt_tiers": len(stt_chain),
+                "llm_tiers": len(llm_chain),
+                "tts_tiers": len(tts_chain),
+            },
+        )
 
     # Voice activity detection drives turn-taking and barge-in (spec 29).
     # Silero runs locally, so it adds no network latency to the turn decision.

@@ -140,6 +140,69 @@ class AgentVersion(Base, UUIDPrimaryKeyMixin, TenantOwnedMixin, TimestampMixin):
         postgresql.UUID(as_uuid=True), ForeignKey("voices.id", ondelete="RESTRICT")
     )
 
+    # --- Provider fallback chain (spec 55) -------------------------------- #
+    #: §55 requires a fallback provider for every AI provider. It is modelled
+    #: as two further tiers rather than an ordered child table because a
+    #: version is an immutable snapshot copied on every edit, and copying a
+    #: child collection is where that guarantee usually breaks.
+    #:
+    #: The tiers are tried in order: primary, then fallback, then local. Each
+    #: is optional, and a version with only a primary behaves exactly as
+    #: before — which is what keeps this change backward compatible with every
+    #: version already published.
+    stt_fallback_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("providers.id", ondelete="RESTRICT")
+    )
+    stt_fallback_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("models.id", ondelete="RESTRICT")
+    )
+
+    llm_fallback_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("providers.id", ondelete="RESTRICT")
+    )
+    llm_fallback_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("models.id", ondelete="RESTRICT")
+    )
+
+    tts_fallback_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("providers.id", ondelete="RESTRICT")
+    )
+    tts_fallback_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("models.id", ondelete="RESTRICT")
+    )
+    tts_fallback_voice_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("voices.id", ondelete="RESTRICT")
+    )
+
+    # --- Local last resort (spec 25, 55) ---------------------------------- #
+    #: A self-hosted endpoint kept as the final tier, so a call still has a
+    #: voice when every hosted provider is unreachable. Deliberately separate
+    #: from the fallback tier: an operator choosing "one more cloud vendor" and
+    #: an operator choosing "something on our own network" are making different
+    #: decisions about what failure they are insuring against, and collapsing
+    #: the two into an anonymous ordered list hides that.
+    #:
+    #: LLM has no local tier. A self-hosted language model is a deployment
+    #: decision with its own hardware, not a fallback a tenant can switch on,
+    #: and offering the control without that would be a promise the platform
+    #: cannot keep.
+    stt_local_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("providers.id", ondelete="RESTRICT")
+    )
+    stt_local_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("models.id", ondelete="RESTRICT")
+    )
+
+    tts_local_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("providers.id", ondelete="RESTRICT")
+    )
+    tts_local_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("models.id", ondelete="RESTRICT")
+    )
+    tts_local_voice_id: Mapped[uuid.UUID | None] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("voices.id", ondelete="RESTRICT")
+    )
+
     # --- Conversation behaviour (spec 18, 29) ----------------------------- #
     interruption_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

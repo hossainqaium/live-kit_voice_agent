@@ -349,42 +349,110 @@ async def delete_agent(
 # --------------------------------------------------------------------------- #
 
 
+#: (label, provider column, model column, voice column). One table drives both
+#: label resolution and reference validation, so a tier cannot be added to one
+#: and forgotten in the other.
+_PROVIDER_TIERS: tuple[tuple[str, str, str, str | None], ...] = (
+    ("stt_label", "stt_provider_id", "stt_model_id", None),
+    ("llm_label", "llm_provider_id", "llm_model_id", None),
+    ("tts_label", "tts_provider_id", "tts_model_id", "voice_id"),
+    ("stt_fallback_label", "stt_fallback_provider_id", "stt_fallback_model_id", None),
+    ("llm_fallback_label", "llm_fallback_provider_id", "llm_fallback_model_id", None),
+    (
+        "tts_fallback_label",
+        "tts_fallback_provider_id",
+        "tts_fallback_model_id",
+        "tts_fallback_voice_id",
+    ),
+    ("stt_local_label", "stt_local_provider_id", "stt_local_model_id", None),
+    ("tts_local_label", "tts_local_provider_id", "tts_local_model_id", "tts_local_voice_id"),
+)
+
+
 async def _version_labels(tenant: CurrentTenant, version: AgentVersion) -> dict[str, str | None]:
-    """Human-readable provider, model and voice names for the builder."""
+    """Human-readable provider, model and voice names for the builder.
 
-    async def provider_model(
-        provider_id: uuid.UUID | None, model_id: uuid.UUID | None
-    ) -> str | None:
-        if provider_id is None:
-            return None
-        provider = (
-            await tenant.session.execute(select(Provider).where(Provider.id == provider_id))
-        ).scalar_one_or_none()
-        if provider is None:
-            return None
-        if model_id is None:
-            return provider.display_name
-        model = (
-            await tenant.session.execute(select(Model).where(Model.id == model_id))
-        ).scalar_one_or_none()
-        return f"{provider.display_name} / {model.slug}" if model else provider.display_name
-
-    voice_label: str | None = None
-    if version.voice_id:
-        voice = (
-            await tenant.session.execute(select(Voice).where(Voice.id == version.voice_id))
-        ).scalar_one_or_none()
-        voice_label = voice.name if voice else None
-
-    return {
-        "stt_label": await provider_model(version.stt_provider_id, version.stt_model_id),
-        "llm_label": await provider_model(version.llm_provider_id, version.llm_model_id),
-        "tts_label": await provider_model(version.tts_provider_id, version.tts_model_id),
-        "voice_label": voice_label,
+    Three queries regardless of how many tiers a version fills in. The earlier
+    shape issued one per foreign key, which was tolerable for three labels and
+    would not have been for eight — and ``list_versions`` calls this once per
+    row, so the cost multiplies twice over.
+    """
+    provider_ids = {
+        getattr(version, column)
+        for _label, column, _model, _voice in _PROVIDER_TIERS
+        if getattr(version, column) is not None
     }
+    model_ids = {
+        getattr(version, column)
+        for _label, _provider, column, _voice in _PROVIDER_TIERS
+        if getattr(version, column) is not None
+    }
+    voice_ids = {
+        getattr(version, column)
+        for _label, _provider, _model, column in _PROVIDER_TIERS
+        if column is not None and getattr(version, column) is not None
+    }
+
+    providers: dict[uuid.UUID, Provider] = {}
+    models: dict[uuid.UUID, Model] = {}
+    voices: dict[uuid.UUID, Voice] = {}
+
+    if provider_ids:
+        providers = {
+            row.id: row
+            for row in (
+                await tenant.session.execute(select(Provider).where(Provider.id.in_(provider_ids)))
+            ).scalars()
+        }
+    if model_ids:
+        models = {
+            row.id: row
+            for row in (
+                await tenant.session.execute(select(Model).where(Model.id.in_(model_ids)))
+            ).scalars()
+        }
+    if voice_ids:
+        voices = {
+            row.id: row
+            for row in (
+                await tenant.session.execute(select(Voice).where(Voice.id.in_(voice_ids)))
+            ).scalars()
+        }
+
+    labels: dict[str, str | None] = {}
+    for label, provider_column, model_column, voice_column in _PROVIDER_TIERS:
+        provider = providers.get(getattr(version, provider_column))
+        if provider is None:
+            labels[label] = None
+            continue
+        model = models.get(getattr(version, model_column))
+        labels[label] = (
+            f"{provider.display_name} / {model.slug}" if model else provider.display_name
+        )
+        if voice_column is not None and label == "tts_label":
+            voice = voices.get(getattr(version, voice_column))
+            labels["voice_label"] = voice.name if voice else None
+
+    labels.setdefault("voice_label", None)
+    return labels
 
 
 async def _version_response(tenant: CurrentTenant, version: AgentVersion) -> AgentVersionResponse:
+    """Serialise a version, refreshing what the database wrote itself.
+
+    ``updated_at`` carries ``onupdate=func.now()``, so after an UPDATE its
+    value lives in PostgreSQL and not in the instance. Reading it during
+    serialisation then attempts lazy IO from pydantic's synchronous context and
+    raises ``MissingGreenlet`` — an error that names greenlets and not the
+    actual problem.
+
+    This was reachable before the provider tiers existed but almost never hit:
+    ``onupdate`` only fires when a column actually changes, and the builder
+    used to send so few fields that a save was frequently a no-op. Adding the
+    tier fields made every save a real UPDATE, which turned an occasional
+    failure into a certain one.
+    """
+    await tenant.session.refresh(version)
     payload = AgentVersionResponse.model_validate(version, from_attributes=True)
     return payload.model_copy(update=await _version_labels(tenant, version))
 
@@ -536,15 +604,17 @@ async def _validate_references(
     without tenant scoping; the knowledge base is tenant-owned and goes through
     the repository.
     """
-    for field, model in (
-        ("stt_provider_id", Provider),
-        ("llm_provider_id", Provider),
-        ("tts_provider_id", Provider),
-        ("stt_model_id", Model),
-        ("llm_model_id", Model),
-        ("tts_model_id", Model),
-        ("voice_id", Voice),
-    ):
+    # Derived from the tier table rather than listed again: a new tier that is
+    # rendered in the builder but not validated here would accept a dangling
+    # foreign key and fail at call setup instead.
+    references: list[tuple[str, type[Provider] | type[Model] | type[Voice]]] = []
+    for _label, provider_column, model_column, voice_column in _PROVIDER_TIERS:
+        references.append((provider_column, Provider))
+        references.append((model_column, Model))
+        if voice_column is not None:
+            references.append((voice_column, Voice))
+
+    for field, model in references:
         value = changes.get(field)
         if value is None:
             continue

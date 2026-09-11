@@ -347,6 +347,19 @@ Agent Builder UI operations: Save Draft, Test, Publish, Rollback. [§62]
 
 **A non-developer must be able to configure all of the above.** [§62]
 
+**Provider selection is part of the builder, not a separate administrative step.** Each of
+the three stages offers a provider, a model and — for TTS — a voice, per tier (§11.5), with the
+catalog's default pre-selected and the model list filtered to the chosen provider. The API key
+for a chosen provider is entered in place, with a *Test connection* that makes one real request
+and reports what it checked.
+
+Only `ACTIVE` catalog rows are offered. A retired provider would be rejected by pre-publish
+validation (§9.5), so offering it produces a choice that cannot be published and an error that
+reads like a fault — the builder's options and the validator's rules must be the same set. A
+version that already references a since-retired row keeps it: the version is an immutable
+snapshot, and its label still resolves so the builder shows what is configured even when it is
+no longer selectable.
+
 ### 9.2 Agent Versioning [§19]
 
 Agents must have versions, e.g. `v1 Published`, `v2 Draft`, `v3 Testing`.
@@ -495,6 +508,14 @@ class TTSProvider:
 
 **Provider-specific code must remain inside provider adapters.** [§24]
 
+**A provider row is an endpoint; an adapter is the code that speaks to it.** These are
+separate columns (`providers.slug`, `providers.adapter`) because one protocol serves many
+endpoints: §25 requires a tenant to choose between a hosted model and a local one, and both
+may be OpenAI-compatible. While the two were a single column — unique per kind — the catalog
+could hold only one row per protocol, and the local fallback tier had nothing distinct to point
+at. `adapter` is nullable and falls back to the slug, so a row registered before the split
+resolves exactly as it did.
+
 ### 11.2 Supported Providers [§25]
 
 | Kind | Providers |
@@ -540,6 +561,23 @@ All AI providers must have: **Timeout, Retry, Exponential Backoff, Circuit Break
 Fallback Provider**.
 
 **A provider failure must not crash the complete worker pool.** [§55]
+
+**Fallback Provider is configured per agent, as an ordered chain**: primary → fallback →
+local. The tiers are named rather than numbered because they answer different questions —
+a fallback insures against a vendor having a bad day, a local endpoint against the internet
+being unavailable — and an anonymous ordered list hides that distinction from whoever has to
+operate it. LLM has no local tier: a self-hosted language model is a deployment decision with
+its own hardware, not a switch a tenant can flip.
+
+The chain is resolved by the worker into LiveKit's own `FallbackAdapter` for each stage, rather
+than a retry wrapper of the platform's making: those adapters already know which errors are
+worth failing over for and recover to the primary when it returns.
+
+**Status, stated plainly: one of the five is implemented.** Fallback works for a provider that
+*errors*. A provider that has become slow does not trigger it, because there is no timeout
+policy to trip; and there is no circuit breaker, so a dying provider is retried on every call.
+Plan item 4b.10 covers the remaining four. A fallback tier is worth having and is not the same
+thing as the resilience §55 asks for.
 
 ---
 
@@ -959,6 +997,7 @@ Transcripts · Analytics · Users · Usage · Settings.
 |---|---|---|---|
 | Dashboard | `/` | several | — |
 | AI Agents + Versions [§18, §19] | `/agents` | `/agents/**` | `agents.read` / `agents.write` / `agents.publish` |
+| AI catalog + provider keys [§24, §26] | `/agents` (in the builder) | `/catalog`, `/catalog/credentials**` | `agents.read` to list, `agents.write` to store, rotate, test or delete a key |
 | PBXs [§14] | `/pbxs` | `/pbxs/**` | `pbxs.read` / `pbxs.write` |
 | SIP Trunks [§15] | `/sip-trunks` | `/sip-trunks/**` | `sip_trunks.read` / `sip_trunks.write` |
 | Phone Numbers [§17] | `/phone-numbers` | `/phone-numbers/**` | `sip_trunks.*` |
@@ -1069,6 +1108,15 @@ configuration**. [§75]
 The end-to-end tenant-administrator journey in §3.4 of this document must be completable
 entirely through the UI, with no source-code modification, no direct database modification,
 no SSH, and no manual LiveKit CLI configuration.
+
+**Where this stands.** The last CLI-only step in the tenant path — storing a provider API key
+(`set-credential`) — is now in the console, alongside model selection and a live connection
+test, so a tenant administrator can configure PBX → trunk → DID → agent → providers → keys
+without shell access. What remains between here and §77 is not a missing screen: a routing rule
+created in the console is still not consulted at call setup (Plan 4b.3), so the journey can be
+*completed* through the UI while one of the things it configures does not yet take effect. The
+criterion is about the absence of a CLI step, and that is met; it is worth stating alongside
+what the configured system then does.
 
 ### 19.2 Definition of Done (platform)
 

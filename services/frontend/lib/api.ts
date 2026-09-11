@@ -374,6 +374,21 @@ export interface AgentVersion {
   tts_provider_id: string | null;
   tts_model_id: string | null;
   voice_id: string | null;
+
+  // Fallback tier (spec 55) and the local last resort (spec 25).
+  stt_fallback_provider_id: string | null;
+  stt_fallback_model_id: string | null;
+  llm_fallback_provider_id: string | null;
+  llm_fallback_model_id: string | null;
+  tts_fallback_provider_id: string | null;
+  tts_fallback_model_id: string | null;
+  tts_fallback_voice_id: string | null;
+  stt_local_provider_id: string | null;
+  stt_local_model_id: string | null;
+  tts_local_provider_id: string | null;
+  tts_local_model_id: string | null;
+  tts_local_voice_id: string | null;
+
   temperature: number | null;
   interruption_enabled: boolean;
   interruption_min_words: number;
@@ -394,8 +409,84 @@ export interface AgentVersion {
   llm_label: string | null;
   tts_label: string | null;
   voice_label: string | null;
+  stt_fallback_label: string | null;
+  llm_fallback_label: string | null;
+  tts_fallback_label: string | null;
+  stt_local_label: string | null;
+  tts_local_label: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The AI catalog, as a tenant sees it (spec 24, 25, 26).
+ *
+ * Narrower than the platform's own view on purpose: no credential counts
+ * across tenants, and no base URLs for the platform's internal endpoints.
+ */
+export interface CatalogProvider {
+  id: string;
+  kind: ProviderKind;
+  slug: string;
+  display_name: string;
+  supports_streaming: boolean;
+  requires_credential: boolean;
+  /** Whether this tenant has already stored a key for it. */
+  credential_set: boolean;
+  /** Runs on the platform's own network rather than a public API. */
+  self_hosted: boolean;
+}
+
+export interface CatalogModelEntry {
+  id: string;
+  provider_id: string;
+  provider_kind: ProviderKind;
+  slug: string;
+  display_name: string;
+  languages: string[];
+  is_default: boolean;
+}
+
+export interface CatalogVoiceEntry {
+  id: string;
+  provider_id: string;
+  name: string;
+  language: string | null;
+  accent: string | null;
+  description: string | null;
+  is_default: boolean;
+}
+
+export interface Catalog {
+  providers: CatalogProvider[];
+  models: CatalogModelEntry[];
+  voices: CatalogVoiceEntry[];
+}
+
+export interface ProviderCredential {
+  id: string;
+  provider_id: string;
+  provider_slug: string | null;
+  provider_kind: ProviderKind | null;
+  provider_display_name: string | null;
+  label: string;
+  status: ResourceStatus;
+  /** Last four characters. The key itself is never returned. */
+  key_hint: string | null;
+  base_url: string | null;
+  last_verified_at: string | null;
+  rotated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CredentialVerifyResult {
+  ok: boolean;
+  status_code: number | null;
+  detail: string;
+  checked_url: string;
+  latency_ms: number | null;
+  verified_at: string | null;
 }
 
 export interface ValidationIssue {
@@ -1093,6 +1184,39 @@ export const api = {
     },
     disable(id: string): Promise<PhoneNumber> {
       return request<PhoneNumber>(`/phone-numbers/${id}/disable`, { method: "POST" });
+    },
+  },
+
+  catalog: {
+    /**
+     * Providers, models and voices this tenant may select, in one request.
+     *
+     * Active rows only, which is what keeps the builder's options and the
+     * pre-publish validator's rules the same set.
+     */
+    get(): Promise<Catalog> {
+      return request<Catalog>("/catalog");
+    },
+    credentials(): Promise<ProviderCredential[]> {
+      return request<ProviderCredential[]>("/catalog/credentials");
+    },
+    /** Store or rotate one provider key. The key is never read back. */
+    setCredential(input: {
+      provider_id: string;
+      api_key: string;
+      base_url?: string | null;
+      label?: string;
+    }): Promise<ProviderCredential> {
+      return request<ProviderCredential>("/catalog/credentials", { method: "PUT", body: input });
+    },
+    /** One real request to the provider. Resolves even when the key is bad. */
+    verifyCredential(id: string): Promise<CredentialVerifyResult> {
+      return request<CredentialVerifyResult>(`/catalog/credentials/${id}/verify`, {
+        method: "POST",
+      });
+    },
+    removeCredential(id: string): Promise<void> {
+      return request<void>(`/catalog/credentials/${id}`, { method: "DELETE" });
     },
   },
 
