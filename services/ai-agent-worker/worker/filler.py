@@ -32,16 +32,20 @@ logger = get_logger(__name__)
 
 #: How long the agent may think silently before it acknowledges the caller.
 #:
-#: Measured, not guessed: the LLM answers in roughly 800 ms on a normal turn,
-#: so a 600 ms threshold fired on almost every turn and lost the race — the
-#: filler landed *after* the answer, giving the caller "Thanks! How can I help?"
-#: followed by "Let me pull that up." That is worse than the silence it set out
-#: to cover.
+#: Measured on live calls, and both obvious values were wrong:
 #:
-#: 1.2 s clears an ordinary turn and leaves the filler for the waits that are
-#: genuinely long: a tool call, a slow provider, a retry. Those are the only
-#: ones a caller notices.
-FILLER_AFTER_S = 1.2
+#: * **1.2 s never fires.** The thinking phase lasts only about a second —
+#:   LLM first token at 988 ms — so the state leaves "thinking" before the
+#:   timer expires. A filler nobody ever hears.
+#: * **0.6 s fires but leaves no room.** The reply's audio starts around 2 s
+#:   after the turn commits, so a filler beginning at 600 ms has to synthesise
+#:   and play inside 1.4 s or it collides with the answer.
+#:
+#: 350 ms starts the filler while the LLM is still producing its first token,
+#: giving roughly 1.6 s of room before the answer's audio is ready — enough for
+#: any phrase here. The `scheduled` guard below is what keeps it off audio that
+#: is already playing.
+FILLER_AFTER_S = 0.35
 
 #: Phrases spoken while the answer is still being produced.
 #:
@@ -84,6 +88,20 @@ class ThinkingFiller:
         self._after = after_seconds
         self._phrases = phrases
         self._task: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        #: State as reported by the events themselves. ``session.agent_state``
+        #: did not agree with them: the timer armed on a "thinking" event, and
+        #: 350 ms later the property already read something else while the
+        #: session went on thinking for another two seconds. The event stream
+        #: is the signal that armed the timer, so it is the one that decides
+        #: whether to speak.
+        self._state: str | None = None
+        #: Incremented on every arm and disarm. Task creation is deferred
+        #: through ``call_soon_threadsafe``, so ``_disarm`` can run before the
+        #: task exists and would have nothing to cancel — the caller resumes
+        #: mid-pause and gets a filler anyway. The token makes a stale creation
+        #: a no-op instead.
+        self._generation = 0
         self._last: str | None = None
         self._spoken = 0
 
@@ -93,19 +111,73 @@ class ThinkingFiller:
         return self._spoken
 
     def attach(self) -> None:
+        # Both events. ``user_state_changed`` is the one that can still get a
+        # word in — see ``_on_user_state``. ``agent_state_changed`` is kept
+        # only to disarm, so a filler never lands after the answer.
+        # Captured here, where we are certainly on the session's loop.
+        # ``agent_state_changed`` is dispatched from a synchronous callback that
+        # is not guaranteed to run on it, and ``asyncio.create_task`` there
+        # raises "no running event loop" — an exception the emitter swallows,
+        # so the filler simply never spoke and logged nothing at all. That cost
+        # three rounds of looking in the wrong place.
+        self._loop = asyncio.get_running_loop()
+        self._session.on("user_state_changed", self._on_user_state)
         self._session.on("agent_state_changed", self._on_state)
 
     def _on_state(self, event: Any) -> None:
-        if getattr(event, "new_state", None) == "thinking":
+        logger.debug(
+            "filler_saw_state",
+            extra={
+                "old": getattr(event, "old_state", None),
+                "new": getattr(event, "new_state", None),
+            },
+        )
+        self._state = getattr(event, "new_state", None)
+        # Never arm on "thinking": by then LiveKit has already queued the reply,
+        # `session.say` has no priority argument, and the filler plays *after*
+        # the answer. Measured — the reply's handle reads `scheduled` within
+        # 350 ms of the turn committing, two seconds before its audio starts.
+        if self._state != "thinking":
+            self._disarm()
+
+    def _on_user_state(self, event: Any) -> None:
+        """Arm when the caller stops speaking, before the turn is committed.
+
+        This is the only window where a filler can still be queued ahead of the
+        reply: the endpointing window (Plan 2b.7) is over a second long, and the
+        reply is not created until it closes.
+
+        It means the filler can begin while the caller is only pausing. That is
+        what a person does — "mm-hm, let me check" over the end of a sentence —
+        and it is interruptible, so a caller who carries on wins.
+        """
+        if getattr(event, "new_state", None) == "listening":
             self._arm()
         else:
             self._disarm()
 
     def _arm(self) -> None:
         self._disarm()
-        self._task = asyncio.create_task(self._speak_after_delay())
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+
+        self._generation += 1
+        generation = self._generation
+
+        def _create() -> None:
+            if generation != self._generation:
+                # Disarmed between scheduling and running: the caller carried
+                # on, or the agent started answering.
+                return
+            self._task = loop.create_task(self._speak_after_delay(generation))
+            logger.debug("filler_armed", extra={"after_s": self._after})
+
+        # Thread-safe, because the callback may not be on the session's loop.
+        loop.call_soon_threadsafe(_create)
 
     def _disarm(self) -> None:
+        self._generation += 1
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None
@@ -119,32 +191,58 @@ class ThinkingFiller:
         # secret, so a CSPRNG here would be cargo cult.
         return random.choice(options)  # noqa: S311
 
-    async def _speak_after_delay(self) -> None:
+    async def _speak_after_delay(self, generation: int) -> None:
         try:
+            logger.debug("filler_timer_running", extra={"after_s": self._after})
             await asyncio.sleep(self._after)
+
+            if generation != self._generation:
+                return
 
             # Re-checked after the wait, not before it: the answer usually
             # arrives during this sleep, and speaking then would talk over it.
-            if self._session.agent_state != "thinking":
+            if self._state == "speaking":
+                logger.debug("filler_skipped_agent_already_speaking")
                 return
 
-            # `agent_state` lags the speech handle. On a real call the reply had
+            # `agent_state` lags the reply. On a real call the answer had
             # already begun while the state still read "thinking", so the state
-            # check alone passed and the filler was queued *behind* the answer.
-            # The handle is the earlier signal, so it is the one that decides.
-            if getattr(self._session, "current_speech", None) is not None:
-                logger.debug("filler_skipped_reply_already_started")
-                return
+            # check alone passed and the filler was queued *behind* it.
+            #
+            # But the mere existence of a handle is the wrong test, and testing
+            # it that way suppressed every filler on every call: LiveKit creates
+            # the handle when generation *starts*, which is the whole period
+            # this is meant to cover. `scheduled` is the property that says
+            # audio is actually going out, which is the thing not to talk over.
+            # No `current_speech` check. `scheduled` is set when the reply is
+            # queued, not when its audio starts, so testing it here suppressed
+            # every filler on every call — which is how this was found: by
+            # someone saying they had never heard one.
 
             phrase = self._choose()
             self._last = phrase
             self._spoken += 1
 
-            logger.info("filler_spoken", extra={"phrase": phrase, "after_s": self._after})
+            logger.info(
+                "filler_spoken",
+                extra={
+                    "phrase": phrase,
+                    "after_s": self._after,
+                    "agent_state": self._state,
+                },
+            )
 
             # Interruptible: if the caller carries on talking, the filler must
             # give way like any other agent speech (spec 29).
-            await self._session.say(phrase, allow_interruptions=True)
+            await self._session.say(
+                phrase,
+                allow_interruptions=True,
+                # Kept out of the conversation history. "One moment." is not
+                # something the model said about the caller's problem, and
+                # feeding it back teaches the agent that filler is part of its
+                # own voice — it starts producing it in real answers.
+                add_to_chat_ctx=False,
+            )
         except asyncio.CancelledError:
             # The answer arrived first. Nothing to clean up and nothing worth
             # logging — this is the common case.

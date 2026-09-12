@@ -20,6 +20,14 @@ from worker.endpointing import (
 from worker.filler import FILLER_PHRASES, ThinkingFiller
 
 
+class _Speech:
+    """A SpeechHandle stand-in. `scheduled` is the property that separates
+    "generating a reply" from "audio is going out"."""
+
+    def __init__(self, *, scheduled: bool) -> None:
+        self.scheduled = scheduled
+
+
 class FakeSession:
     """Enough AgentSession to drive the filler."""
 
@@ -38,7 +46,19 @@ class FakeSession:
         self.said.append(text)
 
     def emit(self, new_state: str) -> None:
+        """An agent_state_changed event."""
         handler = self._handlers.get("agent_state_changed")
+        if handler:
+            handler(type("Event", (), {"new_state": new_state})())
+
+    def emit_user(self, new_state: str) -> None:
+        """A user_state_changed event — what actually arms the filler.
+
+        The filler cannot arm on "thinking": by then LiveKit has queued the
+        reply and `session.say` has no priority argument, so the filler would
+        play after the answer.
+        """
+        handler = self._handlers.get("user_state_changed")
         if handler:
             handler(type("Event", (), {"new_state": new_state})())
 
@@ -61,50 +81,43 @@ class TestTheWindowClearsMeasuredTranscription:
         assert MAX_ENDPOINTING_DELAY_S > MIN_ENDPOINTING_DELAY_S
 
 
-class TestFillerOnlyCoversRealWaits:
-    @pytest.mark.asyncio
-    async def test_a_fast_answer_produces_no_filler(self) -> None:
-        """The answer arrived during the delay, so nothing is spoken.
+class TestFillerIsQueuedAheadOfTheReply:
+    """The filler arms when the caller stops speaking, not when the agent
+    starts thinking. By "thinking" the reply is already queued and the filler
+    would land after the answer — which is what happened on a real call."""
 
-        This is the case that matters most: a filler here would talk over the
-        reply and add a turn rather than cover one.
-        """
+    @pytest.mark.asyncio
+    async def test_it_speaks_when_the_caller_stops(self) -> None:
         session = FakeSession()
         ThinkingFiller(session, after_seconds=0.05).attach()
 
-        session.emit("thinking")
-        session.agent_state = "speaking"
-        session.emit("speaking")
-        await asyncio.sleep(0.15)
-
-        assert session.said == []
-
-    @pytest.mark.asyncio
-    async def test_a_slow_answer_gets_one_filler(self) -> None:
-        session = FakeSession()
-        ThinkingFiller(session, after_seconds=0.05).attach()
-
-        session.emit("thinking")
+        session.emit_user("listening")
         await asyncio.sleep(0.15)
 
         assert len(session.said) == 1
         assert session.said[0] in FILLER_PHRASES
 
     @pytest.mark.asyncio
-    async def test_no_filler_once_the_reply_has_started_speaking(self) -> None:
-        """The regression this was written for.
-
-        On a real call the reply had begun while `agent_state` still read
-        "thinking", so the state check passed and the filler was queued behind
-        the answer — the caller heard "How can I assist you today?" followed by
-        "Let me pull that up." The speech handle is the earlier signal.
-        """
+    async def test_the_caller_resuming_cancels_it(self) -> None:
+        """A pause is not the end of a turn. If they carry on, say nothing."""
         session = FakeSession()
-        ThinkingFiller(session, after_seconds=0.03).attach()
+        ThinkingFiller(session, after_seconds=0.05).attach()
 
-        session.emit("thinking")
-        session.current_speech = object()  # reply under way, state not yet updated
-        await asyncio.sleep(0.1)
+        session.emit_user("listening")
+        session.emit_user("speaking")
+        await asyncio.sleep(0.15)
+
+        assert session.said == []
+
+    @pytest.mark.asyncio
+    async def test_it_stays_quiet_once_the_agent_is_speaking(self) -> None:
+        """Never talk over the answer."""
+        session = FakeSession()
+        ThinkingFiller(session, after_seconds=0.05).attach()
+
+        session.emit_user("listening")
+        session.emit("speaking")
+        await asyncio.sleep(0.15)
 
         assert session.said == []
 
@@ -113,12 +126,11 @@ class TestFillerOnlyCoversRealWaits:
         """Saying "one moment" twice running sounds broken in a way silence
         does not."""
         session = FakeSession()
-        filler = ThinkingFiller(session, after_seconds=0.02)
-        filler.attach()
+        ThinkingFiller(session, after_seconds=0.02).attach()
 
         for _ in range(6):
-            session.agent_state = "thinking"
-            session.emit("thinking")
+            session.emit_user("speaking")
+            session.emit_user("listening")
             await asyncio.sleep(0.06)
 
         assert len(session.said) == 6
@@ -138,7 +150,7 @@ class TestFillerOnlyCoversRealWaits:
         session.say = boom  # type: ignore[method-assign]
         ThinkingFiller(session, after_seconds=0.02).attach()
 
-        session.emit("thinking")
+        session.emit_user("listening")
         await asyncio.sleep(0.08)  # must not raise
 
 
