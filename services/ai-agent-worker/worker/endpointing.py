@@ -37,6 +37,11 @@ def turn_handling_for(policy: CallPolicy) -> dict[str, Any]:
     once ``turn_handling`` is set, so interruption belongs here too.
     """
     return {
+        # VAD, not the default TurnDetector: constructing that detector's
+        # local EOT model is 537 ms of synchronous work inside
+        # AgentSession.start (Plan 2b.11). With min_delay=2.0 the model
+        # cannot commit a turn earlier than the window anyway.
+        "turn_detection": "vad",
         "endpointing": {
             "mode": "fixed",
             "min_delay": MIN_ENDPOINTING_DELAY_S,

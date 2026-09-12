@@ -142,6 +142,7 @@ class TestBuildSessionPassesPolicy:
         assert endpointing["min_delay"] == 2.0
         assert endpointing["max_delay"] == 6.0
         assert endpointing["mode"] == "fixed"
+        assert kwargs["turn_handling"]["turn_detection"] == "vad"
 
     def test_deprecated_top_level_interruption_kwargs_are_not_set(self) -> None:
         """Once turn_handling is passed, top-level kwargs are ignored by LiveKit."""

@@ -254,6 +254,7 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
         extra={
             "min_delay_s": turn_handling["endpointing"]["min_delay"],
             "max_delay_s": turn_handling["endpointing"]["max_delay"],
+            "turn_detection": turn_handling["turn_detection"],
             "interruptions": turn_handling["interruption"]["enabled"],
         },
     )
@@ -546,7 +547,12 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
     with log_context(**context.log_fields()):
         recording_info: _RecordingInfo | None = None
         try:
+            built_at = asyncio.get_running_loop().time()
             session = _build_session(context, ctx.proc.userdata["vad"])
+            logger.info(
+                "session_built",
+                extra={"elapsed_ms": int((asyncio.get_running_loop().time() - built_at) * 1000)},
+            )
 
             # Attached before the session starts so the first turn is not
             # missed. Wrapped because observability must never be able to end
@@ -561,6 +567,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
 
             await tracker.transition(CallState.AI_CONNECTED)
 
+            started_at = asyncio.get_running_loop().time()
             await session.start(
                 agent=_build_agent(context),
                 room=ctx.room,
@@ -570,6 +577,10 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
                     # latency for no gain.
                     noise_cancellation=None,
                 ),
+            )
+            logger.info(
+                "session_started",
+                extra={"elapsed_ms": int((asyncio.get_running_loop().time() - started_at) * 1000)},
             )
 
             await tracker.transition(CallState.IN_PROGRESS)
@@ -734,6 +745,10 @@ def prewarm(proc: agents.JobProcess) -> None:
     It is process-wide rather than per-call because the model is stateless and
     identical for every tenant: nothing about it is configuration (spec 23), so
     sharing it changes no behaviour.
+
+    The LiveKit default turn detector is not loaded here. Its local EOT model
+    is 537 ms on first construct and cannot commit a turn earlier than our
+    2 s min_delay, so ``turn_handling`` uses VAD instead (Plan 2b.11).
     """
     from livekit.plugins import silero
 

@@ -8,12 +8,15 @@ returns.
 
 from __future__ import annotations
 
+import inspect
+
 from worker.config_loader import CallPolicy
 from worker.endpointing import (
     MAX_ENDPOINTING_DELAY_S,
     MIN_ENDPOINTING_DELAY_S,
     turn_handling_for,
 )
+from worker.entrypoint import prewarm
 
 # Plan §12.1, call_20260911T063710 (hosted STT, the number to tune against).
 _HOSTED_STT_S = 1.103
@@ -59,6 +62,19 @@ class TestTurnHandlingFor:
         assert handling["endpointing"]["min_delay"] == MIN_ENDPOINTING_DELAY_S
         assert handling["endpointing"]["max_delay"] == MAX_ENDPOINTING_DELAY_S
         assert handling["endpointing"]["mode"] == "fixed"
+
+    def test_uses_vad_not_the_local_eot_model(self) -> None:
+        """2b.11: the default TurnDetector loads EOT() for 537 ms in start()."""
+        handling = turn_handling_for(_policy())
+        assert handling["turn_detection"] == "vad"
+
+
+class TestPrewarmStaysOnSilero:
+    def test_prewarm_does_not_load_the_eot_model(self) -> None:
+        src = inspect.getsource(prewarm)
+        assert "silero.VAD.load" in src
+        assert "TurnDetector" not in src
+        assert "EOT()" not in src
 
     def test_forwards_interruption_off(self) -> None:
         handling = turn_handling_for(_policy(interruption_enabled=False, interruption_min_words=5))
