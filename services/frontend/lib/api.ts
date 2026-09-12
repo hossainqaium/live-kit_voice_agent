@@ -584,6 +584,34 @@ export type CallState =
   | "TRANSFERRING" | "HUMAN_AGENT" | "COMPLETED"
   | "FAILED" | "TIMEOUT" | "CANCELLED" | "BUSY" | "NO_ANSWER";
 
+export type TicketStatus = "OPEN" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
+export type TicketPriority = "LOW" | "NORMAL" | "HIGH" | "URGENT";
+export type TicketSource = "MANUAL" | "AGENT";
+
+export interface Ticket {
+  id: string;
+  ticket_number: string;
+  title: string;
+  description: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  source: TicketSource;
+  caller_number: string | null;
+  agent_id: string | null;
+  call_id: string | null;
+  agent_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TicketInput {
+  title: string;
+  description?: string;
+  priority?: TicketPriority;
+  caller_number?: string | null;
+  status?: TicketStatus;
+}
+
 export interface Call {
   id: string;
   call_id: string;
@@ -1495,6 +1523,23 @@ export const api = {
     },
     get(id: string): Promise<CallDetail> {
       return request<CallDetail>(`/calls/${id}`);
+    },
+  },
+
+  tickets: {
+    list(limit = 50, offset = 0, status?: TicketStatus): Promise<Page<Ticket>> {
+      const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (status) query.set("status", status);
+      return request<Page<Ticket>>(`/tickets?${query.toString()}`);
+    },
+    create(input: TicketInput): Promise<Ticket> {
+      return request<Ticket>("/tickets", { method: "POST", body: input });
+    },
+    update(id: string, input: Partial<TicketInput>): Promise<Ticket> {
+      return request<Ticket>(`/tickets/${id}`, { method: "PUT", body: input });
+    },
+    remove(id: string): Promise<void> {
+      return request<void>(`/tickets/${id}`, { method: "DELETE" });
     },
   },
   routingRules: {

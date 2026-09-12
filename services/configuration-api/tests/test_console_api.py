@@ -466,6 +466,7 @@ class TestPermissionsAreDeclaredForEverySection:
             ("/api/v1/recordings", Permission.RECORDINGS_READ),
             ("/api/v1/routing-rules", Permission.AGENTS_READ),
             ("/api/v1/tools", Permission.AGENTS_READ),
+            ("/api/v1/tickets", Permission.CALLS_READ),
         ],
     )
     def test_the_section_checks_the_permission_its_menu_entry_claims(

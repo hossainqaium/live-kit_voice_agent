@@ -24,6 +24,7 @@ from app.api.v1 import (
     platform,
     routing,
     sip_trunks,
+    tickets,
     tools,
 )
 from app.core.dependencies import reject_client_tenant_id
@@ -41,6 +42,7 @@ api_router.include_router(browser_test.router)
 api_router.include_router(calls.router)
 api_router.include_router(routing.router)
 api_router.include_router(tools.router)
+api_router.include_router(tickets.router)
 api_router.include_router(admin.router)
 
 # Platform console last, and under its own /platform prefix, so a tenant route

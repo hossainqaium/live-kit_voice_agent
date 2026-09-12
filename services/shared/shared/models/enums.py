@@ -501,6 +501,36 @@ class DayOfWeek(StrEnum):
 
 
 # --------------------------------------------------------------------------- #
+# Tickets (Phase 6.0)
+# --------------------------------------------------------------------------- #
+
+
+class TicketStatus(StrEnum):
+    OPEN = "OPEN"
+    IN_PROGRESS = "IN_PROGRESS"
+    RESOLVED = "RESOLVED"
+    CLOSED = "CLOSED"
+
+
+class TicketPriority(StrEnum):
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    URGENT = "URGENT"
+
+
+class TicketSource(StrEnum):
+    """Who filed the ticket.
+
+    MANUAL is the console. AGENT is a function call during a live conversation
+    (Plan 6.1 ``create_ticket()``).
+    """
+
+    MANUAL = "MANUAL"
+    AGENT = "AGENT"
+
+
+# --------------------------------------------------------------------------- #
 # Billing
 # --------------------------------------------------------------------------- #
 

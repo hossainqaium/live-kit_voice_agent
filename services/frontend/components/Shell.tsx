@@ -75,6 +75,7 @@ const TENANT_NAV: NavGroup[] = [
   {
     label: "Activity",
     entries: [
+      { label: "Tickets", href: "/tickets", permission: "calls.read" },
       { label: "Calls", href: "/calls", permission: "calls.read" },
       { label: "Transcripts", href: "/calls", permission: "calls.read" },
       // Live, and empty until the worker starts egress (Plan 2b.3).

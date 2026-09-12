@@ -36,6 +36,12 @@ _MIGRATION_FILE = (
     / "versions"
     / "20260912_1200_row_level_security.py"
 )
+_TICKETS_MIGRATION_FILE = (
+    Path(__file__).parent.parent
+    / "alembic"
+    / "versions"
+    / "20260912_1715_tickets.py"
+)
 
 
 @pytest.fixture(scope="module")
@@ -49,40 +55,60 @@ def migration():
     return mod
 
 
+@pytest.fixture(scope="module")
+def later_rls_tables() -> frozenset[str]:
+    """Tables that gained RLS in revisions after the original 27-table pass."""
+    spec = importlib.util.spec_from_file_location("tickets_rls", _TICKETS_MIGRATION_FILE)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return frozenset(mod._ADDITIONAL_RLS_TABLES)
+
+
+def _covered(migration, later_rls_tables: frozenset[str]) -> frozenset[str]:
+    return frozenset(migration._TENANT_OWNED_TABLES) | later_rls_tables
+
+
 # --------------------------------------------------------------------------- #
 # Table-list parity
 # --------------------------------------------------------------------------- #
 
 
 class TestTableListParity:
-    def test_migration_covers_every_tenant_owned_table(self, migration) -> None:
-        """Adding a model to TENANT_OWNED_TABLES without touching the migration
-        means that model has no RLS policy — a potential cross-tenant leak."""
-        migration_tables = frozenset(migration._TENANT_OWNED_TABLES)
-        missing = TENANT_OWNED_TABLES - migration_tables
+    def test_migration_covers_every_tenant_owned_table(
+        self, migration, later_rls_tables: frozenset[str]
+    ) -> None:
+        """Adding a model to TENANT_OWNED_TABLES without touching an RLS
+        migration means that model has no policy — a potential leak."""
+        missing = TENANT_OWNED_TABLES - _covered(migration, later_rls_tables)
         assert not missing, (
-            f"Tables in TENANT_OWNED_TABLES but absent from the RLS migration: "
-            f"{sorted(missing)}.  Add them to _TENANT_OWNED_TABLES in "
-            f"20260912_1200_row_level_security.py"
+            f"Tables in TENANT_OWNED_TABLES but absent from RLS migrations: "
+            f"{sorted(missing)}. Add them to the original list or to "
+            f"_ADDITIONAL_RLS_TABLES on a later revision."
         )
 
-    def test_migration_has_no_extra_tables(self, migration) -> None:
-        """Tables in the migration but not in the model registry are orphaned
-        RLS policies — either the table was dropped or the registry is stale."""
-        migration_tables = frozenset(migration._TENANT_OWNED_TABLES)
-        extra = migration_tables - TENANT_OWNED_TABLES
+    def test_migration_has_no_extra_tables(
+        self, migration, later_rls_tables: frozenset[str]
+    ) -> None:
+        extra = _covered(migration, later_rls_tables) - TENANT_OWNED_TABLES
         assert not extra, (
-            f"Tables in the RLS migration but absent from TENANT_OWNED_TABLES: "
-            f"{sorted(extra)}.  Remove them from _TENANT_OWNED_TABLES or add "
-            f"them to the model registry."
+            f"Tables in RLS migrations but absent from TENANT_OWNED_TABLES: "
+            f"{sorted(extra)}."
         )
 
     def test_migration_table_list_has_no_duplicates(self, migration) -> None:
         tables = migration._TENANT_OWNED_TABLES
         assert len(tables) == len(set(tables)), "Duplicate table names in migration"
 
-    def test_count_matches_registry(self, migration) -> None:
-        assert len(migration._TENANT_OWNED_TABLES) == len(TENANT_OWNED_TABLES)
+    def test_count_matches_registry(self, migration, later_rls_tables: frozenset[str]) -> None:
+        assert len(_covered(migration, later_rls_tables)) == len(TENANT_OWNED_TABLES)
+
+    def test_tickets_revision_applies_rls(self) -> None:
+        src = _TICKETS_MIGRATION_FILE.read_text()
+        assert "ENABLE ROW LEVEL SECURITY" in src
+        assert "FORCE ROW LEVEL SECURITY" in src
+        assert "CREATE POLICY tenant_isolation" in src
+        assert "tickets" in src
 
 
 # --------------------------------------------------------------------------- #

@@ -1045,7 +1045,8 @@ misread as a fault:
 | Barge-in and interruption handling | **Working — Plan 2b.7 + 2b.11 complete (2026-09-12).** `turn_handling` uses VAD plus a **2 s / 6 s** endpointing window so a ~1.1 s transcript still joins its turn. The default local EOT model is not loaded (537 ms off `session.start`). |
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
-| Tools, function calling, RAG | Not yet — Phase 6 |
+| Tools, function calling, RAG | Not yet — Phase 6.1+. Ticketing UI and Server Agent are in (Plan 6.0); the agent cannot file a ticket mid-call until `create_ticket()` is wired. |
+| Ticketing | **Working — Plan 6.0 complete (2026-09-12).** Tenant **Tickets** (`/tickets`): list, create, edit, start/resolve. Seed: **Server Agent** plus `TCK-0001`. Agent-filed tickets (`source=AGENT`) land in 6.1. |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
 | Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 29 providers across LLM/STT/TTS/Embedding. See [`AIProviders.md`](./AIProviders.md). |
@@ -1059,7 +1060,7 @@ misread as a fault:
 | Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
 | Provider timeout, retry, backoff, circuit breaker | **Working — Plan 4b.10 complete (2026-09-12).** Per-stage `httpx.Timeout` (STT/TTS read=30s, LLM read=120s); per-provider circuit breaker (5-failure threshold, 60s recovery); `FallbackAdapter` latency trip-wire (`attempt_timeout` = 12s STT, 10s LLM/TTS); `async_retry()` with jittered exponential backoff for non-realtime callers. |
 | ElevenLabs TTS adapter | **Working — Plan 4b.6 complete (2026-09-12).** `worker/providers/tts/elevenlabs.py` — slug `elevenlabs`, registered in the registry. Streaming synthesis via WebSocket; `inactivity_timeout=30` prevents stuck connections. |
-| PostgreSQL Row Level Security (second isolation layer) | **Working — Plan 3b.1 complete (2026-09-12).** All 27 `TENANT_OWNED_TABLES` have `ENABLE/FORCE ROW LEVEL SECURITY` + a `tenant_isolation` policy. GUC `app.tenant_id` set transaction-locally in `get_tenant_scope`; platform routes bypass by leaving it unset. Migration: `20260912_1200_row_level_security.py`. 18 new tests. |
+| PostgreSQL Row Level Security (second isolation layer) | **Working — Plan 3b.1 complete (2026-09-12).** All tenant-owned tables have `ENABLE/FORCE ROW LEVEL SECURITY` + a `tenant_isolation` policy (27 originally; `tickets` added in Plan 6.0). GUC `app.tenant_id` set transaction-locally in `get_tenant_scope`; platform routes bypass by leaving it unset. |
 | Post-call conversation summary | **Working — Plan 2b.5 complete (2026-09-12).** `worker/summariser.py` generates a 3-5 sentence summary from transcript segments after the call ends. Stored in `call_transcripts.summary` + `full_text`. Skips calls with fewer than 2 turns; uses tenant's `summary_template` when set (also what Phase 6 warm-transfer whisper reads). 25 new tests. |
 | Audit trail coverage — every mutating endpoint | **Complete — Plan 3b.5 done (2026-09-12).** Fixed gap: `POST /catalog/credentials/{id}/verify` now writes a `credential.verified` audit row. `tests/test_audit_coverage.py` statically walks all `POST/PUT/PATCH/DELETE` routes and asserts `audit.record` is present (direct or via private helper); two intentional exemptions documented. New endpoints without audit fail the test immediately. |
 | Grafana voice-latency dashboard | **Working — Plan 2b.6 complete (2026-09-12).** `deploy/grafana/dashboards/voice-latency.json` — 18 panels auto-provisioned on next Grafana refresh. Covers all 6 spec-56 metrics (STT/LLM/TTS per-stage + time-to-first-response + time-to-first-audio + end-to-end), active calls, worker utilization, provider circuit breaker state, fallbacks. Filter by tenant and agent via template variables. View at http://localhost:3201 (admin/admin). |
@@ -1392,6 +1393,7 @@ navigation and a platform account has no tenant to act in.
 | Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |
 | Tools | `/tools` | HTTP tools with schema validation and a write-only secret (spec 31–33) |
 | Knowledge Bases | `/knowledge-bases` | Create and assign a base; **ingestion is Phase 6** |
+| Tickets | `/tickets` | Support tickets — create and close here; Server Agent files them from a call in 6.1 |
 | Calls / Transcripts | `/calls` | History, per-call detail, transcript and events |
 | Recordings | `/recordings` | Recording metadata; **empty until egress lands (Plan 2b.3)** |
 | Analytics | `/analytics` | Volume and outcomes over a window (spec 57) |
@@ -2045,7 +2047,7 @@ Enforced at **two independent layers** (spec §7, 3b.1):
 
 1. **Application layer — `TenantRepository`:** every query adds `WHERE tenant_id = :tid`; cross-tenant rows are 404, not 403. A tenant ID from the browser is never trusted; identity always comes from the authenticated JWT.
 
-2. **Database layer — PostgreSQL Row Level Security:** all 27 `TENANT_OWNED_TABLES` have `ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` enabled. A `tenant_isolation` policy allows a row only when `app.tenant_id` GUC matches the row's `tenant_id`, or when the GUC is absent (platform/admin routes). The GUC is set transaction-locally in `get_tenant_scope` via `SELECT set_config('app.tenant_id', :tid, true)` so a forgotten `WHERE` clause in a future endpoint still cannot leak cross-tenant data.
+2. **Database layer — PostgreSQL Row Level Security:** every table in `TENANT_OWNED_TABLES` has `ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` enabled. A `tenant_isolation` policy allows a row only when `app.tenant_id` GUC matches the row's `tenant_id`, or when the GUC is absent (platform/admin routes). The GUC is set transaction-locally in `get_tenant_scope` via `SELECT set_config('app.tenant_id', :tid, true)` so a forgotten `WHERE` clause in a future endpoint still cannot leak cross-tenant data.
 
 Migration: `alembic/versions/20260912_1200_row_level_security.py`.
 
@@ -2074,6 +2076,7 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Caller heard silence during transfer | Hold media not configured, or the announcement finished without looping. Check the agent's announcement and hold-media settings. |
 | Transfer never reaches the human agent | `transfer_status` says which step stalled; then check the PBX extension/queue and what SIP response the PBX returned. |
 | A service never becomes ready | `/ready` reports which dependency failed; check PostgreSQL, Redis, LiveKit, object storage. |
+| Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001` and **Server Agent**. Agent-filed tickets wait for Plan 6.1. |
 | AI Setup provider dropdown is empty (no providers listed in any tab) | The platform catalog has not been seeded yet, or a new migration was added and the seed was not re-run. Run `make migrate` then `docker compose ... exec configuration-api python -m app.cli seed-platform`. |
 | `TypeError: Failed to fetch` when opening the agent Configure dialog | The `agent_versions` table is missing the `embedding_provider_id` / `embedding_model_id` columns — run `make migrate`. If the columns exist, check API health with `make health`. |
 | `alembic upgrade head` fails with `type "providerkind" does not exist` | A migration written for a native PostgreSQL enum was applied to a VARCHAR column. Replace the migration body with a no-op (`pass` in `upgrade()`). See Plan §12.4. |

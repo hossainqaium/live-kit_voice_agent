@@ -632,7 +632,8 @@ and survive provider failure.
 
 | # | Work item | Spec |
 |---|---|---|
-| 6.1 | Tools / function calling in the pipeline — `get_customer()`, `check_order()`, `create_order()`, `cancel_order()`, `check_inventory()`, `send_sms()`, `send_email()`, `transfer_call()`; assignable per agent | §30 |
+| ~~6.0~~ | ~~Simple ticketing — tenant `tickets` table, CRUD API, `/tickets` UI; seed one ticket and a **Server Agent** whose job is to file tickets~~ **Done (2026-09-12):** `tickets` is tenant-owned with RLS. `GET/POST /tickets`, `PUT/DELETE /tickets/{id}`. Console **Tickets**. `seed-dev-tenant` creates **Server Agent** (published) and `TCK-0001` ("Lobby access card reader offline"). `create_ticket()` on a live call is 6.1. Tests: `tests/test_tickets.py`. | new |
+| 6.1 | Tools / function calling in the pipeline — `create_ticket()` (Server Agent only) plus `get_customer()`, `check_order()`, `create_order()`, `cancel_order()`, `check_inventory()`, `send_sms()`, `send_email()`, `transfer_call()`; assignable per agent | §30 |
 | 6.2 | API Tool Builder UI — name, description, method, URL, auth, headers, request/response schema, timeout, retry policy | §31 |
 | 6.3 | Variable substitution — `{{customer_id}}`, `{{order_id}}`, `{{caller_number}}` | §31 |
 | 6.4 | Tool schema validation before agent publish | §31 |
@@ -658,6 +659,8 @@ and survive provider failure.
 
 ### Exit criteria
 
+- A tenant administrator can list, create, and close tickets in `/tickets`. Seed data includes one ticket and a **Server Agent**.
+- On a call to Server Agent, the model files a ticket via `create_ticket()` and the row appears in `/tickets` with `source=AGENT`.
 - An agent calls a tenant-configured HTTP tool mid-call and uses the result in its reply.
 - An agent denied the Refund API cannot invoke it, even when the LLM tries. [§32]
 - A tenant knowledge base answers a question that is not in the system prompt, retrieved from

@@ -47,6 +47,7 @@ from app.db.models.telephony import (
     SipTrunk,
 )
 from app.db.models.tenant import Tenant
+from app.db.models.ticket import Ticket
 from app.db.models.tool import Tool, ToolPermission
 
 __all__ = [
@@ -80,6 +81,7 @@ __all__ = [
     "SipTrunk",
     "Subscription",
     "Tenant",
+    "Ticket",
     "Tool",
     "ToolPermission",
     "TransferDestination",
@@ -117,6 +119,7 @@ TENANT_OWNED_TABLES: frozenset[str] = frozenset(
         "sip_trunks",
         "subscriptions",
         "billing",
+        "tickets",
         "tools",
         "tool_permissions",
         "transfer_destinations",

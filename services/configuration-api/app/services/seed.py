@@ -16,6 +16,23 @@ import secrets
 import uuid
 from dataclasses import dataclass
 
+from shared.crypto import CredentialCipher
+from shared.logging import get_logger
+from shared.models import (
+    TENANT_ROLE_PERMISSIONS,
+    AgentVersionState,
+    PbxType,
+    PlatformRole,
+    ProviderKind,
+    RoleScope,
+    RoomStrategy,
+    SipTransport,
+    TicketPriority,
+    TicketSource,
+    TicketStatus,
+    TrunkDirection,
+)
+from shared.models import Permission as PermissionCode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,22 +51,9 @@ from app.db.models import (
     SipCredential,
     SipTrunk,
     Tenant,
+    Ticket,
     Voice,
 )
-from shared.crypto import CredentialCipher
-from shared.logging import get_logger
-from shared.models import (
-    TENANT_ROLE_PERMISSIONS,
-    AgentVersionState,
-    PbxType,
-    PlatformRole,
-    ProviderKind,
-    RoleScope,
-    RoomStrategy,
-    SipTransport,
-    TrunkDirection,
-)
-from shared.models import Permission as PermissionCode
 
 logger = get_logger(__name__)
 
@@ -815,6 +819,93 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
                 priority=100,
                 conditions={"did": spec.did},
                 agent_id=agent.id,
+            )
+        )
+        await session.flush()
+
+    server_agent = (
+        await session.execute(
+            select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == "Server Agent")
+        )
+    ).scalar_one_or_none()
+    if server_agent is None:
+        server_agent = Agent(
+            tenant_id=tenant.id,
+            name="Server Agent",
+            description="Files support tickets when a caller reports a problem",
+        )
+        session.add(server_agent)
+        await session.flush()
+
+    server_version = (
+        await session.execute(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == server_agent.id, AgentVersion.version_number == 1
+            )
+        )
+    ).scalar_one_or_none()
+    if server_version is None:
+        stt = await _provider(session, ProviderKind.STT, "openai_compatible")
+        llm = await _provider(session, ProviderKind.LLM, spec.llm_provider_slug)
+        tts = await _provider(session, ProviderKind.TTS, "openai_compatible")
+        server_version = AgentVersion(
+            tenant_id=tenant.id,
+            agent_id=server_agent.id,
+            version_number=1,
+            state=AgentVersionState.PUBLISHED,
+            language="en",
+            greeting=(
+                "Hello, this is the server desk. Tell me what is broken and I "
+                "will file a ticket."
+            ),
+            system_prompt=(
+                "You are Server Agent. Your job is to file a support ticket "
+                "when a caller reports a problem with a building, room, or "
+                "service. Ask for a short title and what is wrong. Confirm "
+                "before filing. Keep spoken replies brief. Until the ticket "
+                "tool is available, collect the details and tell the caller "
+                "the desk will file the ticket."
+            ),
+            stt_provider_id=stt.id,
+            stt_model_id=await _model_id(session, stt.id, spec.stt_model),
+            llm_provider_id=llm.id,
+            llm_model_id=await _model_id(session, llm.id, spec.llm_model),
+            tts_provider_id=tts.id,
+            tts_model_id=await _model_id(session, tts.id, spec.tts_model),
+            voice_id=await _voice_id(session, tts.id, spec.tts_voice),
+            temperature=0.4,
+            interruption_enabled=True,
+            silence_timeout_seconds=15,
+            max_call_duration_seconds=600,
+            recording_enabled=False,
+            transcription_enabled=True,
+        )
+        session.add(server_version)
+        await session.flush()
+        server_agent.published_version_id = server_version.id
+        await session.flush()
+
+    ticket = (
+        await session.execute(
+            select(Ticket).where(
+                Ticket.tenant_id == tenant.id, Ticket.ticket_number == "TCK-0001"
+            )
+        )
+    ).scalar_one_or_none()
+    if ticket is None:
+        session.add(
+            Ticket(
+                tenant_id=tenant.id,
+                ticket_number="TCK-0001",
+                title="Lobby access card reader offline",
+                description=(
+                    "The card reader at the main lobby door does not beep and "
+                    "the lock stays closed. Seeded example ticket."
+                ),
+                status=TicketStatus.OPEN,
+                priority=TicketPriority.HIGH,
+                source=TicketSource.MANUAL,
+                caller_number=None,
             )
         )
         await session.flush()
