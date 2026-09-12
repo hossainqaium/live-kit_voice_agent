@@ -40,6 +40,7 @@ from app.db.models import (
     Tenant,
     Ticket,
     Tool,
+    TransferDestination,
     Voice,
 )
 from shared.crypto import CredentialCipher
@@ -60,6 +61,7 @@ from shared.models import (
     TicketPriority,
     TicketSource,
     TicketStatus,
+    TransferDestinationKind,
     TrunkDirection,
 )
 from shared.models import Permission as PermissionCode
@@ -173,8 +175,22 @@ _BUILTIN_TOOLS: tuple[tuple[str, str, dict], ...] = (
     ),
     (
         "transfer_call",
-        "Request a warm transfer to a human. Not available until Phase 6.9.",
-        {"type": "object", "properties": {}},
+        "Warm-transfer this call to a human agent. The caller hears the "
+        "announcement while the human is whispered a summary, then the legs "
+        "are bridged. Optional destination name; optional reason.",
+        {
+            "type": "object",
+            "properties": {
+                "destination": {
+                    "type": "string",
+                    "description": "Name of a configured transfer destination",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the caller needs a human",
+                },
+            },
+        },
     ),
     (
         "refund_order",
@@ -1057,8 +1073,47 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
     service_version_id = service_agent.published_version_id or service_version.id
     await _grant_tool(session, tenant.id, service_version_id, tools_by_name["create_ticket"].id)
     dev_version_id = agent.published_version_id or version.id
-    for name in ("get_customer", "check_order", "create_order", "check_inventory"):
+    for name in (
+        "get_customer",
+        "check_order",
+        "create_order",
+        "check_inventory",
+        "transfer_call",
+    ):
         await _grant_tool(session, tenant.id, dev_version_id, tools_by_name[name].id)
+
+    dest = (
+        await session.execute(
+            select(TransferDestination).where(
+                TransferDestination.tenant_id == tenant.id,
+                TransferDestination.name == "Reception",
+            )
+        )
+    ).scalar_one_or_none()
+    if dest is None:
+        dest = TransferDestination(
+            tenant_id=tenant.id,
+            name="Reception",
+            kind=TransferDestinationKind.PBX_EXTENSION,
+            target="1000",
+            pbx_id=pbx.id,
+            sip_trunk_id=trunk.id,
+            whisper_summary=True,
+            ring_timeout_seconds=30,
+            status=ResourceStatus.ACTIVE,
+        )
+        session.add(dest)
+        await session.flush()
+
+    live = await session.get(AgentVersion, dev_version_id)
+    if live is not None and not live.transfer_enabled:
+        live.transfer_enabled = True
+        live.transfer_announcement_text = (
+            live.transfer_announcement_text
+            or "Your call is being transferred to a human agent. Please wait."
+        )
+        live.transfer_summary_max_seconds = live.transfer_summary_max_seconds or 30
+        live.transfer_skip_dtmf = live.transfer_skip_dtmf or "1"
 
     hotel_kb = await _seed_hotel_knowledge(session, tenant.id)
     if hotel_kb is not None:
@@ -1180,6 +1235,12 @@ async def _seed_builtin_tools(session: AsyncSession, tenant_id: uuid.UUID) -> di
             )
             session.add(row)
             await session.flush()
+        elif name == "transfer_call" and "Not available until Phase 6.9" in (row.description or ""):
+            valid, error = validate_request_schema(schema, [])
+            row.description = description
+            row.request_schema = schema
+            row.schema_valid = valid
+            row.schema_validation_error = error
         by_name[name] = row
     return by_name
 

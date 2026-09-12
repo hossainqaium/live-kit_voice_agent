@@ -365,6 +365,9 @@ function AgentBuilder({
       transcription_enabled: draft.transcription_enabled,
       transfer_enabled: draft.transfer_enabled,
       transfer_announcement_text: draft.transfer_announcement_text,
+      transfer_summary_template: draft.transfer_summary_template,
+      transfer_summary_max_seconds: draft.transfer_summary_max_seconds,
+      transfer_skip_dtmf: draft.transfer_skip_dtmf,
       knowledge_base_id: draft.knowledge_base_id ?? null,
       tool_ids: draft.tool_ids ?? [],
     };
@@ -633,12 +636,33 @@ function AgentBuilder({
             </div>
 
             {draft.transfer_enabled && (
-              <Field label="Transfer announcement" required
-                hint="What the caller hears while the human agent is reached. Silence here reads as a dropped call.">
-                {(id) => <input id={id} value={draft.transfer_announcement_text ?? ""}
-                  onChange={(e) => set("transfer_announcement_text", e.target.value)}
-                  placeholder="Your call is being transferred to a human agent. Please wait." />}
-              </Field>
+              <>
+                <Field label="Transfer announcement" required
+                  hint="What the caller hears while the human agent is reached. Silence here reads as a dropped call.">
+                  {(id) => <input id={id} value={draft.transfer_announcement_text ?? ""}
+                    onChange={(e) => set("transfer_announcement_text", e.target.value)}
+                    placeholder="Your call is being transferred to a human agent. Please wait." />}
+                </Field>
+                <Field label="Spoken summary template"
+                  hint="Whispered to the human agent only. Tokens: {{customer}}, {{reason}}, {{summary}}, {{actions_taken}}, {{order_information}}, {{sentiment}}, {{required_next_action}}.">
+                  {(id) => <textarea id={id} rows={3} value={draft.transfer_summary_template ?? ""}
+                    onChange={(e) => set("transfer_summary_template", e.target.value || null)}
+                    placeholder="Transfer from the AI agent. Customer: {{customer}}. Reason: {{reason}}. {{summary}}" />}
+                </Field>
+                <div className="row" style={{ gap: 16 }}>
+                  <Field label="Max whisper seconds"
+                    hint="Caps how long the caller waits on hold (5–120).">
+                    {(id) => <input id={id} type="number" min={5} max={120}
+                      value={draft.transfer_summary_max_seconds ?? 30}
+                      onChange={(e) => set("transfer_summary_max_seconds", Number(e.target.value) || 30)} />}
+                  </Field>
+                  <Field label="DTMF skip key"
+                    hint="The human agent presses this to skip the whisper and be bridged.">
+                    {(id) => <input id={id} maxLength={1} value={draft.transfer_skip_dtmf ?? "1"}
+                      onChange={(e) => set("transfer_skip_dtmf", e.target.value || "1")} />}
+                  </Field>
+                </div>
+              </>
             )}
 
             <div className="form-section-label">Knowledge base</div>

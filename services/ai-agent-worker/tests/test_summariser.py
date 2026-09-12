@@ -331,12 +331,11 @@ class TestGenerateSummaryNormalPath:
         assert captured_kwargs.get("api_key") == ctx.llm.api_key
 
     @pytest.mark.asyncio
-    async def test_uses_custom_summary_template(self) -> None:
-        """When transfer_policy.summary_template is set, it overrides the
-        default prompt — this is what Phase 6 warm-transfer whisper reads."""
+    async def test_spoken_template_does_not_override_post_call_prompt(self) -> None:
+        """``summary_template`` is the spoken whisper string (TS-1), not an LLM prompt."""
         rows = [_fake_row("CALLER", "billing question"), _fake_row("AI", "noted")]
         factory = _make_factory(rows)
-        ctx = _context(summary_template="Custom: summarise in one word.")
+        ctx = _context(summary_template="Customer: {{customer}}. Reason: {{reason}}.")
 
         captured_messages: list = []
 
@@ -358,9 +357,8 @@ class TestGenerateSummaryNormalPath:
                 )
 
         system_msg = next(m for m in captured_messages if m["role"] == "system")
-        assert "Custom: summarise in one word." in system_msg["content"]
-        # Default prompt must NOT appear.
-        assert _DEFAULT_SYSTEM_PROMPT not in system_msg["content"]
+        assert _DEFAULT_SYSTEM_PROMPT in system_msg["content"]
+        assert "{{customer}}" not in system_msg["content"]
 
     @pytest.mark.asyncio
     async def test_uses_default_prompt_when_template_is_none(self) -> None:

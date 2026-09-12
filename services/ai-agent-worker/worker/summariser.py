@@ -125,14 +125,12 @@ async def _request_summary(
     )
     model = cfg.model or "gpt-4o-mini"
 
-    # Prefer an explicit prompt (mid-call rolling summary), then the
-    # tenant's transfer template, then the built-in post-call prompt.
+    # An explicit prompt is used for mid-call rolling memory and the
+    # warm-transfer JSON briefing. ``transfer_summary_template`` is a spoken
+    # {{field}} string (TS-1), not an LLM prompt, so post-call summaries
+    # always use the built-in instruction unless a caller overrides it.
     if system_prompt is None:
-        system_prompt = (
-            context.transfer_policy.summary_template.strip()
-            if getattr(context.transfer_policy, "summary_template", None)
-            else _DEFAULT_SYSTEM_PROMPT
-        )
+        system_prompt = _DEFAULT_SYSTEM_PROMPT
 
     resp = await client.chat.completions.create(
         model=model,

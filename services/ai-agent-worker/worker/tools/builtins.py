@@ -273,13 +273,15 @@ async def transfer_call(
     context: Any,
     factory: async_sessionmaker[AsyncSession] | None,
 ) -> dict[str, Any]:
-    return {
-        "ok": False,
-        "error": (
-            "warm transfer is not available yet. Tell the caller a human will "
-            "call them back, and file a ticket if they reported a problem."
-        ),
-    }
+    from worker.transfer.registry import get as get_transfer
+
+    transfer = get_transfer(getattr(context, "call_id", ""))
+    if transfer is None:
+        return {
+            "ok": False,
+            "error": "warm transfer is not available on this call",
+        }
+    return await transfer.request(arguments)
 
 
 async def refund_order(

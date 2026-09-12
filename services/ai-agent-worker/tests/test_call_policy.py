@@ -215,7 +215,7 @@ class TestMaxDurationWatchdog:
         context = _context(_policy(max_call_duration_seconds=3600))
 
         # Disconnect resolves immediately; watchdog sleeps forever.
-        async def fast_disconnect(_ctx: Any) -> None:
+        async def fast_disconnect(_ctx: Any, _context: Any = None) -> None:
             return
 
         async def slow_watchdog(_ctx: Any, _s: int, _id: str) -> HangupReason:
@@ -237,7 +237,7 @@ class TestMaxDurationWatchdog:
         ctx = MagicMock()
         context = _context(_policy(max_call_duration_seconds=1))
 
-        async def slow_disconnect(_ctx: Any) -> None:
+        async def slow_disconnect(_ctx: Any, _context: Any = None) -> None:
             await asyncio.sleep(9999)
 
         async def fast_watchdog(_ctx: Any, _s: int, _id: str) -> HangupReason:

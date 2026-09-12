@@ -53,6 +53,13 @@ from worker.memory import RollingMemory, roll_summary
 from worker.rag.retrieve import format_context, search_chunks
 from worker.summariser import generate_summary
 from worker.tools import ToolRuntime, livekit_tools
+from worker.transfer import (
+    WarmTransfer,
+    get_transfer,
+    is_human_agent,
+    register_transfer,
+    unregister_transfer,
+)
 
 logger = get_logger(__name__)
 
@@ -211,6 +218,11 @@ class ConfigurableAgent(Agent):
         self._memory = RollingMemory(base_instructions=instructions)
         tools = livekit_tools(runtime) if runtime is not None else []
         super().__init__(instructions=instructions, tools=tools)
+        from worker.transfer.registry import get as get_transfer
+
+        xfer = get_transfer(context.call_id)
+        if xfer is not None:
+            xfer.bind(memory=self._memory)
 
     async def on_user_turn_completed(self, turn_ctx: Any, new_message: Any) -> None:
         text = _message_text(new_message)
@@ -495,10 +507,10 @@ async def _wait_for_call_end(
 
     max_seconds = context.call_policy.max_call_duration_seconds
     if max_seconds is None:
-        await _wait_for_disconnect(ctx)
+        await _wait_for_disconnect(ctx, context)
         return HangupReason.CALLER_HANGUP
 
-    disconnect_task = asyncio.create_task(_wait_for_disconnect(ctx))
+    disconnect_task = asyncio.create_task(_wait_for_disconnect(ctx, context))
     watchdog_task = asyncio.create_task(
         _max_duration_watchdog(ctx, max_seconds, context.call_id)
     )
@@ -639,6 +651,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
 
     with log_context(**context.log_fields()):
         recording_info: _RecordingInfo | None = None
+        transfer: WarmTransfer | None = None
         try:
             built_at = asyncio.get_running_loop().time()
             session = _build_session(context, ctx.proc.userdata["vad"])
@@ -657,6 +670,17 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
                 await observer.start()
             except Exception:
                 logger.exception("observer_start_failed_continuing_without_it")
+
+            transfer = WarmTransfer(
+                context,
+                factory,
+                room=ctx.room,
+                session=session,
+                tts=_tts_for_filler(context),
+                tracker=tracker,
+                observer=observer,
+            )
+            register_transfer(transfer)
 
             # Speaks a short acknowledgement when a reply is slow enough for the
             # caller to wonder whether the line dropped. Wrapped for the same
@@ -738,7 +762,12 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             if filler is not None:
                 await filler.aclose()
 
-            await tracker.transition(CallState.COMPLETED, hangup_reason=hangup_reason)
+            live = get_transfer(context.call_id)
+            if live is not None and not live.bridged:
+                await live.abandon()
+
+            if not tracker.is_terminal:
+                await tracker.transition(CallState.COMPLETED, hangup_reason=hangup_reason)
             logger.info("conversation_ended", extra={"hangup_reason": hangup_reason})
             _record_completion(context, tracker, CallState.COMPLETED)
 
@@ -753,6 +782,10 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             _record_completion(context, tracker, CallState.FAILED)
             raise
         finally:
+            unregister_transfer(context.call_id)
+            if transfer is not None:
+                await transfer.aclose()
+
             # Stop recording before closing the observer so the egress
             # has a chance to flush its last segment.
             if recording_info:
@@ -853,23 +886,39 @@ def _record_completion(context: CallContext, tracker: CallStateTracker, state: C
         voice_metrics.call_duration.labels(**labels).observe(duration)
 
 
-async def _wait_for_disconnect(ctx: JobContext) -> None:
-    """Block until the room closes."""
+async def _wait_for_disconnect(ctx: JobContext, context: CallContext | None = None) -> None:
+    """Block until the caller hangs up or the room closes.
+
+    A human-agent SIP participant leaving mid-transfer is not the end of the
+    call — the transfer engine runs the fallback chain. After the bridge,
+    either leg hanging up ends it.
+    """
     import asyncio
 
     closed = asyncio.get_running_loop().create_future()
 
-    def _on_disconnect(*_: object) -> None:
+    def _finish() -> None:
         if not closed.done():
             closed.set_result(None)
 
-    ctx.room.on("disconnected", _on_disconnect)
-    ctx.room.on("participant_disconnected", _on_disconnect)
+    def _on_room_disconnect(*_: object) -> None:
+        _finish()
+
+    def _on_participant_left(participant: Any = None, *_: object) -> None:
+        identity = getattr(participant, "identity", None)
+        if is_human_agent(identity):
+            xfer = get_transfer(context.call_id) if context is not None else None
+            if xfer is not None and not xfer.bridged:
+                return
+        _finish()
+
+    ctx.room.on("disconnected", _on_room_disconnect)
+    ctx.room.on("participant_disconnected", _on_participant_left)
     try:
         await closed
     finally:
-        ctx.room.off("disconnected", _on_disconnect)
-        ctx.room.off("participant_disconnected", _on_disconnect)
+        ctx.room.off("disconnected", _on_room_disconnect)
+        ctx.room.off("participant_disconnected", _on_participant_left)
 
 
 def prewarm(proc: agents.JobProcess) -> None:

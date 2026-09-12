@@ -290,14 +290,22 @@ class TestRoutingSQL:
             "business_hours_id",
             "fallback_action",
             "fallback_agent_id",
+            "fallback_transfer_destination_id",
             "closed_action",
+            "closed_transfer_destination_id",
             "priority",
         ):
             assert col in sql, f"missing column: {col}"
 
     def test_pinned_rule_query_selects_same_columns(self) -> None:
         sql = str(_PINNED_RULE_SQL)
-        for col in ("conditions", "agent_id", "business_hours_id", "fallback_agent_id"):
+        for col in (
+            "conditions",
+            "agent_id",
+            "business_hours_id",
+            "fallback_agent_id",
+            "fallback_transfer_destination_id",
+        ):
             assert col in sql, f"missing column: {col}"
 
     def test_hours_query_selects_intervals_and_metadata(self) -> None:

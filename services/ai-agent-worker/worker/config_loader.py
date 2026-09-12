@@ -33,6 +33,11 @@ from worker.providers.base import ProviderConfig
 from worker.routing import RoutingClosedError, RoutingDecision, RoutingHangupError
 from worker.rag.retrieve import KnowledgeRetrieval
 from worker.tools.definitions import ToolDefinition
+from worker.transfer.destinations import (
+    TransferDestinationInfo,
+    TransferFallback,
+    load_destinations,
+)
 
 logger = get_logger(__name__)
 
@@ -62,6 +67,23 @@ class TenantLimitExceededError(ConfigurationError):
     def __init__(self, message: str, *, limit: str) -> None:
         super().__init__(message)
         self.limit = limit
+
+
+def _fallback_from_decision(decision: RoutingDecision | None) -> TransferFallback | None:
+    """Freeze the Phase 4 fallback chain onto the call (spec 38, TR-10)."""
+    if decision is None:
+        return None
+    if (
+        decision.fallback_action is None
+        and decision.fallback_agent_id is None
+        and decision.fallback_destination_id is None
+    ):
+        return None
+    return TransferFallback(
+        action=decision.fallback_action,
+        agent_id=decision.fallback_agent_id,
+        destination_id=decision.fallback_destination_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +163,11 @@ class CallContext:
     knowledge_base_id: uuid.UUID | None = None
     knowledge: KnowledgeRetrieval | None = None
 
+    #: Active transfer destinations for this tenant, frozen at call start
+    #: (spec 35, 45). Empty means ``transfer_call`` must refuse.
+    transfer_destinations: tuple[TransferDestinationInfo, ...] = ()
+    transfer_fallback: TransferFallback | None = None
+
     #: Further tiers to try when the primary fails, in order (spec 55). Empty
     #: for a version that configures only a primary, which is why these are
     #: separate fields rather than a chain replacing ``stt``/``llm``/``tts``:
@@ -178,6 +205,7 @@ class CallContext:
             "tts": self.tts.redacted(),
             "tools": [tool.name for tool in self.tools],
             "knowledge_base_id": str(self.knowledge_base_id) if self.knowledge_base_id else None,
+            "transfer_destinations": [dest.name for dest in self.transfer_destinations],
         }
 
 
@@ -684,6 +712,12 @@ class CallConfigLoader:
                 agent_id=resolved_agent_id,
                 version_id=version["id"],
             ),
+            transfer_destinations=await load_destinations(
+                session,
+                tenant_id=row["tenant_id"],
+                call_sip_trunk_id=row["sip_trunk_id"],
+            ),
+            transfer_fallback=_fallback_from_decision(decision),
         )
 
         logger.info("call_configuration_loaded", extra=context.redacted())

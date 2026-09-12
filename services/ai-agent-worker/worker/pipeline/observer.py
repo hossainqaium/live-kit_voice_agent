@@ -273,6 +273,38 @@ class CallObserver:
     # Event wiring
     # ------------------------------------------------------------------ #
 
+    def record_segment(
+        self,
+        speaker: SpeakerType,
+        text: str,
+        *,
+        private: bool = False,
+    ) -> None:
+        """Record an utterance that did not come from AgentSession.
+
+        Used for the transfer whisper (private to the human agent) and for
+        post-bridge human speech attributed to ``HUMAN_AGENT``.
+        """
+        if not self._transcription_enabled:
+            return
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        self._sequence += 1
+        self._enqueue(
+            "segment",
+            {
+                "id": uuid.uuid4(),
+                "sequence": self._sequence,
+                "speaker": speaker.value,
+                "text": cleaned,
+                "confidence": None,
+                "spoken_at": datetime.now(UTC),
+                "interrupted": False,
+                "is_private_to_agent": private,
+            },
+        )
+
     def attach(self, session: Any) -> None:
         """Register handlers on an ``AgentSession``.
 
@@ -335,6 +367,7 @@ class CallObserver:
                 "confidence": _reported_confidence(getattr(item, "transcript_confidence", None)),
                 "spoken_at": datetime.now(UTC),
                 "interrupted": bool(getattr(item, "interrupted", False)),
+                "is_private_to_agent": False,
             },
         )
 
@@ -540,7 +573,7 @@ class CallObserver:
                              created_at, updated_at)
                         VALUES
                             (:id, :tenant_id, :transcript_id, :sequence, :speaker,
-                             :spoken_at, :text, :confidence, false, now(), now())
+                             :spoken_at, :text, :confidence, :is_private, now(), now())
                         ON CONFLICT (call_transcript_id, sequence) DO NOTHING
                         """
                     ),
@@ -554,6 +587,7 @@ class CallObserver:
                             "spoken_at": s["spoken_at"],
                             "text": s["text"],
                             "confidence": s["confidence"],
+                            "is_private": bool(s.get("is_private_to_agent", False)),
                         }
                         for s in segments
                     ],

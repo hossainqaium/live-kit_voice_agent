@@ -28,10 +28,11 @@ try a secondary.  ``RoutingDecision.fallback_agent_id`` and
 ``.fallback_action`` are surfaced to ``CallConfigLoader`` so it can attempt
 the fallback without a second database round-trip.
 
-PBX_QUEUE / VOICEMAIL actions at *call setup* time require SIP transfer
-infrastructure that is not yet available (Phase 6).  Until then they are
-treated identically to HANGUP and logged at warning level so the gap is
-visible in the operator's logs.
+PBX_QUEUE / VOICEMAIL actions at *call setup* time still refuse the inbound
+call (the worker is not yet in a room to dial from). Mid-call warm transfer
+uses the same fallback fields: a failed human leg retries the configured
+queue/voicemail destination, then speaks an apology and hangs up rather
+than leaving silence (Plan 6.10b, TR-10).
 """
 
 from __future__ import annotations
@@ -90,6 +91,7 @@ class RoutingDecision:
     rule_name: str | None = None
     fallback_agent_id: uuid.UUID | None = None
     fallback_action: FallbackAction | None = None
+    fallback_destination_id: uuid.UUID | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -107,7 +109,9 @@ _ALL_RULES_SQL = text(
         r.business_hours_id,
         r.fallback_action,
         r.fallback_agent_id,
-        r.closed_action
+        r.fallback_transfer_destination_id,
+        r.closed_action,
+        r.closed_transfer_destination_id
     FROM routing_rules r
     WHERE r.tenant_id = :tenant_id
       AND r.status    = 'ACTIVE'
@@ -126,7 +130,9 @@ _PINNED_RULE_SQL = text(
         r.business_hours_id,
         r.fallback_action,
         r.fallback_agent_id,
-        r.closed_action
+        r.fallback_transfer_destination_id,
+        r.closed_action,
+        r.closed_transfer_destination_id
     FROM routing_rules r
     WHERE r.id        = :rule_id
       AND r.tenant_id = :tenant_id
@@ -384,8 +390,14 @@ async def resolve_route(
             FallbackAction(rule["fallback_action"]) if rule["fallback_action"] else None
         )
         fallback_agent_id: uuid.UUID | None = rule["fallback_agent_id"]
+        fallback_destination_id: uuid.UUID | None = rule.get(
+            "fallback_transfer_destination_id"
+        )
         closed_action = (
             FallbackAction(rule["closed_action"]) if rule["closed_action"] else None
+        )
+        closed_destination_id: uuid.UUID | None = rule.get(
+            "closed_transfer_destination_id"
         )
 
         # ---- Business-hours gate ---- #
@@ -457,6 +469,7 @@ async def resolve_route(
             rule_name=rule_name,
             fallback_agent_id=fallback_agent_id,
             fallback_action=fallback_action,
+            fallback_destination_id=fallback_destination_id or closed_destination_id,
         )
 
     # No rule matched.
