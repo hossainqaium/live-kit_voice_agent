@@ -21,8 +21,24 @@ if TYPE_CHECKING:
     from worker.config_loader import CallPolicy
 
 #: Seconds of silence after the last detected speech before the turn is
-#: committed. Must exceed hosted STT (1.103 s) so the transcript still joins.
-MIN_ENDPOINTING_DELAY_S = 2.0
+#: committed. Must exceed the time the final transcript takes to arrive, or the
+#: turn commits without it and the caller is ignored — the 2b.7 failure.
+#:
+#: **2.0 s was fitted to hosted STT at 1103 ms and is no longer what runs.**
+#: Self-hosted `faster-whisper-tiny` measures 228 ms p50 / 682 ms p95
+#: sequentially (`make measure-latency`), and 970-990 ms in-call across
+#: consecutive turns — the in-call figure is the one that matters, since it
+#: includes streaming and VAD overhead the harness does not.
+#:
+#: 1.4 s clears the worst in-call sample by about 400 ms. That is a deliberate
+#: trade: it takes 600 ms off every single turn, and the cost of being wrong is
+#: the 2b.7 symptom returning, so it is asserted in a test against the measured
+#: figure rather than left as a number someone can nudge.
+MIN_ENDPOINTING_DELAY_S = 1.4
+
+#: The worst in-call transcription delay observed on consecutive turns. The
+#: window is checked against this in the test suite.
+OBSERVED_IN_CALL_STT_S = 0.99
 
 #: Hard cap on waiting for the turn to end. Must exceed both ``min_delay``
 #: and the 2.581 s EOU of the same call.

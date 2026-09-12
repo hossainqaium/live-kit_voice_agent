@@ -136,11 +136,22 @@ class TestBuildSessionPassesPolicy:
         assert kwargs["turn_handling"]["interruption"]["min_words"] == 3
 
     def test_endpointing_window_is_set(self) -> None:
-        """2b.7: the session must not fall back to LiveKit's 0.5 / 3.0 defaults."""
+        """2b.7: the session must not fall back to LiveKit's 0.5 / 3.0 defaults.
+
+        Asserted against the constants rather than literals. The window is
+        fitted to a measurement that changes when STT placement changes, and a
+        test that hard-codes the number has to be edited every time — which
+        makes it a copy of the value rather than a check on it. What must not
+        drift is the *relationship*: see ``test_filler.py`` for the assertion
+        that the window still clears measured transcription.
+        """
+        from worker.endpointing import MAX_ENDPOINTING_DELAY_S, MIN_ENDPOINTING_DELAY_S
+
         kwargs = self._capture_session_kwargs(_context(_policy()))
         endpointing = kwargs["turn_handling"]["endpointing"]
-        assert endpointing["min_delay"] == 2.0
-        assert endpointing["max_delay"] == 6.0
+        assert endpointing["min_delay"] == MIN_ENDPOINTING_DELAY_S
+        assert endpointing["max_delay"] == MAX_ENDPOINTING_DELAY_S
+        assert endpointing["min_delay"] != 0.5, "fell back to the LiveKit default"
         assert endpointing["mode"] == "fixed"
         assert kwargs["turn_handling"]["turn_detection"] == "vad"
 

@@ -43,6 +43,7 @@ from worker.config_loader import (
 )
 from worker.db import get_session_factory
 from worker.endpointing import turn_handling_for
+from worker.filler import ThinkingFiller
 from worker.health import state as worker_state
 from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
@@ -566,6 +567,16 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
                 await observer.start()
             except Exception:
                 logger.exception("observer_start_failed_continuing_without_it")
+
+            # Speaks a short acknowledgement when a reply is slow enough for the
+            # caller to wonder whether the line dropped. Wrapped for the same
+            # reason as the observer: a decoration on a wait must never be able
+            # to end the call it decorates.
+            filler = ThinkingFiller(session)
+            try:
+                filler.attach()
+            except Exception:
+                logger.exception("filler_attach_failed_continuing_without_it")
 
             await tracker.transition(CallState.AI_CONNECTED)
 
