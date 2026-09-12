@@ -31,6 +31,7 @@ from shared.models import FallbackAction, HttpMethod, ProviderKind, ToolAuthType
 from worker import routing as routing_engine
 from worker.providers.base import ProviderConfig
 from worker.routing import RoutingClosedError, RoutingDecision, RoutingHangupError
+from worker.rag.retrieve import KnowledgeRetrieval
 from worker.tools.definitions import ToolDefinition
 
 logger = get_logger(__name__)
@@ -138,6 +139,7 @@ class CallContext:
     tools: tuple[ToolDefinition, ...] = ()
 
     knowledge_base_id: uuid.UUID | None = None
+    knowledge: KnowledgeRetrieval | None = None
 
     #: Further tiers to try when the primary fails, in order (spec 55). Empty
     #: for a version that configures only a primary, which is why these are
@@ -175,6 +177,7 @@ class CallContext:
             "llm": self.llm.redacted(),
             "tts": self.tts.redacted(),
             "tools": [tool.name for tool in self.tools],
+            "knowledge_base_id": str(self.knowledge_base_id) if self.knowledge_base_id else None,
         }
 
 
@@ -265,6 +268,7 @@ _VERSION_SQL = text(
         av.hold_media_object_key, av.transfer_summary_template,
         av.transfer_summary_max_seconds, av.transfer_skip_dtmf,
         av.knowledge_base_id,
+        av.embedding_provider_id,
 
         COALESCE(stt_p.adapter, stt_p.slug) AS stt_slug, stt_p.default_base_url AS stt_base_url,
         stt_m.slug AS stt_model,
@@ -667,6 +671,13 @@ class CallConfigLoader:
                 skip_dtmf=version["transfer_skip_dtmf"],
             ),
             knowledge_base_id=version["knowledge_base_id"],
+            knowledge=await self._load_knowledge(
+                session,
+                tenant_id=row["tenant_id"],
+                version=version,
+                credentials=credentials,
+                llm=llm,
+            ),
             tools=await self._load_tools(
                 session,
                 tenant_id=row["tenant_id"],
@@ -826,6 +837,9 @@ class CallConfigLoader:
             )
             if version[key] is not None
         ]
+        extra = version.get("embedding_provider_id")
+        if extra is not None:
+            provider_ids.append(extra)
         if not provider_ids:
             return {}
 
@@ -972,6 +986,55 @@ class CallConfigLoader:
                 )
             )
         return tuple(loaded)
+
+    async def _load_knowledge(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        version: Any,
+        credentials: dict[uuid.UUID, tuple[str, str | None]],
+        llm: ProviderConfig,
+    ) -> KnowledgeRetrieval | None:
+        kb_id = version.get("knowledge_base_id")
+        if kb_id is None:
+            return None
+        row = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT top_k, embedding_model_slug, embedding_provider_id
+                        FROM knowledge_bases
+                        WHERE id = :id AND tenant_id = :tenant_id AND status = 'ACTIVE'
+                        """
+                    ),
+                    {"id": kb_id, "tenant_id": tenant_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        top_k = int(row["top_k"]) if row is not None else 4
+        model = (
+            (row["embedding_model_slug"] if row is not None else None)
+            or "text-embedding-3-small"
+        )
+        provider_id = version.get("embedding_provider_id")
+        if provider_id is None and row is not None:
+            provider_id = row["embedding_provider_id"]
+        api_key, base_url = (None, None)
+        if provider_id is not None:
+            api_key, base_url = credentials.get(provider_id, (None, None))
+        if api_key is None:
+            api_key, base_url = llm.api_key, llm.base_url
+        return KnowledgeRetrieval(
+            knowledge_base_id=kb_id,
+            top_k=max(1, min(top_k, 20)),
+            embedding_model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
 
     def _provider_config(
         self,

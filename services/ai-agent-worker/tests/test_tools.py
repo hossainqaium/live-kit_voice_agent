@@ -11,7 +11,7 @@ import httpx
 
 from shared.models import ProviderKind, TicketSource
 from worker.config_loader import CallContext, CallPolicy, TransferPolicy
-from worker.entrypoint import _build_agent
+from worker.entrypoint import ConfigurableAgent, _build_agent
 from worker.providers.base import ProviderConfig
 from worker.tools.builtins import HANDLERS, create_ticket, get_customer, refund_order
 from worker.tools.definitions import ToolDefinition
@@ -213,9 +213,10 @@ class TestHttpAndSubstitution:
 
 class TestPipelineWiring:
     def test_build_agent_registers_tools(self) -> None:
-        src = inspect.getsource(_build_agent)
+        src = inspect.getsource(ConfigurableAgent.__init__)
         assert "livekit_tools" in src
         assert "tools=tools" in src
+        assert "ConfigurableAgent" in inspect.getsource(_build_agent)
 
     def test_config_loader_loads_granted_tools(self) -> None:
         from worker import config_loader

@@ -27,8 +27,8 @@ import Link from "next/link";
 
 import {
   ApiError, api,
-  type Agent, type AgentVersion, type Catalog, type ProviderCredential,
-  type Tool, type ValidationReport,
+  type Agent, type AgentVersion, type Catalog, type KnowledgeBase,
+  type ProviderCredential, type Tool, type ValidationReport,
 } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 
@@ -277,6 +277,7 @@ function AgentBuilder({
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
   const [library, setLibrary] = useState<Tool[]>([]);
+  const [bases, setBases] = useState<KnowledgeBase[]>([]);
   const [dirty, setDirty] = useState(false);
 
   const loadCredentials = useCallback(async () => {
@@ -302,6 +303,7 @@ function AgentBuilder({
     void loadCatalog();
     void loadCredentials();
     void api.tools.list().then((page) => setLibrary(page.items)).catch(() => setLibrary([]));
+    void api.knowledgeBases.list().then((page) => setBases(page.items)).catch(() => setBases([]));
   }, [loadCatalog, loadCredentials]);
 
   const load = useCallback(async () => {
@@ -363,6 +365,7 @@ function AgentBuilder({
       transcription_enabled: draft.transcription_enabled,
       transfer_enabled: draft.transfer_enabled,
       transfer_announcement_text: draft.transfer_announcement_text,
+      knowledge_base_id: draft.knowledge_base_id ?? null,
       tool_ids: draft.tool_ids ?? [],
     };
   }
@@ -638,6 +641,30 @@ function AgentBuilder({
               </Field>
             )}
 
+            <div className="form-section-label">Knowledge base</div>
+            <Field
+              label="Assigned base"
+              hint="The agent retrieves from this base when the caller asks something the prompt does not cover."
+            >
+              {(id) => (
+                <select id={id} value={draft.knowledge_base_id ?? ""}
+                  onChange={(e) => set("knowledge_base_id", (e.target.value || null) as AgentVersion["knowledge_base_id"])}>
+                  <option value="">None</option>
+                  {bases.map((base) => (
+                    <option key={base.id} value={base.id}>
+                      {base.name}{base.chunk_count ? ` (${base.chunk_count} chunks)` : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
+            {bases.length === 0 && (
+              <p className="subtle small" style={{ marginTop: -8 }}>
+                No bases yet. Create one on{" "}
+                <Link href="/knowledge-bases" style={{ color: "var(--accent)" }}>Knowledge Bases</Link>.
+              </p>
+            )}
+
             <div className="form-section-label">Tools</div>
             <p className="subtle small" style={{ marginTop: 0 }}>
               Only checked tools can be called. Everything else is denied, even
@@ -724,7 +751,7 @@ function EmbeddingPicker({
       <div className="stat-label">Embedding</div>
       <p className="subtle small" style={{ margin: "2px 0 10px" }}>
         Required for knowledge-base retrieval (RAG). The embedding model must match
-        the one used when the knowledge base was indexed. This feature activates in Phase 6.
+        the one used when the knowledge base was indexed.
       </p>
 
       {embeddingProviders.length === 0 ? (

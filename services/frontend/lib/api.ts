@@ -1640,6 +1640,37 @@ export const api = {
     documents(id: string): Promise<Page<KnowledgeDocument>> {
       return request<Page<KnowledgeDocument>>(`/knowledge-bases/${id}/documents`);
     },
+    async uploadDocument(id: string, file: File, title?: string): Promise<KnowledgeDocument> {
+      const access = tokens.access();
+      const body = new FormData();
+      body.append("file", file);
+      if (title) body.append("title", title);
+      const response = await fetch(`${API_V1}/knowledge-bases/${id}/documents`, {
+        method: "POST",
+        headers: access ? { Authorization: `Bearer ${access}` } : {},
+        body,
+      });
+      const requestId = response.headers.get("X-Request-ID");
+      if (!response.ok) {
+        throw new ApiError(await parseError(response), response.status, requestId);
+      }
+      return (await response.json()) as KnowledgeDocument;
+    },
+    addWebDocument(id: string, url: string, title?: string | null): Promise<KnowledgeDocument> {
+      return request<KnowledgeDocument>(`/knowledge-bases/${id}/documents/web`, {
+        method: "POST",
+        body: { url, title: title || null },
+      });
+    },
+    reindexDocument(id: string, documentId: string): Promise<KnowledgeDocument> {
+      return request<KnowledgeDocument>(
+        `/knowledge-bases/${id}/documents/${documentId}/reindex`,
+        { method: "POST" },
+      );
+    },
+    removeDocument(id: string, documentId: string): Promise<void> {
+      return request<void>(`/knowledge-bases/${id}/documents/${documentId}`, { method: "DELETE" });
+    },
   },
 
   users: {

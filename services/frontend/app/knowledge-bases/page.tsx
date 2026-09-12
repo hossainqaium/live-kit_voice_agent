@@ -1,12 +1,10 @@
 "use client";
 
 /**
- * Knowledge bases (spec 34).
+ * Knowledge bases (spec 33).
  *
- * A base can be created and configured today, and an agent can be pointed at
- * one. Document ingestion — upload, chunking, embedding — is Phase 6, so this
- * screen says that plainly instead of offering an upload button that would
- * leave a document stuck at PENDING.
+ * Upload PDF / DOCX / TXT / CSV or a URL. The API extracts, chunks, and
+ * embeds. An agent assigned this base retrieves those chunks mid-call.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -88,14 +86,6 @@ export default function KnowledgeBasesPage() {
 
       {error && <Notice tone="err">{error}</Notice>}
 
-      <Notice tone="info">
-        Bases can be created and assigned to an agent now. Uploading and
-        indexing documents is Phase 6 — until it lands, a base has no chunks,
-        so an agent pointed at one retrieves nothing rather than failing. The
-        document list below is live, so anything ingested out-of-band appears
-        here.
-      </Notice>
-
       <div className="table-wrap">
         {rows === null ? (
           <Loading label="Loading knowledge bases…" />
@@ -162,43 +152,18 @@ export default function KnowledgeBasesPage() {
       </div>
 
       {viewing && (
-        <Dialog
-          title={`${viewing.name} — documents`}
+        <DocumentsDialog
+          base={viewing}
+          documents={documents}
+          canWrite={canWrite}
           onClose={() => setViewing(null)}
-          footer={<Button onClick={() => setViewing(null)}>Close</Button>}
-        >
-          {documents === null ? (
-            <Loading label="Loading documents…" />
-          ) : documents.length === 0 ? (
-            <p className="muted" style={{ marginTop: 0 }}>
-              No documents. Ingestion is Phase 6, so there is nothing to index
-              from here yet — the base is configured and an agent can already
-              point at it.
-            </p>
-          ) : (
-            <table>
-              <thead>
-                <tr><th>Title</th><th>Type</th><th>Status</th><th>Chunks</th><th>Indexed</th></tr>
-              </thead>
-              <tbody>
-                {documents.map((doc) => (
-                  <tr key={doc.id}>
-                    <td>
-                      {doc.title}
-                      {doc.ingest_error && (
-                        <div className="small" style={{ color: "var(--err)" }}>{doc.ingest_error}</div>
-                      )}
-                    </td>
-                    <td className="small mono">{doc.source_type}</td>
-                    <td><Badge tone={DOC_TONE[doc.status]}>{doc.status.toLowerCase()}</Badge></td>
-                    <td className="small mono">{doc.chunk_count}</td>
-                    <td className="small"><RelativeTime iso={doc.indexed_at} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Dialog>
+          onReload={async () => {
+            const page = await api.knowledgeBases.documents(viewing.id);
+            setDocuments(page.items);
+            await load();
+          }}
+          onError={(message) => toasts.err(message)}
+        />
       )}
 
       {(creating || editing) && (
@@ -345,6 +310,122 @@ function BaseForm({
           </div>
         )}
       </form>
+    </Dialog>
+  );
+}
+
+function DocumentsDialog({
+  base, documents, canWrite, onClose, onReload, onError,
+}: {
+  base: KnowledgeBase;
+  documents: KnowledgeDocument[] | null;
+  canWrite: boolean;
+  onClose(): void;
+  onReload(): void | Promise<void>;
+  onError(message: string): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [url, setUrl] = useState("");
+
+  async function wrap(action: () => Promise<void>) {
+    setBusy(true);
+    try {
+      await action();
+      await onReload();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "could not update documents");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      title={`${base.name} — documents`}
+      onClose={onClose}
+      footer={<Button onClick={onClose}>Close</Button>}
+    >
+      {canWrite && (
+        <div className="stack" style={{ gap: 10, marginBottom: 14 }}>
+          <Field label="Upload a file" hint="PDF, DOCX, TXT or CSV. Indexed immediately.">
+            {(id) => (
+              <input
+                id={id}
+                type="file"
+                accept=".pdf,.docx,.txt,.csv,.html"
+                disabled={busy}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  void wrap(() => api.knowledgeBases.uploadDocument(base.id, file));
+                }}
+              />
+            )}
+          </Field>
+          <Field label="Or index a web page">
+            {(id) => (
+              <div className="row" style={{ gap: 8 }}>
+                <input id={id} value={url} placeholder="https://…"
+                  onChange={(e) => setUrl(e.target.value)} disabled={busy} />
+                <Button size="sm" busy={busy} disabled={!url.trim()} onClick={() => {
+                  const target = url.trim();
+                  setUrl("");
+                  void wrap(() => api.knowledgeBases.addWebDocument(base.id, target));
+                }}>Add URL</Button>
+              </div>
+            )}
+          </Field>
+        </div>
+      )}
+
+      {documents === null ? (
+        <Loading label="Loading documents…" />
+      ) : documents.length === 0 ? (
+        <p className="muted" style={{ marginTop: 0 }}>
+          No documents yet. Upload a file or add a URL to index it.
+        </p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th><th>Type</th><th>Status</th><th>Chunks</th>
+              <th>Indexed</th>
+              {canWrite && <th />}
+            </tr>
+          </thead>
+          <tbody>
+            {documents.map((doc) => (
+              <tr key={doc.id}>
+                <td>
+                  {doc.title}
+                  {doc.ingest_error && (
+                    <div className="small" style={{ color: "var(--err)" }}>{doc.ingest_error}</div>
+                  )}
+                </td>
+                <td className="small mono">{doc.source_type}</td>
+                <td><Badge tone={DOC_TONE[doc.status]}>{doc.status.toLowerCase()}</Badge></td>
+                <td className="small mono">{doc.chunk_count}</td>
+                <td className="small"><RelativeTime iso={doc.indexed_at} /></td>
+                {canWrite && (
+                  <td>
+                    <div className="cell-actions">
+                      <Button size="sm" busy={busy}
+                        onClick={() => void wrap(() => api.knowledgeBases.reindexDocument(base.id, doc.id))}>
+                        Reindex
+                      </Button>
+                      <Button size="sm" variant="danger" busy={busy}
+                        onClick={() => void wrap(() => api.knowledgeBases.removeDocument(base.id, doc.id))}>
+                        Remove
+                      </Button>
+                    </div>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </Dialog>
   );
 }

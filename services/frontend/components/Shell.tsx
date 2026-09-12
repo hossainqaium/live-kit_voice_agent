@@ -66,9 +66,6 @@ const TENANT_NAV: NavGroup[] = [
         label: "Knowledge Bases",
         href: "/knowledge-bases",
         permission: "agents.read",
-        // Bases are configurable and assignable now; document ingestion is
-        // Phase 6, which the screen itself explains.
-        note: "no ingest",
       },
     ],
   },

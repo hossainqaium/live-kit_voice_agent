@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import func, select
 
 from app.core.dependencies import ClientIp, CurrentTenant, require_permission
@@ -27,11 +27,18 @@ from app.schemas.tool import (
     ToolCreate,
     ToolResponse,
     ToolUpdate,
+    WebDocumentCreate,
 )
-from app.services import audit
+from app.services import audit, object_store
+from app.services.knowledge_ingest import (
+    IngestError,
+    document_object_key,
+    ingest_document,
+)
 from shared.crypto import CredentialCipher, CredentialEncryptionError
+from shared.knowledge import MAX_FILE_BYTES, guess_source_type
 from shared.logging import get_logger
-from shared.models import Permission
+from shared.models import DocumentStatus, KnowledgeSourceType, Permission
 from shared.tools import extract_variables, is_builtin, validate_request_schema
 
 logger = get_logger(__name__)
@@ -345,8 +352,8 @@ async def create_knowledge_base(
 ) -> KnowledgeBaseResponse:
     """Create a knowledge base.
 
-    Document ingestion and retrieval are Phase 6; this creates the container
-    and its retrieval settings so an agent can be pointed at it.
+    Creates the container and its retrieval settings. Upload documents
+    afterwards to index them (spec 33).
     """
     repository = TenantRepository(tenant.session, tenant.tenant_id)
     clash = await tenant.session.execute(
@@ -460,6 +467,194 @@ async def list_documents(
         limit=limit,
         offset=offset,
     )
+
+
+async def _require_kb(tenant: CurrentTenant, kb_id: uuid.UUID) -> KnowledgeBase:
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    row = await repository.get(KnowledgeBase, kb_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no knowledge base with id {kb_id}")
+    return row
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/documents",
+    response_model=KnowledgeDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a document and index it",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def upload_document(
+    kb_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+    file: Annotated[UploadFile, File()],
+    title: Annotated[str | None, Form()] = None,
+) -> KnowledgeDocumentResponse:
+    await _require_kb(tenant, kb_id)
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="the file is empty")
+    if len(payload) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"files larger than {MAX_FILE_BYTES // (1024 * 1024)} MB are refused",
+        )
+
+    filename = file.filename or "document.txt"
+    source_type = guess_source_type(filename, file.content_type)
+    document = KnowledgeDocument(
+        tenant_id=tenant.tenant_id,
+        knowledge_base_id=kb_id,
+        title=(title or filename).strip()[:512],
+        source_type=source_type,
+        status=DocumentStatus.PENDING,
+        byte_size=len(payload),
+    )
+    tenant.session.add(document)
+    await tenant.session.flush()
+
+    key = document_object_key(tenant.tenant_id, kb_id, document.id, filename)
+    await object_store.put_object(key, payload, file.content_type or "application/octet-stream")
+    document.source_object_key = key
+
+    try:
+        await ingest_document(tenant.session, document)
+    except IngestError as exc:
+        # The FAILED row is still saved so the operator can see why.
+        logger.warning("knowledge_upload_ingest_failed", extra={"error": exc.detail})
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="knowledge_document.uploaded",
+        resource_type="knowledge_document",
+        resource_id=document.id,
+        new_value=audit.snapshot(document, "title", "source_type", "status", "chunk_count"),
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return KnowledgeDocumentResponse.model_validate(document, from_attributes=True)
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/documents/web",
+    response_model=KnowledgeDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Index a web page",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def add_web_document(
+    kb_id: uuid.UUID,
+    payload: WebDocumentCreate,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> KnowledgeDocumentResponse:
+    await _require_kb(tenant, kb_id)
+    document = KnowledgeDocument(
+        tenant_id=tenant.tenant_id,
+        knowledge_base_id=kb_id,
+        title=(payload.title or payload.url).strip()[:512],
+        source_type=KnowledgeSourceType.WEB,
+        source_url=payload.url,
+        status=DocumentStatus.PENDING,
+    )
+    tenant.session.add(document)
+    await tenant.session.flush()
+    try:
+        await ingest_document(tenant.session, document)
+    except IngestError as exc:
+        logger.warning("knowledge_web_ingest_failed", extra={"error": exc.detail})
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="knowledge_document.uploaded",
+        resource_type="knowledge_document",
+        resource_id=document.id,
+        new_value=audit.snapshot(document, "title", "source_type", "status", "source_url"),
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return KnowledgeDocumentResponse.model_validate(document, from_attributes=True)
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/documents/{document_id}/reindex",
+    response_model=KnowledgeDocumentResponse,
+    summary="Re-run extraction and embedding",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def reindex_document(
+    kb_id: uuid.UUID,
+    document_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> KnowledgeDocumentResponse:
+    await _require_kb(tenant, kb_id)
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    document = await repository.get(KnowledgeDocument, document_id)
+    if document is None or document.knowledge_base_id != kb_id:
+        raise HTTPException(status_code=404, detail="no document with that id in this base")
+    try:
+        await ingest_document(tenant.session, document)
+    except IngestError as exc:
+        logger.warning("knowledge_reindex_failed", extra={"error": exc.detail})
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="knowledge_document.reindexed",
+        resource_type="knowledge_document",
+        resource_id=document.id,
+        new_value=audit.snapshot(document, "status", "chunk_count", "ingest_error"),
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return KnowledgeDocumentResponse.model_validate(document, from_attributes=True)
+
+
+@router.delete(
+    "/knowledge-bases/{kb_id}/documents/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Remove a document and its chunks",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def delete_document(
+    kb_id: uuid.UUID,
+    document_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> Response:
+    await _require_kb(tenant, kb_id)
+    repository = TenantRepository(tenant.session, tenant.tenant_id)
+    document = await repository.get(KnowledgeDocument, document_id)
+    if document is None or document.knowledge_base_id != kb_id:
+        raise HTTPException(status_code=404, detail="no document with that id in this base")
+    key = document.source_object_key
+    before = audit.snapshot(document, "title", "source_type", "status")
+    await repository.delete(KnowledgeDocument, document_id)
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="knowledge_document.deleted",
+        resource_type="knowledge_document",
+        resource_id=document_id,
+        old_value=before,
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    if key:
+        await object_store.delete_object(key)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete(

@@ -109,6 +109,7 @@ class KnowledgeBaseCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=2000)
+    embedding_provider_id: uuid.UUID | None = None
     embedding_model_slug: str | None = Field(default=None, max_length=128)
     embedding_dimensions: int = Field(default=1536, ge=1, le=8192)
 
@@ -137,6 +138,21 @@ class KnowledgeBaseResponse(TimestampedResponse):
     document_count: int = 0
     indexed_count: int = 0
     chunk_count: int = 0
+
+
+class WebDocumentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=8, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned.lower().startswith(("http://", "https://")):
+            raise ValueError("give an http:// or https:// URL")
+        return cleaned
 
 
 class KnowledgeDocumentResponse(TimestampedResponse):

@@ -23,6 +23,9 @@ from app.db.models import (
     Agent,
     AgentTool,
     AgentVersion,
+    KnowledgeBase,
+    KnowledgeChunk,
+    KnowledgeDocument,
     LiveKitDispatchRule,
     Model,
     Pbx,
@@ -44,7 +47,9 @@ from shared.logging import get_logger
 from shared.models import (
     TENANT_ROLE_PERMISSIONS,
     AgentVersionState,
+    DocumentStatus,
     HttpMethod,
+    KnowledgeSourceType,
     PbxType,
     PlatformRole,
     ProviderKind,
@@ -1055,6 +1060,16 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
     for name in ("get_customer", "check_order", "create_order", "check_inventory"):
         await _grant_tool(session, tenant.id, dev_version_id, tools_by_name[name].id)
 
+    hotel_kb = await _seed_hotel_knowledge(session, tenant.id)
+    if hotel_kb is not None:
+        if version.knowledge_base_id is None:
+            version.knowledge_base_id = hotel_kb.id
+        published = agent.published_version_id
+        if published is not None and published != version.id:
+            live = await session.get(AgentVersion, published)
+            if live is not None and live.knowledge_base_id is None:
+                live.knowledge_base_id = hotel_kb.id
+
     logger.info(
         "seeded_dev_tenant",
         extra={"tenant_id": str(tenant.id), "agent_id": str(agent.id)},
@@ -1072,6 +1087,73 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
         sip_auth_username=trunk.auth_username or "",
         sip_auth_password=trunk_password,
     )
+
+
+_HOTEL_POLICY_TEXT = (
+    "Checkout is at 11:00. Late checkout until 14:00 costs 25 dollars when the "
+    "room is available. The lobby Wi-Fi network is Hotel-Guest and the password "
+    "is harbour-1842. Pets under 15 kilograms are allowed with a 50 dollar "
+    "cleaning fee. Breakfast is served from 06:30 to 10:00 in the Garden Room. "
+    "The pool closes at 22:00. Lost-key replacements are 15 dollars at reception."
+)
+
+
+async def _seed_hotel_knowledge(session: AsyncSession, tenant_id: uuid.UUID) -> KnowledgeBase | None:
+    """Idempotent sample base so RAG can be demonstrated without an upload."""
+    existing = (
+        await session.execute(
+            select(KnowledgeBase).where(
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.name == "Hotel policies",
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        existing = KnowledgeBase(
+            tenant_id=tenant_id,
+            name="Hotel policies",
+            description="Seeded house rules used to demonstrate retrieval.",
+            embedding_model_slug="text-embedding-3-small",
+            embedding_dimensions=1536,
+            top_k=4,
+            status=ResourceStatus.ACTIVE,
+        )
+        session.add(existing)
+        await session.flush()
+
+    doc = (
+        await session.execute(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.tenant_id == tenant_id,
+                KnowledgeDocument.knowledge_base_id == existing.id,
+                KnowledgeDocument.title == "House rules",
+            )
+        )
+    ).scalar_one_or_none()
+    if doc is None:
+        doc = KnowledgeDocument(
+            tenant_id=tenant_id,
+            knowledge_base_id=existing.id,
+            title="House rules",
+            source_type=KnowledgeSourceType.TXT,
+            status=DocumentStatus.INDEXED,
+            chunk_count=1,
+            byte_size=len(_HOTEL_POLICY_TEXT.encode()),
+        )
+        session.add(doc)
+        await session.flush()
+        session.add(
+            KnowledgeChunk(
+                tenant_id=tenant_id,
+                knowledge_document_id=doc.id,
+                knowledge_base_id=existing.id,
+                chunk_index=0,
+                content=_HOTEL_POLICY_TEXT,
+                doc_metadata={"title": "House rules", "source_type": "TXT"},
+            )
+        )
+        await session.flush()
+    return existing
 
 
 async def _seed_builtin_tools(session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, Tool]:

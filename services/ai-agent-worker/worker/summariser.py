@@ -102,7 +102,12 @@ async def _fetch_segments(session: AsyncSession, transcript_id: uuid.UUID) -> li
     return result.fetchall()
 
 
-async def _request_summary(context: "CallContext", dialogue: str) -> str | None:
+async def _request_summary(
+    context: "CallContext",
+    dialogue: str,
+    *,
+    system_prompt: str | None = None,
+) -> str | None:
     """Make one chat.completions call and return the summary text, or None.
 
     Builds a fresh ``AsyncOpenAI`` client each time.  The LiveKit LLM
@@ -120,13 +125,14 @@ async def _request_summary(context: "CallContext", dialogue: str) -> str | None:
     )
     model = cfg.model or "gpt-4o-mini"
 
-    # Prefer the tenant's custom template (also used by warm-transfer whisper
-    # in Phase 6); fall back to the built-in prompt.
-    system_prompt = (
-        context.transfer_policy.summary_template.strip()
-        if getattr(context.transfer_policy, "summary_template", None)
-        else _DEFAULT_SYSTEM_PROMPT
-    )
+    # Prefer an explicit prompt (mid-call rolling summary), then the
+    # tenant's transfer template, then the built-in post-call prompt.
+    if system_prompt is None:
+        system_prompt = (
+            context.transfer_policy.summary_template.strip()
+            if getattr(context.transfer_policy, "summary_template", None)
+            else _DEFAULT_SYSTEM_PROMPT
+        )
 
     resp = await client.chat.completions.create(
         model=model,

@@ -49,6 +49,8 @@ from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
 from worker.resilience import ATTEMPT_TIMEOUT
 from worker.settings import get_settings
+from worker.memory import RollingMemory, roll_summary
+from worker.rag.retrieve import format_context, search_chunks
 from worker.summariser import generate_summary
 from worker.tools import ToolRuntime, livekit_tools
 
@@ -170,19 +172,92 @@ async def _await_caller(ctx: JobContext) -> tuple[rtc.RemoteParticipant | None, 
         ctx.room.off("participant_connected", _on_join)
 
 
-def _build_agent(context: CallContext, runtime: ToolRuntime | None = None) -> Agent:
+def _message_text(message: object) -> str:
+    """Pull spoken text out of a LiveKit chat message of unknown shape."""
+    for attr in ("text_content", "text", "content"):
+        value = getattr(message, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                else:
+                    piece = getattr(item, "text", None) or getattr(item, "content", None)
+                    if isinstance(piece, str):
+                        parts.append(piece)
+            joined = " ".join(part for part in parts if part).strip()
+            if joined:
+                return joined
+    return ""
+
+
+class ConfigurableAgent(Agent):
+    """Agent that retrieves tenant documents and rolls a long-call summary."""
+
+    def __init__(
+        self,
+        context: CallContext,
+        runtime: ToolRuntime | None,
+        factory: Any,
+    ) -> None:
+        instructions = context.system_prompt or (
+            "You are a helpful voice assistant answering a phone call. "
+            "Keep replies brief, since they are spoken aloud."
+        )
+        self._context = context
+        self._factory = factory
+        self._memory = RollingMemory(base_instructions=instructions)
+        tools = livekit_tools(runtime) if runtime is not None else []
+        super().__init__(instructions=instructions, tools=tools)
+
+    async def on_user_turn_completed(self, turn_ctx: Any, new_message: Any) -> None:
+        text = _message_text(new_message)
+        self._memory.record_user_turn(text)
+        retrieved = ""
+        knowledge = self._context.knowledge
+        if knowledge is not None and text:
+            try:
+                async with self._factory() as session:
+                    chunks = await search_chunks(
+                        session,
+                        tenant_id=self._context.tenant_id,
+                        knowledge_base_id=knowledge.knowledge_base_id,
+                        query=text,
+                        top_k=knowledge.top_k,
+                        api_key=knowledge.api_key,
+                        base_url=knowledge.base_url,
+                        model=knowledge.embedding_model,
+                    )
+                retrieved = format_context(chunks)
+            except Exception:
+                logger.exception("knowledge_retrieve_failed")
+        if self._memory.should_roll():
+            try:
+                await roll_summary(self._context, self._memory)
+            except Exception:
+                logger.exception("rolling_summary_failed")
+        composed = self._memory.compose_instructions(retrieved=retrieved)
+        updater = getattr(self, "update_instructions", None)
+        if updater is not None:
+            result = updater(composed)
+            if asyncio.iscoroutine(result):
+                await result
+
+
+def _build_agent(
+    context: CallContext,
+    runtime: ToolRuntime | None = None,
+    factory: Any = None,
+) -> Agent:
     """Construct the agent from configuration only.
 
     The system prompt, greeting, and granted tools come from the published
     agent version, so two tenants running the same worker behave completely
     differently without a line of tenant-specific code (spec 9, 23).
     """
-    instructions = context.system_prompt or (
-        "You are a helpful voice assistant answering a phone call. "
-        "Keep replies brief, since they are spoken aloud."
-    )
-    tools = livekit_tools(runtime) if runtime is not None else []
-    return Agent(instructions=instructions, tools=tools)
+    return ConfigurableAgent(context, runtime, factory)
 
 
 def _tts_for_filler(context: CallContext) -> Any:
@@ -629,7 +704,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             started_at = asyncio.get_running_loop().time()
             tool_runtime = ToolRuntime(context.tools, context, factory)
             await session.start(
-                agent=_build_agent(context, tool_runtime),
+                agent=_build_agent(context, tool_runtime, factory),
                 room=ctx.room,
                 room_input_options=RoomInputOptions(
                     # Telephony audio arrives already narrowband and

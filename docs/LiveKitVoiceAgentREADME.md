@@ -1048,7 +1048,7 @@ misread as a fault:
 | Barge-in and interruption handling | **Working — Plan 2b.7 + 2b.11 complete (2026-09-12).** `turn_handling` uses VAD plus a **2 s / 6 s** endpointing window so a ~1.1 s transcript still joins its turn. The default local EOT model is not loaded (537 ms off `session.start`). |
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
-| Tools, function calling, RAG | **Tools working — Plan 6.1–6.5 complete (2026-09-12).** Granted tools are registered on the LiveKit agent and executed mid-call (builtins or HTTP). Saving or publishing a live agent that already has tools no longer 500s; a field change enables Publish, which persists then goes live. RAG / knowledge ingestion is still Phase 6.6+. |
+| Tools, function calling, RAG | **Tools + RAG working — Plan 6.1–6.8 complete (2026-09-13).** Granted tools run mid-call. Knowledge bases ingest PDF/DOCX/TXT/CSV/web, retrieve tenant-scoped chunks on each user turn, and long calls get a rolling summary every 8 user turns. |
 | Ticketing | **Working — Plan 6.0 + 6.1 complete (2026-09-12).** Console **Tickets**. Service Agent files rows via `create_ticket()` with `source=AGENT`. Seed: **Service Agent**, `TCK-0001`, and the builtin tool library. |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
@@ -1395,7 +1395,7 @@ navigation and a platform account has no tenant to act in.
 | Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
 | Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |
 | Tools | `/tools` | HTTP and builtin tools: name, description, method, URL, auth, headers, request/response schema, timeout, retries (Plan 6.2). `{{caller_number}}` and other call-context placeholders (Plan 6.3). |
-| Knowledge Bases | `/knowledge-bases` | Create and assign a base; **ingestion is Phase 6** |
+| Knowledge Bases | `/knowledge-bases` | Create a base, upload PDF/DOCX/TXT/CSV or a URL, reindex. Assign the base on the agent. Retrieval is tenant-scoped (Plan 6.6–6.7). |
 | Tickets | `/tickets` | Support tickets — create and close here; Service Agent files them from a call with `create_ticket()` |
 | Calls / Transcripts | `/calls` | History, per-call detail, transcript and events |
 | Recordings | `/recordings` | Recording metadata; **empty until egress lands (Plan 2b.3)** |
@@ -1429,9 +1429,9 @@ sidebar entries carry a small tag and each screen states the position:
   because the worker does not start a LiveKit egress job (Plan 2b.3). An agent
   version can already have recording switched on; that records the intent and
   produces no audio.
-* **Knowledge Bases** can be created, configured and assigned to an agent. The
-  document list is live; nothing populates it until Phase 6 ingestion lands, so
-  an agent pointed at a base retrieves nothing rather than failing.
+* **Knowledge Bases** can be created, uploaded into (PDF, DOCX, TXT, CSV, URL),
+  and assigned to an agent. The worker retrieves tenant-scoped chunks on each
+  user turn (Plan 6.6–6.7). Seed: **Hotel policies**.
 
 Disabling either menu entry would have hidden the configuration that *is*
 usable behind the feature that is not.
@@ -2082,7 +2082,9 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | A service never becomes ready | `/ready` reports which dependency failed; check PostgreSQL, Redis, LiveKit, object storage. |
 | Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001`, **Service Agent**, and the builtin tool library. |
 | Service Agent talks about a ticket but none appears | Re-run `seed-dev-tenant` so `create_ticket` is granted. Confirm the call used Service Agent (not Development Agent). Look for `tool_invoked` / `ticket_filed_by_agent` in the worker log. |
-| Publish blocked by an invalid tool schema | Fix the tool on `/tools`, or uncheck it on the agent. A granted tool with `schema_valid=false` cannot go live (Plan 6.4). |
+| Knowledge base document stays FAILED | Open Documents — `ingest_error` says why (empty file, fetch failed, missing embedding key). Reindex after fixing AI Setup. TXT/CSV still index without a key (keyword retrieval). |
+| Agent does not use the knowledge base | Assign the base on the agent and Publish. Seeded **Hotel policies** (Wi-Fi password `harbour-1842`) is on Development Agent after `seed-dev-tenant`. |
+| Long call forgets earlier facts | Plan 6.8 rolls a summary into instructions every 8 user turns. Confirm the worker is on the new `ConfigurableAgent`. |
 | **Save as new draft** errors after changing a published agent | Fixed 2026-09-12. The save used to wipe and re-insert the same tool grants and hit `uq_agent_tools_version_tool`. Restart the API if the container is still on the old code. |
 | Publish stays disabled after changing the model | Change any field — that dirties the form and enables Publish. Publish now saves first, then goes live. Warnings (yellow) do not block; only validation **errors** do. |
 | The model asked for a tool the agent must not use | Check the agent's tool allow-list. Absence is a denial. Seeded `refund_order` is in the library and granted to nobody. |
