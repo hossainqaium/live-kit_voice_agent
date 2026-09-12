@@ -239,6 +239,26 @@ class VoiceResponse(TimestampedResponse):
     sample_object_key: str | None
 
 
+class VoiceTestRequest(BaseModel):
+    """One-shot preview synthesis (spec 27, 4b.5).
+
+    ``api_key`` is write-only: used for this request, never stored or returned.
+    Required only when the provider's ``requires_credential`` is true.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = Field(default=None, min_length=1, max_length=500)
+    api_key: str | None = Field(default=None, min_length=1, max_length=512)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class VoiceTestResponse(BaseModel):
+    sample_object_key: str
+    content_type: str
+    bytes: int
+
+
 # --------------------------------------------------------------------------- #
 # Audit history (spec 69)
 # --------------------------------------------------------------------------- #

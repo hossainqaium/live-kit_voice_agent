@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import Select, func, select, text
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import update as sql_update
@@ -76,9 +77,11 @@ from app.schemas.platform import (
     TenantUpdate,
     VoiceCreate,
     VoiceResponse,
+    VoiceTestRequest,
+    VoiceTestResponse,
     VoiceUpdate,
 )
-from app.services import audit
+from app.services import audit, voice_preview
 from shared.logging import get_logger
 from shared.models import (
     CallState,
@@ -1049,6 +1052,132 @@ async def update_voice(
 
     return VoiceResponse.model_validate(row, from_attributes=True).model_copy(
         update={"provider_slug": provider_slug}
+    )
+
+
+@router.post(
+    "/voices/{voice_id}/test",
+    response_model=VoiceTestResponse,
+    summary="Synthesise a preview sample and store it",
+    dependencies=[Depends(require_super_admin())],
+)
+async def test_voice(
+    voice_id: uuid.UUID,
+    payload: VoiceTestRequest,
+    session: SessionDep,
+    principal: CurrentPrincipal,
+    request: Request,
+    client_ip: ClientIp,
+) -> VoiceTestResponse:
+    """Speak a short phrase with this catalog voice (spec 27, 4b.5).
+
+    The audio is written to object storage and ``sample_object_key`` is set
+    so the next Test dialog can replay it without calling the provider again.
+    Playback goes through ``GET .../sample`` so the browser never needs a
+    MinIO URL.
+    """
+    found = (
+        await session.execute(
+            select(Voice, Provider)
+            .join(Provider, Provider.id == Voice.provider_id)
+            .where(Voice.id == voice_id)
+        )
+    ).one_or_none()
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"no voice with id {voice_id}")
+    row, provider = found
+
+    if provider.requires_credential and not payload.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "this provider requires an API key for preview; "
+                "the key is used once and is not stored"
+            ),
+        )
+
+    model_slug = payload.model
+    if not model_slug:
+        model_row = (
+            await session.execute(
+                select(Model)
+                .where(
+                    Model.provider_id == provider.id,
+                    Model.status == ResourceStatus.ACTIVE,
+                )
+                .order_by(Model.is_default.desc(), Model.slug)
+            )
+        ).scalars().first()
+        model_slug = model_row.slug if model_row is not None else None
+
+    text = (payload.text or voice_preview.DEFAULT_PREVIEW_TEXT).strip()
+    try:
+        audio, content_type = await voice_preview.synthesize(
+            adapter=provider.adapter_key,
+            provider_voice_id=row.voice_id,
+            text=text,
+            api_key=payload.api_key,
+            base_url=provider.default_base_url,
+            model=model_slug,
+        )
+        key = voice_preview.sample_object_key(row.id)
+        await voice_preview.store_sample(key, audio, content_type)
+    except voice_preview.PreviewError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    row.sample_object_key = key
+    await audit.record(
+        session,
+        principal=principal,
+        action="voice.previewed",
+        resource_type="voice",
+        resource_id=row.id,
+        new_value={
+            "sample_object_key": key,
+            "bytes": len(audio),
+            "content_type": content_type,
+        },
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await session.commit()
+
+    return VoiceTestResponse(
+        sample_object_key=key, content_type=content_type, bytes=len(audio)
+    )
+
+
+@router.get(
+    "/voices/{voice_id}/sample",
+    summary="Stream the stored preview sample",
+    dependencies=[Depends(require_platform_user())],
+)
+async def get_voice_sample(
+    voice_id: uuid.UUID,
+    session: SessionDep,
+) -> StreamingResponse:
+    """Return the last stored preview so the console can play it.
+
+    Streamed through this API because a MinIO presigned URL would point at
+    ``minio:9000``, which a browser cannot reach.
+    """
+    row = (
+        await session.execute(select(Voice).where(Voice.id == voice_id))
+    ).scalar_one_or_none()
+    if row is None or not row.sample_object_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="no stored sample for this voice — run Test first",
+        )
+    try:
+        audio, content_type = await voice_preview.fetch_sample(row.sample_object_key)
+    except voice_preview.PreviewError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    return StreamingResponse(
+        iter([audio]),
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{voice_id}.mp3"'},
     )
 
 

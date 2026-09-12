@@ -1053,6 +1053,7 @@ misread as a fault:
 | Grafana voice-latency dashboard | **Working — Plan 2b.6 complete (2026-09-12).** `deploy/grafana/dashboards/voice-latency.json` — 18 panels auto-provisioned on next Grafana refresh. Covers all 6 spec-56 metrics (STT/LLM/TTS per-stage + time-to-first-response + time-to-first-audio + end-to-end), active calls, worker utilization, provider circuit breaker state, fallbacks. Filter by tenant and agent via template variables. View at http://localhost:3201 (admin/admin). |
 | DID form — routing rule, business hours, fallback | **Working — Plan 4b.2 complete (2026-09-12).** Phone Numbers create/edit offers a routing-rule pin and a business-hours schedule. Fallback is configured on the routing rule (no DID columns); the form shows the pinned rule's fallback and closed action. List view shows Routing and Hours names. |
 | Self-service password change | **Working — Plan 3b.3a complete (2026-09-12).** Any signed-in user: topbar **Change password**. `POST /auth/me/password` requires the current password, hashes the new one, and revokes every session in the same change. Sign in again afterwards. Admin reset (`POST /users/{id}/password`) is unchanged. |
+| Voice Library Test / preview | **Working — Plan 4b.5 complete (2026-09-12).** Platform Voices → **Test** synthesises a phrase, stores MP3 in object storage (`voices.sample_object_key`), and plays it in the dialog. Playback is streamed from `GET /platform/voices/{id}/sample` (authenticated) so the browser does not talk to MinIO. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1382,7 +1383,7 @@ navigation and a platform account has no tenant to act in.
 | Capacity | `/platform/capacity` | Inventory, live load, licensed concurrency (spec 48) |
 | Providers | `/platform/providers` | The STT/LLM/TTS catalog, including `requires_credential` |
 | Models | `/platform/models` | Model slugs per provider, with one default each |
-| Voices | `/platform/voices` | Voice identifiers for TTS providers (spec 30) |
+| Voices | `/platform/voices` | Voice identifiers for TTS providers, plus **Test** to hear and store a sample (spec 27) |
 | System Users | `/platform/system-users` | Platform staff and their two roles |
 | Audit Logs | `/platform/audit-logs` | The append-only trail, filterable (spec 69) |
 | Settings | `/platform/settings` | Effective configuration, secrets shown only as set/not-set |

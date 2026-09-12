@@ -8,7 +8,7 @@
  * invite the error rather than prevent it.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Shell } from "@/components/Shell";
 import {
@@ -29,6 +29,7 @@ export default function VoicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<CatalogVoice | null>(null);
+  const [testing, setTesting] = useState<CatalogVoice | null>(null);
 
   const canWrite = principal?.roles.includes("SUPER_ADMIN") ?? false;
   const ttsProviders = providers.filter((p) => p.kind === "TTS");
@@ -113,7 +114,12 @@ export default function VoicesPage() {
                   </td>
                   <td>
                     <div className="cell-actions">
-                      {canWrite && <Button size="sm" onClick={() => setEditing(row)}>Edit</Button>}
+                      {canWrite && (
+                        <>
+                          <Button size="sm" onClick={() => setTesting(row)}>Test</Button>
+                          <Button size="sm" onClick={() => setEditing(row)}>Edit</Button>
+                        </>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -128,6 +134,15 @@ export default function VoicesPage() {
           voice={editing} providers={ttsProviders}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSaved={async (msg) => { setCreating(false); setEditing(null); toasts.ok(msg); await load(); }}
+        />
+      )}
+
+      {testing && (
+        <VoicePreview
+          voice={testing}
+          provider={ttsProviders.find((p) => p.id === testing.provider_id) ?? null}
+          onClose={() => setTesting(null)}
+          onStored={async () => { toasts.ok(`sample stored for ${testing.name}`); await load(); }}
         />
       )}
 
@@ -268,6 +283,112 @@ function VoiceForm({
           )}
         </Field>
       </form>
+    </Dialog>
+  );
+}
+
+function VoicePreview({
+  voice, provider, onClose, onStored,
+}: {
+  voice: CatalogVoice;
+  provider: Provider | null;
+  onClose(): void;
+  onStored(): void | Promise<void>;
+}) {
+  const needsKey = provider?.requires_credential ?? true;
+  const [text, setText] = useState("Hello, this is a preview of this voice.");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [src, setSrc] = useState<string | null>(null);
+  const objectUrl = useRef<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
+    };
+  }, []);
+
+  async function playBlob(blob: Blob) {
+    if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
+    const url = URL.createObjectURL(blob);
+    objectUrl.current = url;
+    setSrc(url);
+  }
+
+  async function playStored() {
+    setBusy(true);
+    setFormError(null);
+    try {
+      await playBlob(await api.platform.voices.sample(voice.id));
+    } catch (err) {
+      setFormError(err instanceof ApiError ? err.message : "could not load the stored sample");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function synthesise() {
+    setBusy(true);
+    setFormError(null);
+    try {
+      await api.platform.voices.test(voice.id, {
+        text: text.trim() || undefined,
+        ...(needsKey && apiKey ? { api_key: apiKey } : {}),
+      });
+      await playBlob(await api.platform.voices.sample(voice.id));
+      await onStored();
+    } catch (err) {
+      setFormError(err instanceof ApiError ? err.message : "could not synthesise a preview");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      title={`Test ${voice.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>Close</Button>
+          {voice.sample_object_key && (
+            <Button onClick={playStored} disabled={busy}>Play stored sample</Button>
+          )}
+          <Button variant="primary" busy={busy} onClick={synthesise}>
+            Synthesise
+          </Button>
+        </>
+      }
+    >
+      {formError && <Notice tone="err">{formError}</Notice>}
+      <Field label="Phrase" hint="Spoken once. Stored as the voice's sample.">
+        {(id) => (
+          <textarea id={id} rows={3} value={text}
+            onChange={(e) => setText(e.target.value)} />
+        )}
+      </Field>
+      {needsKey && (
+        <Field
+          label="API key"
+          required
+          hint="Used for this request only. Never stored. Self-hosted providers that do not need a key skip this field."
+        >
+          {(id) => (
+            <input
+              id={id}
+              type="password"
+              autoComplete="off"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-…"
+            />
+          )}
+        </Field>
+      )}
+      {src && (
+        <audio controls src={src} autoPlay style={{ width: "100%", marginTop: 8 }} />
+      )}
     </Dialog>
   );
 }

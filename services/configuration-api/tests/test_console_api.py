@@ -265,6 +265,7 @@ class TestEveryConsoleSectionIsReachable:
             ("/api/v1/platform/providers", "POST"),
             ("/api/v1/platform/models", "POST"),
             ("/api/v1/platform/voices", "POST"),
+            ("/api/v1/platform/voices/{voice_id}/test", "POST"),
         ],
     )
     def test_catalog_writes_require_super_admin(self, app, path: str, method: str) -> None:

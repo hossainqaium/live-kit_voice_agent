@@ -191,6 +191,29 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
+async function requestBlob(
+  path: string,
+  { retry = true }: { retry?: boolean } = {},
+): Promise<Blob> {
+  const access = tokens.access();
+  const response = await fetch(`${API_V1}${path}`, {
+    headers: access ? { Authorization: `Bearer ${access}` } : {},
+  });
+  const requestId = response.headers.get("X-Request-ID");
+  if (response.status === 401 && retry && tokens.refresh()) {
+    if (await refreshTokens()) {
+      return requestBlob(path, { retry: false });
+    }
+    tokens.clear();
+    onAuthLost?.();
+    throw new ApiError("your session has expired; sign in again", 401, requestId);
+  }
+  if (!response.ok) {
+    throw new ApiError(await parseError(response), response.status, requestId);
+  }
+  return response.blob();
+}
+
 // --------------------------------------------------------------------------- //
 // Types mirroring the API schemas
 // --------------------------------------------------------------------------- //
@@ -1000,6 +1023,12 @@ export interface CatalogVoiceInput {
   is_default?: boolean;
 }
 
+export interface VoicePreviewResult {
+  sample_object_key: string;
+  content_type: string;
+  bytes: number;
+}
+
 export interface AuditEntry {
   id: string;
   occurred_at: string;
@@ -1544,6 +1573,18 @@ export const api = {
         },
       ): Promise<CatalogVoice> {
         return request<CatalogVoice>(`/platform/voices/${id}`, { method: "PUT", body: input });
+      },
+      test(
+        id: string,
+        input: { text?: string; api_key?: string; model?: string } = {},
+      ): Promise<VoicePreviewResult> {
+        return request<VoicePreviewResult>(`/platform/voices/${id}/test`, {
+          method: "POST",
+          body: input,
+        });
+      },
+      sample(id: string): Promise<Blob> {
+        return requestBlob(`/platform/voices/${id}/sample`);
       },
     },
     auditLogs(params: {
