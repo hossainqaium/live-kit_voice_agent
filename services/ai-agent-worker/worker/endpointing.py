@@ -67,4 +67,29 @@ def turn_handling_for(policy: CallPolicy) -> dict[str, Any]:
             "enabled": policy.interruption_enabled,
             "min_words": policy.interruption_min_words,
         },
+        # Start generating the reply during the endpointing window instead of
+        # after it. The window is 1.4 s of pure waiting (above), and the LLM
+        # needs about a second after it — overlapping the two is the only way
+        # to remove a wait rather than decorate it.
+        #
+        # **Measured over six turns each way, and it does not make calls
+        # faster.** Median 3332 -> 3154 ms, but the mean moves only 3208 ->
+        # 3163, and the baseline's best turn beats every preemptive one. What
+        # it does is halve the spread: stdev 393 -> 178. Steadier, not quicker,
+        # which for a voice agent is still worth having.
+        #
+        # It cannot do more here, and the reason is in the same numbers: the
+        # transcript does not arrive until ~1230 ms and the window closes at
+        # 1400, so there are about 170 ms to speculate into. Preemptive
+        # generation needs a transcript to generate from.
+        #
+        # `preemptive_tts` is left **off**. It would speculate on synthesis
+        # too, and this host's self-hosted TTS already saturates near two
+        # concurrent requests (Plan §12.1) — spending CPU on speech that may be
+        # discarded is the wrong trade on a box that cannot serve two real
+        # calls. Revisit with a GPU or hosted TTS.
+        "preemptive_generation": {
+            "enabled": True,
+            "preemptive_tts": False,
+        },
     }
