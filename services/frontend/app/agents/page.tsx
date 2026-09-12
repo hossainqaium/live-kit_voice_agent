@@ -567,11 +567,10 @@ function AgentBuilder({
               </Field>
             </div>
 
-            <Notice tone="warn">
-              Silence timeout, maximum duration and recording are stored but{" "}
-              <strong>not yet enforced by the worker</strong> (Phase 2b). They
-              are shown here because they are part of the configuration, not
-              because they currently take effect.
+            <Notice tone="info">
+              After the caller stops, the worker waits 2 seconds before
+              committing the turn so a late transcript still joins it. Checking
+              barge-in cancels in-flight TTS when they speak over the agent.
             </Notice>
 
             <div className="stack" style={{ gap: 8, marginBottom: 14 }}>

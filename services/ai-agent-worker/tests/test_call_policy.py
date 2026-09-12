@@ -123,17 +123,31 @@ class TestBuildSessionPassesPolicy:
     def test_interruptions_enabled_by_default(self) -> None:
         ctx = _context(_policy(interruption_enabled=True, interruption_min_words=0))
         kwargs = self._capture_session_kwargs(ctx)
-        assert kwargs.get("allow_interruptions") is True
+        assert kwargs["turn_handling"]["interruption"]["enabled"] is True
 
     def test_interruptions_disabled_when_policy_says_so(self) -> None:
         ctx = _context(_policy(interruption_enabled=False))
         kwargs = self._capture_session_kwargs(ctx)
-        assert kwargs.get("allow_interruptions") is False
+        assert kwargs["turn_handling"]["interruption"]["enabled"] is False
 
     def test_min_interruption_words_forwarded(self) -> None:
         ctx = _context(_policy(interruption_min_words=3))
         kwargs = self._capture_session_kwargs(ctx)
-        assert kwargs.get("min_interruption_words") == 3
+        assert kwargs["turn_handling"]["interruption"]["min_words"] == 3
+
+    def test_endpointing_window_is_set(self) -> None:
+        """2b.7: the session must not fall back to LiveKit's 0.5 / 3.0 defaults."""
+        kwargs = self._capture_session_kwargs(_context(_policy()))
+        endpointing = kwargs["turn_handling"]["endpointing"]
+        assert endpointing["min_delay"] == 2.0
+        assert endpointing["max_delay"] == 6.0
+        assert endpointing["mode"] == "fixed"
+
+    def test_deprecated_top_level_interruption_kwargs_are_not_set(self) -> None:
+        """Once turn_handling is passed, top-level kwargs are ignored by LiveKit."""
+        kwargs = self._capture_session_kwargs(_context(_policy()))
+        assert "allow_interruptions" not in kwargs
+        assert "min_interruption_words" not in kwargs
 
     def test_silence_timeout_forwarded_as_float(self) -> None:
         ctx = _context(_policy(silence_timeout_seconds=30))

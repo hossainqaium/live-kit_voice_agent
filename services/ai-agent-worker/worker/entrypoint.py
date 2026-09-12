@@ -43,6 +43,7 @@ from worker.config_loader import (
 )
 from worker.summariser import generate_summary
 from worker.db import get_session_factory
+from worker.endpointing import turn_handling_for
 from worker.health import state as worker_state
 from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
@@ -197,8 +198,9 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
     Call-policy options (spec 18, 29) are forwarded to the session rather than
     reimplemented. LiveKit's own option names are used; the mapping is:
       silence_timeout_seconds → user_away_timeout
-      interruption_enabled    → allow_interruptions
-      interruption_min_words  → min_interruption_words
+      interruption_*          → turn_handling.interruption
+    Endpointing delays are not tenant fields: they are the Plan 2b.7 window
+    in ``worker.endpointing``, fitted to the §12.1 hosted-STT measurement.
     max_call_duration_seconds is handled by a separate watchdog task in
     ``_run_call`` because no session option covers hard wall-clock limits.
     """
@@ -246,6 +248,15 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
         )
 
     policy = context.call_policy
+    turn_handling = turn_handling_for(policy)
+    logger.info(
+        "endpointing_window",
+        extra={
+            "min_delay_s": turn_handling["endpointing"]["min_delay"],
+            "max_delay_s": turn_handling["endpointing"]["max_delay"],
+            "interruptions": turn_handling["interruption"]["enabled"],
+        },
+    )
 
     # Voice activity detection drives turn-taking and barge-in (spec 29).
     # Silero runs locally, so it adds no network latency to the turn decision —
@@ -256,9 +267,10 @@ def _build_session(context: CallContext, vad: Any) -> AgentSession:
         llm=llm,
         tts=tts,
         vad=vad,
-        # Spec 29 — barge-in / interruption policy (2b.4).
-        allow_interruptions=policy.interruption_enabled,
-        min_interruption_words=policy.interruption_min_words,
+        # Spec 29 — barge-in and the 2b.7 endpointing window. Must go through
+        # turn_handling: the top-level allow_interruptions kwargs are ignored
+        # once this dict is set.
+        turn_handling=turn_handling,
         # Spec 18 — hang up when the caller goes silent for too long (2b.1).
         # None keeps the session alive indefinitely (the default behaviour).
         user_away_timeout=(

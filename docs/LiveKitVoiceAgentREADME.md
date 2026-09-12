@@ -1031,7 +1031,7 @@ misread as a fault:
 | Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
 | Per-turn latency metrics (STT, LLM first token, TTS first audio) | Working — populated per turn. **Single-call figures are not usable on this host** (transcription varied 1661–11832 ms). Repeated measurement + realtime factor: **Plan 2b.8 complete (2026-09-12)** — `make measure-latency STT_URL=…`. |
 | Recording to object storage | Not yet — Phase 2 |
-| Barge-in and interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
+| Barge-in and interruption handling | **Working — Plan 2b.7 complete (2026-09-12).** `turn_handling.interruption` honours the agent toggle; the worker waits **2 s / 6 s** (`min_delay` / `max_delay`) so a ~1.1 s transcript still joins its turn. LiveKit's 0.5 / 3.0 defaults were the §12.1 race. |
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
 | Tools, function calling, RAG | Not yet — Phase 6 |
@@ -1056,6 +1056,7 @@ misread as a fault:
 | Self-service password change | **Working — Plan 3b.3a complete (2026-09-12).** Any signed-in user: topbar **Change password**. `POST /auth/me/password` requires the current password, hashes the new one, and revokes every session in the same change. Sign in again afterwards. Admin reset (`POST /users/{id}/password`) is unchanged. |
 | Voice Library Test / preview | **Working — Plan 4b.5 complete (2026-09-12).** Platform Voices → **Test** synthesises a phrase, stores MP3 in object storage (`voices.sample_object_key`), and plays it in the dialog. Playback is streamed from `GET /platform/voices/{id}/sample` (authenticated) so the browser does not talk to MinIO. |
 | SIP Configuration Wizard | **Working — Plan 4b.1 complete (2026-09-12).** Tenant console **SIP Setup Wizard** (`/sip-wizard`): 10 guided steps from PBX to a synced DID. Reuses existing APIs; re-syncs the trunk after the number is assigned. |
+| Barge-in / endpointing window | **Working — Plan 2b.7 complete (2026-09-12).** Fixed `min_delay=2.0` / `max_delay=6.0` so a hosted-STT transcript (~1103 ms) lands inside the turn. Barge-in still follows the agent's interruption toggle. |
 | Repeated-measurement latency harness | **Working — Plan 2b.8 complete (2026-09-12).** `make measure-latency STT_URL=…` repeats STT/LLM/TTS probes at concurrency 1, 2 and 10 and reports p50/p95 **and** realtime factor (`audio / p50`). A factor below 1 means the stage cannot hold a conversation. Replay already-collected times with `--replay stt:3.6:0.773,2.655`. This is not the Phase 8 SIP load test. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
@@ -2021,7 +2022,8 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | One-way or no audio | RTP port range reachable from the PBX; NAT/`external_ip` in `livekit.yaml`; codec agreement on the trunk. |
 | Agent answers with the wrong behavior | Which `agent_version_id` is on the call record? Routing rule precedence and DID mapping. |
 | Long silence before the first word | Voice-latency metrics: STT latency, LLM first-token, TTS first-audio. Streaming enabled on all three? Repeat the stage with `make measure-latency` — a single call's number is not usable on a contended host. |
-| Agent talks over the caller | Barge-in path: VAD → turn detection → TTS cancellation; check interruption and silence-timeout settings. |
+| Agent talks over the caller | Barge-in path: VAD → turn detection → TTS cancellation; check the agent's interruption toggle. |
+| Caller is transcribed but the agent never replies | Worker log `transcript arrives after turn has been committed` — the 2b.7 window should prevent this (look for `endpointing_window min_delay_s=2.0`). If it still fires, STT is slower than 2 s; that is 2b.9, not a tighter window. |
 | `SIP trunk = Missing` in LiveKit | Configuration drift — run Synchronize/Repair. |
 | SIP Setup Wizard created a trunk but calls still `486 flood` | Finish the Phone Number step — that is what re-syncs accepted numbers. A trunk created at Security still has an empty list. |
 | Calls rejected at peak | Tenant call limits, or platform capacity exhausted — check Available Capacity and worker utilization. |
