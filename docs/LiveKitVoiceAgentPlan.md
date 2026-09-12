@@ -1045,23 +1045,50 @@ call record instead.
 **Symptom:** a dialplan row exists in `v_dialplans` and is correct, but
 FreeSWITCH behaves as though it does not exist. `reloadxml` changes nothing.
 
-**Cause (environment):** with `mod_xml_curl`, FusionPBX generates the dialplan
-XML and caches it at `/var/cache/fusionpbx/dialplan.<domain>`. Saving through
-the GUI invalidates that cache; **a direct database write does not.**
+**Cause (environment), and this entry had it half right until it cost another
+evening:** there are *three* representations, not two.
+
+| Where | What it is |
+|---|---|
+| `v_dialplan_details` | The rows Dialplan Manager edits. **Not what FreeSWITCH reads.** |
+| `v_dialplans.dialplan_xml` | A pre-rendered XML blob. **This is the source of truth.** |
+| `/var/cache/fusionpbx/dialplan.<domain>` | A file cache of the generated context |
+
+Pressing **Save** in the GUI does two things: it re-renders the detail rows
+into `dialplan_xml`, *and* it clears the cache. A direct write to the detail
+rows does neither — so the edit is visible in the GUI, correct in the database,
+and completely inert. Clearing the cache alone does not help either: the cache
+regenerates from `dialplan_xml`, which still holds the old rendering.
 
 **Fix, in order of preference:**
 
 1. Open the entry in Dialplan Manager and press **Save** — this also validates
    that the inserted rows render correctly.
 2. **Advanced → Cache → Flush Cache** in the GUI.
-3. `rm -f /var/cache/fusionpbx/dialplan.<domain>` and `reloadxml`.
+3. Update **both** `v_dialplan_details` *and* `v_dialplans.dialplan_xml`, then
+   clear the cache. Editing only the detail rows changes nothing at all.
+
+To clear the cache without root, use FusionPBX's own Lua API through
+FreeSWITCH — it runs as the user that owns the directory, so it can delete what
+a group member cannot:
+
+```lua
+-- /tmp/clear_dialplan_cache.lua, then: fs_cli -x "lua /tmp/clear_dialplan_cache.lua"
+local cache = require "resources.functions.cache"
+cache.del("dialplan:<domain>")
+```
+
+`fs_cli` reports `-ERR no reply` and deletes the file anyway; check the file
+rather than the return value. The script must live somewhere the FreeSWITCH
+user can read — `/tmp`, not a home directory.
 
 Note that the cache **file** is group-writable by `www-data` while the
 **directory** is not, so a member of that group can rewrite the file in place
-but cannot delete it. Editing the cache directly is a last resort: validate
-that the result still parses as XML and that the extension count is unchanged
-before writing, because a corrupt cache costs the whole domain its dialplan
-until the next flush.
+but cannot delete it. **Do not truncate it to force a regenerate.** FusionPBX
+serves an empty cache file as an empty dialplan: every number in the domain
+stops resolving, including ordinary extensions, until the file is restored.
+That was done here despite this paragraph already warning about it, and the
+only reason it lasted two minutes was a backup taken first. Take the backup.
 
 Also worth knowing: `xml_locate dialplan` returns "can't find anything" for
 anything served by `mod_xml_curl`, because the XML is fetched per call rather
