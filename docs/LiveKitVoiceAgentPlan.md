@@ -252,7 +252,7 @@ effect, and a call's audio is retrievable afterwards.
 | 2b.9 | STT latency. **Reopened on evidence**: self-hosted `faster-whisper-tiny` on this host gives p50 773 ms but p95 2655 ms sequentially, and a realtime factor below 1 at two concurrent calls — it cannot hold a conversation. Hosted measured 1103 ms with a flat tail. The work is no longer "move it local" but "decide per deployment, on measured numbers, and give self-hosted the hardware it needs". See §12.1. | **defect** | §25, §56 |
 | ~~2b.10~~ | **Browser test call from the console.** **Done**: a green-handset **Call Test** button on Phone Numbers, for any active number with an agent. `POST /browser-test/session` mints a scoped join token — the only endpoint in the platform that issues a credential, so its four guards are asserted rather than reviewed. Getting audio working took a stale `NODE_IP`, concurrent participant waits, no STUN, and a server upgrade; see §12.1. | ~~tooling~~ | §70 |
 | 2b.11 | **Synchronous work on the agent event loop.** One block per call between configuration load and session start, 1020 ms, from loading Silero per call. **Mostly fixed**: `prewarm_fnc` brings it to 628 ms. The remainder is inside `AgentSession.start`; the provider constructors were measured and ruled out at 3-34 ms. It delays the greeting, not the turn metrics. | **defect** (partly) | §28, §56 |
-| 2b.8 | Repeated-measurement harness, then the 10-concurrent-call one. Must report **realtime factor** per stage and not only latency: it is what says whether a configuration can hold a conversation, and it is what exposed the STT ceiling. Now a prerequisite for 2b.7 rather than a later nicety. | feature | §76 |
+| ~~2b.8~~ | ~~Repeated-measurement harness, then the 10-concurrent-call one. Must report **realtime factor** per stage and not only latency.~~ **Done (2026-09-12):** `shared.measure` repeats an STT / LLM / TTS probe and reports p50 / p95 / min / max **and** `realtime× = audio_duration / p50`. Below 1.0 the stage cannot keep up with speech — the same definition as Plan §12.1. Default concurrency ladder is `1,2,10` (the 10-wide run is here; it is not the Phase 8 SIP load test). CLI: `make measure-latency STT_URL=…` or `--replay stt:3.6:0.773,2.655`. Tests: `services/shared/tests/test_measure.py` assert the Plan §12.1 sequential row holds a conversation and the ×2 row does not. | ~~feature~~ | §76 |
 
 **Most of 2b.1, 2b.2 and 2b.4 is a mapping exercise.** `AgentSession` already
 accepts `user_away_timeout`, `min_interruption_duration`,
@@ -440,13 +440,13 @@ So the remaining priority is the enforcement gap, not more screens:
    the picture: the agent now holds a conversation over the browser path, and
    time to first audio is 5854 ms — the first complete measurement rather than
    an improvement on 4744 ms, which was taken from a turn that never replied.
-   **2b.8 now comes before 2b.7**, which is a change of position on evidence:
-   transcription time across three identical calls was 2314, 1661 and 11832 ms,
-   so a turn-taking window tuned against any one of them would be fitted to
-   noise. A repeated-measurement harness is the prerequisite, not a later
-   nicety. 2b.11's per-call block is half fixed and affects the greeting rather
-   than the turn, so it is no longer a blocker. A real PBX call is still needed
-   to confirm the symptom is gone off the browser path.
+   ~~**2b.8 now comes before 2b.7**~~ — **2b.8 done 2026-09-12**
+   (`make measure-latency`). Transcription time across three identical calls
+   was 2314, 1661 and 11832 ms, so a turn-taking window tuned against any one
+   of them would be fitted to noise. The harness is what makes the next 2b.7
+   window defensible. 2b.11's per-call block is half fixed and affects the
+   greeting rather than the turn, so it is no longer a blocker. A real PBX
+   call is still needed to confirm the symptom is gone off the browser path.
 3. ~~**2b.1–2b.4**~~ — **Done 2026-09-12.**
 4. **4b.4** — provider credentials in the console, which is what §77 turns on.
 5. ~~**1b.1**~~ — **Done 2026-09-12.** All three limits enforced; usage rollup written at call end.

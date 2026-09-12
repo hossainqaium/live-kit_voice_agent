@@ -36,6 +36,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Developer tooling shells out to docker and lsof by name, on purpose.
 "scripts/**" = ["S603", "S607"]
+# Operator-supplied OpenAI-compatible URLs; urllib is intentional (no extra dep).
+# timezone.utc kept so the host CLI still runs on Python 3.9.
+"services/shared/shared/measure.py" = ["S310", "UP017"]
 # Tests legitimately assert on private members and use hard-coded fixtures.
 "**/tests/**" = ["S101", "S105", "S106", "SLF001", "N802"]
 # Alembic's generated scaffolding is not ours to restyle.

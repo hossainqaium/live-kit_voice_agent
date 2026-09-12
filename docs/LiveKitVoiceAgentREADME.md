@@ -206,7 +206,7 @@ The intended structure. Do **not** collapse this into a monolith.
 ├── tests/
 │   ├── integration/                # PBX → SIP → LiveKit → agent → STT/LLM/TTS
 │   ├── e2e/                        # real SIP calls
-│   └── load/                       # progressive + sustained load harness
+│   └── load/                       # 2b.8 repeated-measurement harness; Phase 8 SIP load not built
 │
 ├── scripts/
 │   ├── preflight.py                # port-collision check, run by `make up`
@@ -1029,7 +1029,7 @@ misread as a fault:
 | Language model | Working — OpenAI `gpt-4o-mini`, or any OpenAI-compatible endpoint. Verified by exercising the adapter directly (§9c.5). |
 | Text to speech | Working — self-hosted Kokoro, or OpenAI |
 | Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
-| Per-turn latency metrics (STT, LLM first token, TTS first audio) | Working — populated per turn. **But single-call figures are not usable on this host**: transcription varied 1661-11832 ms across three identical calls, because self-hosted Whisper on CPU is the contended resource. Repeated measurement is Plan 2b.8. |
+| Per-turn latency metrics (STT, LLM first token, TTS first audio) | Working — populated per turn. **Single-call figures are not usable on this host** (transcription varied 1661–11832 ms). Repeated measurement + realtime factor: **Plan 2b.8 complete (2026-09-12)** — `make measure-latency STT_URL=…`. |
 | Recording to object storage | Not yet — Phase 2 |
 | Barge-in and interruption handling | Partially, via the pipeline's VAD. Tuned and verified in Phase 2. |
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
@@ -1056,6 +1056,7 @@ misread as a fault:
 | Self-service password change | **Working — Plan 3b.3a complete (2026-09-12).** Any signed-in user: topbar **Change password**. `POST /auth/me/password` requires the current password, hashes the new one, and revokes every session in the same change. Sign in again afterwards. Admin reset (`POST /users/{id}/password`) is unchanged. |
 | Voice Library Test / preview | **Working — Plan 4b.5 complete (2026-09-12).** Platform Voices → **Test** synthesises a phrase, stores MP3 in object storage (`voices.sample_object_key`), and plays it in the dialog. Playback is streamed from `GET /platform/voices/{id}/sample` (authenticated) so the browser does not talk to MinIO. |
 | SIP Configuration Wizard | **Working — Plan 4b.1 complete (2026-09-12).** Tenant console **SIP Setup Wizard** (`/sip-wizard`): 10 guided steps from PBX to a synced DID. Reuses existing APIs; re-syncs the trunk after the number is assigned. |
+| Repeated-measurement latency harness | **Working — Plan 2b.8 complete (2026-09-12).** `make measure-latency STT_URL=…` repeats STT/LLM/TTS probes at concurrency 1, 2 and 10 and reports p50/p95 **and** realtime factor (`audio / p50`). A factor below 1 means the stage cannot hold a conversation. Replay already-collected times with `--replay stt:3.6:0.773,2.655`. This is not the Phase 8 SIP load test. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1841,7 +1842,18 @@ fail to read or mutate a Tenant B resource.
 
 ## 14. Load Testing
 
-The 1,000-concurrent-call target is a claim only once measured. Run the progression:
+Before any capacity claim, measure whether a *stage* can keep up with speech.
+Realtime factor is `audio_duration / p50(elapsed)` — below 1.0 the stage falls
+behind. That is Plan 2b.8, and it is what showed self-hosted Whisper on this
+host cannot hold two concurrent transcriptions:
+
+```bash
+make measure-latency STT_URL=http://127.0.0.1:8000/v1
+# optional: LLM_URL=… TTS_URL=… REPEATS=15 CONCURRENCY=1,2,10 MEASURE_JSON=report.json
+```
+
+The 1,000-concurrent-call target is a separate claim, and only once measured
+over real SIP. That harness is Phase 8:
 
 ```bash
 make load-test CONCURRENCY=10
@@ -2008,7 +2020,7 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Call rings but nobody answers | Dispatch rule exists and is `SYNCED`? Worker registered under `WORKER_AGENT_NAME`? Worker logs for the `call_id`. |
 | One-way or no audio | RTP port range reachable from the PBX; NAT/`external_ip` in `livekit.yaml`; codec agreement on the trunk. |
 | Agent answers with the wrong behavior | Which `agent_version_id` is on the call record? Routing rule precedence and DID mapping. |
-| Long silence before the first word | Voice-latency metrics: STT latency, LLM first-token, TTS first-audio. Streaming enabled on all three? |
+| Long silence before the first word | Voice-latency metrics: STT latency, LLM first-token, TTS first-audio. Streaming enabled on all three? Repeat the stage with `make measure-latency` — a single call's number is not usable on a contended host. |
 | Agent talks over the caller | Barge-in path: VAD → turn detection → TTS cancellation; check interruption and silence-timeout settings. |
 | `SIP trunk = Missing` in LiveKit | Configuration drift — run Synchronize/Repair. |
 | SIP Setup Wizard created a trunk but calls still `486 flood` | Finish the Phone Number step — that is what re-syncs accepted numbers. A trunk created at Security still has an empty list. |

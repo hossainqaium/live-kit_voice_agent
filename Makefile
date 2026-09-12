@@ -21,7 +21,7 @@ GRAFANA_PORT  ?= $(shell grep -E '^GRAFANA_PORT=' .env 2>/dev/null | cut -d= -f2
         test-room browser-test refresh-ip \
         typecheck-web build-web check-web \
         test test-unit test-api test-worker test-shared test-integration test-e2e \
-        lint fmt fmt-check typecheck check load-test clean nuke
+        lint fmt fmt-check typecheck check load-test measure-latency clean nuke
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -180,12 +180,37 @@ check-web: typecheck-web build-web ## Console checks
 check: lint typecheck test ## Everything CI runs
 
 # --------------------------------------------------------------------------- #
-# Load testing (Phase 8)
+# Latency measurement (Plan 2b.8) and load testing (Phase 8)
 # --------------------------------------------------------------------------- #
 
-load-test: ## Progressive load test (make load-test CONCURRENCY=10)
+REPEATS       ?= 15
+CONCURRENCY   ?= 1,2,10
+AUDIO_SECONDS ?= 3.6
+STT_URL       ?=
+STT_MODEL     ?= Systran/faster-whisper-tiny
+LLM_URL       ?=
+LLM_MODEL     ?= gpt-4o-mini
+TTS_URL       ?=
+TTS_MODEL     ?= tts-1
+API_KEY       ?=
+MEASURE_JSON  ?=
+
+measure-latency: ## Repeat STT/LLM/TTS probes; report p50/p95 and realtime factor
+	@test -n "$(STT_URL)$(LLM_URL)$(TTS_URL)" || (echo "usage: make measure-latency STT_URL=http://127.0.0.1:8000/v1" && exit 2)
+	python3 scripts/measure_latency.py \
+		--repeats $(REPEATS) \
+		--concurrency $(CONCURRENCY) \
+		--audio-seconds $(AUDIO_SECONDS) \
+		$(if $(STT_URL),--stt-url $(STT_URL) --stt-model $(STT_MODEL)) \
+		$(if $(LLM_URL),--llm-url $(LLM_URL) --llm-model $(LLM_MODEL)) \
+		$(if $(TTS_URL),--tts-url $(TTS_URL) --tts-model $(TTS_MODEL)) \
+		$(if $(API_KEY),--api-key $(API_KEY)) \
+		$(if $(MEASURE_JSON),--json $(MEASURE_JSON))
+
+load-test: ## Progressive SIP load test (Phase 8 — not yet built)
 	@echo "Phase 8 delivers this. Progression: 10, 25, 50, 100, 250, 500, 750, 1000."
-	@echo "No capacity claim is valid until these numbers are measured."
+	@echo "For repeated stage measurement (Plan 2b.8) use: make measure-latency STT_URL=..."
+	@echo "No capacity claim is valid until the Phase 8 numbers are measured."
 
 # --------------------------------------------------------------------------- #
 # Cleanup
