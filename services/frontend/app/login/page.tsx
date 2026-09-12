@@ -13,6 +13,18 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [changedNotice, setChangedNotice] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("voice.password_changed") === "1") {
+        sessionStorage.removeItem("voice.password_changed");
+        setChangedNotice(true);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // Already signed in: skip the form rather than showing it and then
   // redirecting, which reads as a flicker.
@@ -42,6 +54,12 @@ export default function LoginPage() {
           Sign in to administer tenants, telephony and AI agents.
         </p>
 
+        {changedNotice && (
+          <Notice tone="ok">
+            Password changed. Sign in again with the new password — every
+            previous session has been revoked.
+          </Notice>
+        )}
         {error && <Notice tone="err">{error}</Notice>}
 
         <form onSubmit={onSubmit} noValidate>

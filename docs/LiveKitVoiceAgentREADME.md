@@ -1052,6 +1052,7 @@ misread as a fault:
 | Audit trail coverage — every mutating endpoint | **Complete — Plan 3b.5 done (2026-09-12).** Fixed gap: `POST /catalog/credentials/{id}/verify` now writes a `credential.verified` audit row. `tests/test_audit_coverage.py` statically walks all `POST/PUT/PATCH/DELETE` routes and asserts `audit.record` is present (direct or via private helper); two intentional exemptions documented. New endpoints without audit fail the test immediately. |
 | Grafana voice-latency dashboard | **Working — Plan 2b.6 complete (2026-09-12).** `deploy/grafana/dashboards/voice-latency.json` — 18 panels auto-provisioned on next Grafana refresh. Covers all 6 spec-56 metrics (STT/LLM/TTS per-stage + time-to-first-response + time-to-first-audio + end-to-end), active calls, worker utilization, provider circuit breaker state, fallbacks. Filter by tenant and agent via template variables. View at http://localhost:3201 (admin/admin). |
 | DID form — routing rule, business hours, fallback | **Working — Plan 4b.2 complete (2026-09-12).** Phone Numbers create/edit offers a routing-rule pin and a business-hours schedule. Fallback is configured on the routing rule (no DID columns); the form shows the pinned rule's fallback and closed action. List view shows Routing and Hours names. |
+| Self-service password change | **Working — Plan 3b.3a complete (2026-09-12).** Any signed-in user: topbar **Change password**. `POST /auth/me/password` requires the current password, hashes the new one, and revokes every session in the same change. Sign in again afterwards. Admin reset (`POST /users/{id}/password`) is unchanged. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1366,7 +1367,7 @@ navigation and a platform account has no tenant to act in.
 | Calls / Transcripts | `/calls` | History, per-call detail, transcript and events |
 | Recordings | `/recordings` | Recording metadata; **empty until egress lands (Plan 2b.3)** |
 | Analytics | `/analytics` | Volume and outcomes over a window (spec 57) |
-| Users | `/users` | Tenant users and roles (spec 8) |
+| Users | `/users` | Tenant users and roles (spec 8). **Change your own password** is in the top bar (every role), not this admin page. |
 | Usage | `/usage` | Standing against each limit, and which are enforced (spec 47) |
 | Settings | `/settings` | Name, timezone, default language |
 

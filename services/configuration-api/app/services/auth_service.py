@@ -177,6 +177,46 @@ async def refresh(session: AsyncSession, principal: Principal) -> TokenPair:
     )
 
 
+class PasswordMismatchError(AuthError):
+    """The current password did not match."""
+
+
+class SamePasswordError(AuthError):
+    """The new password is identical to the current one."""
+
+
+async def change_own_password(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    current_password: str,
+    new_password: str,
+) -> User:
+    """Rotate the signed-in user's password and revoke every existing session.
+
+    The current password is required so a stolen access token cannot replace
+    the credential on its own. Existing tokens stop at the next request
+    (``tokens_valid_from``), including the one that made this call — the
+    caller must sign in again.
+    """
+    user = (
+        await session.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise InvalidCredentialsError("account is no longer active")
+
+    if not verify_password(current_password, user.password_hash):
+        raise PasswordMismatchError("current password is incorrect")
+
+    if current_password == new_password:
+        raise SamePasswordError("the new password must be different from the current one")
+
+    user.password_hash = hash_password(new_password)
+    user.tokens_valid_from = datetime.now(UTC)
+    logger.info("password_changed", extra={"user_id": str(user_id)})
+    return user
+
+
 async def revoke_sessions(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Invalidate every token already issued to a user.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -15,6 +15,29 @@ class LoginRequest(BaseModel):
     #: attacker which passwords are too short to be real, and the stored hash
     #: is what actually gates access.
     password: str = Field(min_length=1, max_length=256)
+
+
+class PasswordChange(BaseModel):
+    """Self-service password rotation (spec 53, 3b.3a).
+
+    Requires the current password so a stolen session cannot silently replace
+    the credential. The new password uses the same 12–72 bound as admin reset.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=72)
+
+    @model_validator(mode="after")
+    def _new_must_differ(self) -> PasswordChange:
+        if self.current_password == self.new_password:
+            raise ValueError("the new password must be different from the current one")
+        return self
+
+
+class PasswordChangeResponse(BaseModel):
+    sessions_revoked: bool = True
 
 
 class RefreshRequest(BaseModel):

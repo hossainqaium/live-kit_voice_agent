@@ -13,6 +13,8 @@ from app.core.settings import get_settings
 from app.db.session import get_session
 from app.schemas.auth import (
     LoginRequest,
+    PasswordChange,
+    PasswordChangeResponse,
     PrincipalResponse,
     RefreshRequest,
     TokenResponse,
@@ -119,6 +121,61 @@ async def refresh(payload: RefreshRequest, session: SessionDep) -> TokenResponse
         refresh_token=pair.refresh_token,
         expires_in=settings.access_token_ttl_minutes * 60,
     )
+
+
+@router.post(
+    "/me/password",
+    response_model=PasswordChangeResponse,
+    summary="Change the signed-in user's password and revoke sessions",
+)
+async def change_password(
+    payload: PasswordChange,
+    principal: CurrentPrincipal,
+    request: Request,
+    session: SessionDep,
+    client_ip: ClientIp,
+) -> PasswordChangeResponse:
+    """Rotate the caller's own password (spec 53, 3b.3a).
+
+    Requires the current password. Existing sessions — including this one —
+    are revoked in the same change, so a stolen token cannot keep working
+    after the credential moves. The caller must sign in again.
+    """
+    try:
+        user = await auth_service.change_own_password(
+            session,
+            user_id=principal.user_id,
+            current_password=payload.current_password,
+            new_password=payload.new_password,
+        )
+    except auth_service.PasswordMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        # hash_password rejects short or over-long values.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except auth_service.AuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+
+    await audit.record(
+        session,
+        principal=principal,
+        action="user.password_changed",
+        resource_type="user",
+        resource_id=user.id,
+        new_value={"sessions_revoked": True},
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+        user_agent=request.headers.get("user-agent"),
+    )
+    await session.commit()
+
+    return PasswordChangeResponse(sessions_revoked=True)
 
 
 @router.get(

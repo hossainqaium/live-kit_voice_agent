@@ -21,6 +21,8 @@ interface AuthState {
   error: string | null;
   signIn(email: string, password: string): Promise<void>;
   signOut(): void;
+  /** After a self-service password change: clear the session and return to login. */
+  signOutAfterPasswordChange(): void;
   /** Cosmetic only — the backend enforces permissions independently. */
   can(permission: string): boolean;
 }
@@ -34,6 +36,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const signOut = useCallback(() => {
+    tokens.clear();
+    setPrincipal(null);
+    router.replace("/login");
+  }, [router]);
+
+  const signOutAfterPasswordChange = useCallback(() => {
+    try {
+      sessionStorage.setItem("voice.password_changed", "1");
+    } catch {
+      // Storage can be blocked; the login form still works without the banner.
+    }
     tokens.clear();
     setPrincipal(null);
     router.replace("/login");
@@ -104,8 +117,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ principal, loading, error, signIn, signOut, can }),
-    [principal, loading, error, signIn, signOut, can],
+    () => ({ principal, loading, error, signIn, signOut, signOutAfterPasswordChange, can }),
+    [principal, loading, error, signIn, signOut, signOutAfterPasswordChange, can],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

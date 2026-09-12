@@ -17,8 +17,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, Dialog, Field, Notice } from "@/components/ui";
+import { ApiError, api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 interface NavEntry {
@@ -123,8 +125,9 @@ const PLATFORM_NAV: NavGroup[] = [
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { principal, signOut, can } = useAuth();
+  const { principal, signOut, signOutAfterPasswordChange, can } = useAuth();
   const pathname = usePathname();
+  const [changingPassword, setChangingPassword] = useState(false);
 
   const isPlatform = principal?.is_platform_user ?? false;
   const groups = isPlatform ? PLATFORM_NAV : TENANT_NAV;
@@ -216,6 +219,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
             >
               API docs ↗
             </a>
+            <Button size="sm" variant="ghost" onClick={() => setChangingPassword(true)}>
+              Change password
+            </Button>
             <Button size="sm" variant="ghost" onClick={signOut}>
               Sign out
             </Button>
@@ -224,6 +230,106 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
         <main className="content">{children}</main>
       </div>
+
+      {changingPassword && (
+        <ChangePasswordForm
+          onClose={() => setChangingPassword(false)}
+          onChanged={signOutAfterPasswordChange}
+        />
+      )}
     </div>
+  );
+}
+
+function ChangePasswordForm({
+  onClose,
+  onChanged,
+}: {
+  onClose(): void;
+  onChanged(): void;
+}) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  async function onSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (newPassword !== confirm) {
+      setFormError("the new passwords do not match");
+      return;
+    }
+    setBusy(true);
+    setFormError(null);
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      onChanged();
+    } catch (err) {
+      setFormError(err instanceof ApiError ? err.message : "could not change the password");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      title="Change your password"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button variant="primary" busy={busy} onClick={onSubmit}>
+            Change password
+          </Button>
+        </>
+      }
+    >
+      {formError && <Notice tone="err">{formError}</Notice>}
+      <form onSubmit={onSubmit} noValidate>
+        <Field label="Current password" required>
+          {(id) => (
+            <input
+              id={id}
+              type="password"
+              required
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="New password" required hint="At least 12 characters.">
+          {(id) => (
+            <input
+              id={id}
+              type="password"
+              required
+              minLength={12}
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Confirm new password" required>
+          {(id) => (
+            <input
+              id={id}
+              type="password"
+              required
+              minLength={12}
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+          )}
+        </Field>
+        <Notice tone="info">
+          Every existing session — including this one — stops immediately.
+          You will be asked to sign in again.
+        </Notice>
+      </form>
+    </Dialog>
   );
 }

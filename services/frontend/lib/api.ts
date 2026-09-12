@@ -1134,6 +1134,13 @@ export const api = {
     return request<Principal>("/auth/me");
   },
 
+  changePassword(currentPassword: string, newPassword: string): Promise<{ sessions_revoked: boolean }> {
+    return request<{ sessions_revoked: boolean }>("/auth/me/password", {
+      method: "POST",
+      body: { current_password: currentPassword, new_password: newPassword },
+    });
+  },
+
   pbxs: {
     list(limit = 50, offset = 0): Promise<Page<Pbx>> {
       return request<Page<Pbx>>(`/pbxs?limit=${limit}&offset=${offset}`);
