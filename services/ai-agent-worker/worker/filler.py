@@ -151,7 +151,20 @@ class ThinkingFiller:
         what a person does — "mm-hm, let me check" over the end of a sentence —
         and it is interruptible, so a caller who carries on wins.
         """
-        if getattr(event, "new_state", None) == "listening":
+        old_state = getattr(event, "old_state", None)
+        new_state = getattr(event, "new_state", None)
+
+        # **The transition, not the state.** "listening" means the caller is
+        # not speaking, which is also true right after the greeting, before
+        # they have said anything at all. Arming on the state alone fired a
+        # filler into that silence, and the caller's actual question then
+        # arrived while the agent was mid-phrase and was discarded — the agent
+        # said "One moment." and never answered, because there was no longer a
+        # question to answer.
+        #
+        # speaking -> listening is the only transition that means "they have
+        # just finished saying something".
+        if old_state == "speaking" and new_state == "listening":
             self._arm()
         else:
             self._disarm()
@@ -236,7 +249,17 @@ class ThinkingFiller:
             # give way like any other agent speech (spec 29).
             await self._session.say(
                 phrase,
-                allow_interruptions=True,
+                # **Not interruptible, and this is the load-bearing choice.**
+                # The filler plays before the turn commits, so the tail of the
+                # caller's utterance can land on top of it. An interruptible
+                # filler is then interrupted — and LiveKit cancels the pending
+                # reply along with it, which is why the agent sometimes said
+                # "let me check" and then nothing at all.
+                #
+                # The cost is a second of overlap if the caller resumes. The
+                # cost of the alternative is a lost answer, which is the worse
+                # of the two by a distance.
+                allow_interruptions=False,
                 # Kept out of the conversation history. "One moment." is not
                 # something the model said about the caller's problem, and
                 # feeding it back teaches the agent that filler is part of its

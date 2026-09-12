@@ -70,6 +70,30 @@ class WorkerSettings(BaseSettings):
     #: browser client that is coming has usually arrived first.
     browser_test_participant_timeout_seconds: float = 5.0
 
+    # --- Conversation ------------------------------------------------------ #
+    #: Speak a short acknowledgement while a reply is being produced.
+    #:
+    #: **Off, because it cannot be made safe on livekit-agents 1.8.** Measured
+    #: rather than assumed, over several live calls:
+    #:
+    #: * ``session.say`` has no priority argument, and LiveKit queues the reply
+    #:   the moment the turn commits. A filler started after that plays *after*
+    #:   the answer.
+    #: * The only earlier window is before the turn commits — and an agent that
+    #:   speaks there destroys the caller's pending turn. Three consecutive
+    #:   calls produced a greeting, a filler, and **zero caller transcript
+    #:   segments**: the question was discarded, so nothing was ever answered.
+    #:
+    #: That is strictly worse than the silence it set out to cover, so it is
+    #: off. The code and its tests are kept because the mechanism is sound —
+    #: it needs an SDK that can either prioritise a speech handle or emit a
+    #: backchannel, and `_AgentBackchannelOpportunityEvent` suggests one is
+    #: coming.
+    #:
+    #: The real fix for the gap is to make it shorter: Plan 2b.9 (STT
+    #: placement) and preemptive generation.
+    enable_thinking_filler: bool = False
+
     # --- Configuration source --------------------------------------------- #
     postgres_host: str = "postgresql"
     postgres_port: int = 5432

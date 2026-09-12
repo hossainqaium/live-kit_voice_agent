@@ -572,11 +572,12 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             # caller to wonder whether the line dropped. Wrapped for the same
             # reason as the observer: a decoration on a wait must never be able
             # to end the call it decorates.
-            filler = ThinkingFiller(session)
-            try:
-                filler.attach()
-            except Exception:
-                logger.exception("filler_attach_failed_continuing_without_it")
+            if get_settings().enable_thinking_filler:
+                filler = ThinkingFiller(session)
+                try:
+                    filler.attach()
+                except Exception:
+                    logger.exception("filler_attach_failed_continuing_without_it")
 
             await tracker.transition(CallState.AI_CONNECTED)
 

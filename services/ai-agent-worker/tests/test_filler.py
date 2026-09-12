@@ -51,7 +51,7 @@ class FakeSession:
         if handler:
             handler(type("Event", (), {"new_state": new_state})())
 
-    def emit_user(self, new_state: str) -> None:
+    def emit_user(self, new_state: str, old_state: str = "speaking") -> None:
         """A user_state_changed event — what actually arms the filler.
 
         The filler cannot arm on "thinking": by then LiveKit has queued the
@@ -60,7 +60,9 @@ class FakeSession:
         """
         handler = self._handlers.get("user_state_changed")
         if handler:
-            handler(type("Event", (), {"new_state": new_state})())
+            handler(
+                type("Event", (), {"new_state": new_state, "old_state": old_state})()
+            )
 
 
 class TestTheWindowClearsMeasuredTranscription:
@@ -152,6 +154,84 @@ class TestFillerIsQueuedAheadOfTheReply:
 
         session.emit_user("listening")
         await asyncio.sleep(0.08)  # must not raise
+
+
+class TestItOnlyFiresAfterTheCallerActuallySpoke:
+    """The failure that lost the caller's question entirely."""
+
+    @pytest.mark.asyncio
+    async def test_silence_after_the_greeting_does_not_arm_it(self) -> None:
+        """"listening" is the state for "not speaking", which is true right
+        after the greeting too. Arming there fired a filler into the opening
+        silence; the caller's question then arrived mid-phrase and was
+        discarded, so the agent said "One moment." and never answered.
+        """
+        session = FakeSession()
+        ThinkingFiller(session, after_seconds=0.02).attach()
+
+        # No speech yet: the session settles into listening from idle.
+        session.emit_user("listening", old_state="away")
+        await asyncio.sleep(0.08)
+
+        assert session.said == []
+
+    @pytest.mark.asyncio
+    async def test_only_speaking_to_listening_arms_it(self) -> None:
+        session = FakeSession()
+        ThinkingFiller(session, after_seconds=0.02).attach()
+
+        session.emit_user("listening", old_state="speaking")
+        await asyncio.sleep(0.08)
+
+        assert len(session.said) == 1
+
+
+class TestTheFillerCannotCostTheAnswer:
+    """The regression that mattered most: the agent said "let me check" and
+    then nothing at all."""
+
+    @pytest.mark.asyncio
+    async def test_the_filler_is_not_interruptible(self) -> None:
+        """It plays before the turn commits, so the tail of the caller's
+        utterance can land on it. An interruptible filler is interrupted, and
+        LiveKit cancels the pending reply along with it.
+
+        A second of overlap is the price; a lost answer is not.
+        """
+        session = FakeSession()
+        captured: dict[str, Any] = {}
+
+        async def record(text: str, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            session.said.append(text)
+
+        session.say = record  # type: ignore[method-assign]
+        ThinkingFiller(session, after_seconds=0.02).attach()
+
+        session.emit_user("listening")
+        await asyncio.sleep(0.08)
+
+        assert session.said, "filler did not speak"
+        assert captured.get("allow_interruptions") is False
+
+    @pytest.mark.asyncio
+    async def test_the_filler_stays_out_of_the_conversation_history(self) -> None:
+        """Feeding "One moment." back teaches the agent that filler is part of
+        its own voice."""
+        session = FakeSession()
+        captured: dict[str, Any] = {}
+
+        async def record(text: str, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            session.said.append(text)
+
+        session.say = record  # type: ignore[method-assign]
+        ThinkingFiller(session, after_seconds=0.02).attach()
+
+        session.emit_user("listening")
+        await asyncio.sleep(0.08)
+
+        assert captured.get("add_to_chat_ctx") is False
 
 
 class TestThePhrasesThemselves:
