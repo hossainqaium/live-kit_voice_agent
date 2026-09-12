@@ -73,26 +73,15 @@ class WorkerSettings(BaseSettings):
     # --- Conversation ------------------------------------------------------ #
     #: Speak a short acknowledgement while a reply is being produced.
     #:
-    #: **Off, because it cannot be made safe on livekit-agents 1.8.** Measured
-    #: rather than assumed, over several live calls:
+    #: Played on its own audio track, not through ``AgentSession.say`` — see
+    #: ``worker.filler_track`` for why that route cannot work. Because it never
+    #: enters the session's speech queue it cannot arrive after the answer, and
+    #: because stopping is just ceasing to write frames it cannot cancel the
+    #: reply.
     #:
-    #: * ``session.say`` has no priority argument, and LiveKit queues the reply
-    #:   the moment the turn commits. A filler started after that plays *after*
-    #:   the answer.
-    #: * The only earlier window is before the turn commits — and an agent that
-    #:   speaks there destroys the caller's pending turn. Three consecutive
-    #:   calls produced a greeting, a filler, and **zero caller transcript
-    #:   segments**: the question was discarded, so nothing was ever answered.
-    #:
-    #: That is strictly worse than the silence it set out to cover, so it is
-    #: off. The code and its tests are kept because the mechanism is sound —
-    #: it needs an SDK that can either prioritise a speech handle or emit a
-    #: backchannel, and `_AgentBackchannelOpportunityEvent` suggests one is
-    #: coming.
-    #:
-    #: The real fix for the gap is to make it shorter: Plan 2b.9 (STT
-    #: placement) and preemptive generation.
-    enable_thinking_filler: bool = False
+    #: Clips are synthesised with the call's own voice on first use and cached
+    #: for the life of the worker process.
+    enable_thinking_filler: bool = True
 
     # --- Configuration source --------------------------------------------- #
     postgres_host: str = "postgresql"

@@ -43,7 +43,7 @@ from worker.config_loader import (
 )
 from worker.db import get_session_factory
 from worker.endpointing import turn_handling_for
-from worker.filler import ThinkingFiller
+from worker.filler_track import FillerTrack
 from worker.health import state as worker_state
 from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
@@ -183,6 +183,21 @@ def _build_agent(context: CallContext, runtime: ToolRuntime | None = None) -> Ag
     )
     tools = livekit_tools(runtime) if runtime is not None else []
     return Agent(instructions=instructions, tools=tools)
+
+
+def _tts_for_filler(context: CallContext) -> Any:
+    """A TTS instance for synthesising filler clips.
+
+    Built separately from the session's own, because the session owns its
+    component's lifecycle and streaming state — borrowing it to synthesise a
+    clip mid-call risks interleaving with a real reply. This one is used once
+    per voice per process and then never again.
+
+    Only the primary provider: a filler is not worth a fallback chain, and if
+    the primary TTS is unavailable the call has larger problems than silence
+    during a pause.
+    """
+    return build_tts(context.tts).build_livekit_component()
 
 
 def _build_session(context: CallContext, vad: Any) -> AgentSession:
@@ -572,12 +587,42 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             # caller to wonder whether the line dropped. Wrapped for the same
             # reason as the observer: a decoration on a wait must never be able
             # to end the call it decorates.
+            # Filler audio on its own track, deliberately outside the
+            # session: `AgentSession.say` queues behind the reply, and speaking
+            # before the turn commits destroys it. See `worker.filler_track`.
+            filler: FillerTrack | None = None
             if get_settings().enable_thinking_filler:
-                filler = ThinkingFiller(session)
                 try:
-                    filler.attach()
+                    filler = FillerTrack(
+                        ctx.room,
+                        _tts_for_filler(context),
+                        voice_key=f"{context.tts.provider}:{context.tts.model}"
+                        f":{context.tts.voice_id}",
+                    )
+                    await filler.start()
+
+                    def _on_user_state(event: Any, _f: FillerTrack = filler) -> None:
+                        # Only speaking -> listening. "listening" alone is also
+                        # true right after the greeting, and arming there put a
+                        # filler into the opening silence.
+                        if (
+                            getattr(event, "old_state", None) == "speaking"
+                            and getattr(event, "new_state", None) == "listening"
+                        ):
+                            _f.arm()
+
+                    def _on_agent_state(event: Any, _f: FillerTrack = filler) -> None:
+                        # The real answer is starting: silence the filler within
+                        # a frame. Stopping is just ceasing to write, so this
+                        # cannot cancel the reply.
+                        if getattr(event, "new_state", None) == "speaking":
+                            _f.stop()
+
+                    session.on("user_state_changed", _on_user_state)
+                    session.on("agent_state_changed", _on_agent_state)
                 except Exception:
-                    logger.exception("filler_attach_failed_continuing_without_it")
+                    logger.exception("filler_start_failed_continuing_without_it")
+                    filler = None
 
             await tracker.transition(CallState.AI_CONNECTED)
 
@@ -614,6 +659,9 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             # Wait for the call to end — either the caller hangs up, or the
             # max-duration watchdog fires (spec 18, 2b.2).
             hangup_reason = await _wait_for_call_end(ctx, context)
+
+            if filler is not None:
+                await filler.aclose()
 
             await tracker.transition(CallState.COMPLETED, hangup_reason=hangup_reason)
             logger.info("conversation_ended", extra={"hangup_reason": hangup_reason})
