@@ -94,6 +94,10 @@ class AgentVersionConfig(BaseModel):
     embedding_model_id: uuid.UUID | None = None
     change_note: str | None = Field(default=None, max_length=1000)
 
+    #: Explicit allow-list (spec 32). ``None`` leaves grants unchanged;
+    #: ``[]`` clears them. Absence of a tool is a denial.
+    tool_ids: list[uuid.UUID] | None = None
+
 
 class AgentVersionResponse(TimestampedResponse):
     agent_id: uuid.UUID
@@ -164,6 +168,10 @@ class AgentVersionResponse(TimestampedResponse):
     tts_fallback_label: str | None = None
     stt_local_label: str | None = None
     tts_local_label: str | None = None
+
+    #: Tools this version may call. Empty is a denial of every tool (spec 32).
+    tool_ids: list[uuid.UUID] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
 
 
 class AgentResponse(TimestampedResponse):

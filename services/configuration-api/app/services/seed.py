@@ -16,28 +16,12 @@ import secrets
 import uuid
 from dataclasses import dataclass
 
-from shared.crypto import CredentialCipher
-from shared.logging import get_logger
-from shared.models import (
-    TENANT_ROLE_PERMISSIONS,
-    AgentVersionState,
-    PbxType,
-    PlatformRole,
-    ProviderKind,
-    RoleScope,
-    RoomStrategy,
-    SipTransport,
-    TicketPriority,
-    TicketSource,
-    TicketStatus,
-    TrunkDirection,
-)
-from shared.models import Permission as PermissionCode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     Agent,
+    AgentTool,
     AgentVersion,
     LiveKitDispatchRule,
     Model,
@@ -52,10 +36,151 @@ from app.db.models import (
     SipTrunk,
     Tenant,
     Ticket,
+    Tool,
     Voice,
 )
+from shared.crypto import CredentialCipher
+from shared.logging import get_logger
+from shared.models import (
+    TENANT_ROLE_PERMISSIONS,
+    AgentVersionState,
+    HttpMethod,
+    PbxType,
+    PlatformRole,
+    ProviderKind,
+    ResourceStatus,
+    RoleScope,
+    RoomStrategy,
+    SipTransport,
+    TicketPriority,
+    TicketSource,
+    TicketStatus,
+    TrunkDirection,
+)
+from shared.models import Permission as PermissionCode
+from shared.tools import validate_request_schema
 
 logger = get_logger(__name__)
+
+_SERVER_AGENT_PROMPT = (
+    "You are Server Agent. Your job is to file a support ticket when a caller "
+    "reports a problem with a building, room, or service. Ask for a short title "
+    "and what is wrong. Confirm before calling create_ticket. After it returns "
+    "a ticket number, read that number back to the caller. Keep spoken replies "
+    "brief. Do not invent a ticket number."
+)
+
+_BUILTIN_TOOLS: tuple[tuple[str, str, dict], ...] = (
+    (
+        "create_ticket",
+        "File a support ticket for a reported problem. Call only after the caller confirms.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short title of the problem"},
+                "description": {
+                    "type": "string",
+                    "description": "What is broken and where",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["LOW", "NORMAL", "HIGH", "URGENT"],
+                    "description": "How urgent the problem is",
+                },
+            },
+            "required": ["title", "description"],
+        },
+    ),
+    (
+        "get_customer",
+        "Look up a customer by customer_id. Demo records: 1001, 1002.",
+        {
+            "type": "object",
+            "properties": {
+                "customer_id": {"type": "string", "description": "Customer reference"}
+            },
+            "required": ["customer_id"],
+        },
+    ),
+    (
+        "check_order",
+        "Look up an order by order_id. Demo records: ORD-100, ORD-200.",
+        {
+            "type": "object",
+            "properties": {"order_id": {"type": "string", "description": "Order reference"}},
+            "required": ["order_id"],
+        },
+    ),
+    (
+        "create_order",
+        "Place an order for a customer. Demo SKUs: WIDGET, GADGET.",
+        {
+            "type": "object",
+            "properties": {
+                "customer_id": {"type": "string"},
+                "sku": {"type": "string", "description": "Item SKU"},
+            },
+            "required": ["customer_id", "sku"],
+        },
+    ),
+    (
+        "cancel_order",
+        "Cancel an existing order by order_id.",
+        {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    ),
+    (
+        "check_inventory",
+        "Check stock for a SKU. Demo SKUs: WIDGET, GADGET.",
+        {
+            "type": "object",
+            "properties": {"sku": {"type": "string"}},
+            "required": ["sku"],
+        },
+    ),
+    (
+        "send_sms",
+        "Queue a sandbox SMS. Uses caller_number when to is omitted.",
+        {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["body"],
+        },
+    ),
+    (
+        "send_email",
+        "Queue a sandbox email.",
+        {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["to", "subject"],
+        },
+    ),
+    (
+        "transfer_call",
+        "Request a warm transfer to a human. Not available until Phase 6.9.",
+        {"type": "object", "properties": {}},
+    ),
+    (
+        "refund_order",
+        "Issue a refund for an order. Restricted — grant only to agents that may refund.",
+        {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,14 +983,7 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
                 "Hello, this is the server desk. Tell me what is broken and I "
                 "will file a ticket."
             ),
-            system_prompt=(
-                "You are Server Agent. Your job is to file a support ticket "
-                "when a caller reports a problem with a building, room, or "
-                "service. Ask for a short title and what is wrong. Confirm "
-                "before filing. Keep spoken replies brief. Until the ticket "
-                "tool is available, collect the details and tell the caller "
-                "the desk will file the ticket."
-            ),
+            system_prompt=_SERVER_AGENT_PROMPT,
             stt_provider_id=stt.id,
             stt_model_id=await _model_id(session, stt.id, spec.stt_model),
             llm_provider_id=llm.id,
@@ -910,6 +1028,16 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
         )
         await session.flush()
 
+    if server_version is not None and "Until the ticket tool" in (server_version.system_prompt or ""):
+        server_version.system_prompt = _SERVER_AGENT_PROMPT
+
+    tools_by_name = await _seed_builtin_tools(session, tenant.id)
+    server_version_id = server_agent.published_version_id or server_version.id
+    await _grant_tool(session, tenant.id, server_version_id, tools_by_name["create_ticket"].id)
+    dev_version_id = agent.published_version_id or version.id
+    for name in ("get_customer", "check_order", "create_order", "check_inventory"):
+        await _grant_tool(session, tenant.id, dev_version_id, tools_by_name[name].id)
+
     logger.info(
         "seeded_dev_tenant",
         extra={"tenant_id": str(tenant.id), "agent_id": str(agent.id)},
@@ -927,6 +1055,61 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
         sip_auth_username=trunk.auth_username or "",
         sip_auth_password=trunk_password,
     )
+
+
+async def _seed_builtin_tools(session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, Tool]:
+    """Idempotently create the platform builtin tools for a tenant."""
+    by_name: dict[str, Tool] = {}
+    for name, description, schema in _BUILTIN_TOOLS:
+        row = (
+            await session.execute(
+                select(Tool).where(Tool.tenant_id == tenant_id, Tool.name == name)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            valid, error = validate_request_schema(schema, [])
+            row = Tool(
+                tenant_id=tenant_id,
+                name=name,
+                description=description,
+                http_method=HttpMethod.POST,
+                url_template=f"builtin://{name}",
+                request_schema=schema,
+                status=ResourceStatus.ACTIVE,
+                schema_valid=valid,
+                schema_validation_error=error,
+            )
+            session.add(row)
+            await session.flush()
+        by_name[name] = row
+    return by_name
+
+
+async def _grant_tool(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent_version_id: uuid.UUID,
+    tool_id: uuid.UUID,
+) -> None:
+    existing = (
+        await session.execute(
+            select(AgentTool).where(
+                AgentTool.tenant_id == tenant_id,
+                AgentTool.agent_version_id == agent_version_id,
+                AgentTool.tool_id == tool_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(
+            AgentTool(
+                tenant_id=tenant_id,
+                agent_version_id=agent_version_id,
+                tool_id=tool_id,
+                enabled=True,
+            )
+        )
+        await session.flush()
 
 
 async def _ensure_trunk_credential(

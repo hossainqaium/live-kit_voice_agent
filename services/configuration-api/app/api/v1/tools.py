@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from typing import Annotated
 
@@ -33,6 +32,7 @@ from app.services import audit
 from shared.crypto import CredentialCipher, CredentialEncryptionError
 from shared.logging import get_logger
 from shared.models import Permission
+from shared.tools import extract_variables, is_builtin, validate_request_schema
 
 logger = get_logger(__name__)
 
@@ -50,10 +50,6 @@ _TOOL_AUDITED = (
 )
 _KB_AUDITED = ("name", "description", "top_k", "status")
 
-#: ``{{variable}}`` placeholders (spec 31).
-_VARIABLE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
-
-
 def _variables(tool: Tool) -> list[str]:
     """Variables the URL and headers reference.
 
@@ -61,59 +57,22 @@ def _variables(tool: Tool) -> list[str]:
     placeholder is visible before a call rather than as a failed tool
     invocation mid-conversation.
     """
-    found: set[str] = set(_VARIABLE.findall(tool.url_template or ""))
-    for value in (tool.headers or {}).values():
-        found.update(_VARIABLE.findall(str(value)))
-    return sorted(found)
+    header_values = [str(value) for value in (tool.headers or {}).values()]
+    return extract_variables(tool.url_template or "", *header_values)
 
 
 def _validate_schema(tool: Tool) -> tuple[bool, str | None]:
-    """Check the request schema is usable as a function definition (spec 31).
-
-    Deliberately shallow: it confirms the shape a provider needs rather than
-    validating the whole of JSON Schema. A tool that passes here can still
-    describe arguments the tenant's API rejects — that is the tenant's
-    contract, not ours.
-    """
-    schema = tool.request_schema or {}
-    if not schema:
-        # No arguments is legitimate: a tool can take none.
-        return True, None
-
-    if not isinstance(schema, dict):
-        return False, "the request schema must be an object"
-    if schema.get("type") not in (None, "object"):
-        return False, "the top-level schema type must be 'object'"
-
-    properties = schema.get("properties")
-    if properties is not None and not isinstance(properties, dict):
-        return False, "'properties' must be an object"
-
-    required = schema.get("required")
-    if required is not None:
-        if not isinstance(required, list):
-            return False, "'required' must be a list"
-        missing = [name for name in required if name not in (properties or {})]
-        if missing:
-            return False, f"'required' names undeclared propert(ies): {', '.join(missing)}"
-
-    declared = set(properties or {})
-    referenced = set(_variables(tool))
-    unsatisfied = referenced - declared
-    if unsatisfied:
-        # A URL placeholder with no matching argument can never be filled, so
-        # the tool would fail on every call.
-        return False, (
-            "the URL or headers reference variable(s) the schema does not declare: "
-            f"{', '.join(sorted(unsatisfied))}"
-        )
-
-    return True, None
+    """Check the request schema is usable as a function definition (spec 31)."""
+    return validate_request_schema(tool.request_schema, _variables(tool))
 
 
 async def _tool_response(tool: Tool, *, has_secret: bool) -> ToolResponse:
     return ToolResponse.model_validate(tool, from_attributes=True).model_copy(
-        update={"has_secret": has_secret, "variables": _variables(tool)}
+        update={
+            "has_secret": has_secret,
+            "variables": _variables(tool),
+            "is_builtin": is_builtin(tool.url_template),
+        }
     )
 
 

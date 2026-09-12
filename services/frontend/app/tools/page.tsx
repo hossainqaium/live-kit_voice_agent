@@ -70,9 +70,10 @@ export default function ToolsPage() {
         <div>
           <h1>Tools</h1>
           <p className="page-subtitle">
-            HTTP calls the agent can make during a conversation — a booking
-            lookup, an availability check. The request schema is what the model
-            sees, so it decides whether the agent can call the tool at all.
+            HTTP calls and platform builtins the agent can make during a
+            conversation. The request schema is the function definition the
+            model sees. Use {"{{caller_number}}"} in a URL to fill the live
+            caller automatically.
           </p>
         </div>
         {canWrite && <Button variant="primary" onClick={() => setCreating(true)}>Add a tool</Button>}
@@ -249,7 +250,7 @@ function ToolForm({
     url_template: tool?.url_template ?? "",
     auth_type: tool?.auth_type ?? "NONE",
     auth_header_name: tool?.auth_header_name ?? null,
-    timeout_seconds: tool?.timeout_seconds ?? 10,
+    timeout_seconds: tool?.timeout_seconds ?? 5,
     max_retries: tool?.max_retries ?? 1,
   });
   // JSON is edited as text so an in-progress edit is not destroyed by a parse
@@ -257,9 +258,13 @@ function ToolForm({
   const [schemaText, setSchemaText] = useState(
     JSON.stringify(tool?.request_schema ?? {}, null, 2),
   );
+  const [responseText, setResponseText] = useState(
+    JSON.stringify(tool?.response_schema ?? {}, null, 2),
+  );
   const [headersText, setHeadersText] = useState(
     JSON.stringify(tool?.headers ?? {}, null, 2),
   );
+  const builtin = Boolean(tool?.is_builtin);
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -291,6 +296,7 @@ function ToolForm({
         description: form.description.trim(),
         url_template: form.url_template.trim(),
         request_schema: parseOr(schemaText, "Request schema"),
+        response_schema: parseOr(responseText, "Response schema"),
         headers: parseOr(headersText, "Headers") as Record<string, string>,
       };
       // Omitted rather than sent empty: an empty string would overwrite a
@@ -324,6 +330,12 @@ function ToolForm({
         </>
       }
     >
+      {builtin && (
+        <Notice tone="info">
+          This is a platform builtin. The handler URL cannot be changed; you
+          can still edit the description the model sees.
+        </Notice>
+      )}
       {formError && <Notice tone="err">{formError}</Notice>}
       <form onSubmit={onSubmit} noValidate>
         <Field
@@ -331,6 +343,7 @@ function ToolForm({
           hint="Becomes the function name the model calls, so letters, digits and underscores only."
         >
           {(id) => <input id={id} required className="mono" value={form.name}
+            disabled={builtin}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             placeholder="look_up_reservation" />}
         </Field>
@@ -353,18 +366,24 @@ function ToolForm({
               </select>
             )}
           </Field>
-          <Field label="Timeout" hint="Seconds. The caller is waiting.">
-            {(id) => <input id={id} type="number" min={1} max={60}
-              value={form.timeout_seconds ?? 10}
+          <Field label="Timeout" hint="Seconds. The caller is waiting. Maximum 30.">
+            {(id) => <input id={id} type="number" min={1} max={30}
+              value={form.timeout_seconds ?? 5}
               onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })} />}
+          </Field>
+          <Field label="Retries" hint="Extra attempts after a timeout or 5xx.">
+            {(id) => <input id={id} type="number" min={0} max={5}
+              value={form.max_retries ?? 1}
+              onChange={(e) => setForm({ ...form, max_retries: Number(e.target.value) })} />}
           </Field>
         </div>
 
         <Field
           label="URL" required
-          hint="Use {{name}} for a value the model supplies. Every placeholder must be declared in the request schema below."
+          hint="Use {{name}} for a value the model supplies. {{caller_number}}, {{call_id}} and {{did}} are filled from the live call and do not need to be in the schema."
         >
           {(id) => <input id={id} required className="mono" value={form.url_template}
+            disabled={builtin}
             onChange={(e) => setForm({ ...form, url_template: e.target.value })}
             placeholder="https://api.example.com/reservations/{{guest_id}}" />}
         </Field>
@@ -375,6 +394,15 @@ function ToolForm({
         >
           {(id) => <textarea id={id} rows={8} className="mono" value={schemaText}
             onChange={(e) => setSchemaText(e.target.value)} placeholder={EXAMPLE_SCHEMA} />}
+        </Field>
+
+        <Field
+          label="Response schema"
+          hint="Optional. If set, only these properties are kept before the result reaches the model."
+        >
+          {(id) => <textarea id={id} rows={4} className="mono" value={responseText}
+            onChange={(e) => setResponseText(e.target.value)}
+            placeholder='{"type":"object","properties":{"status":{"type":"string"}}}' />}
         </Field>
 
         <Field label="Headers" hint="Static headers as a JSON object. Values may use {{placeholders}} too.">

@@ -474,6 +474,9 @@ export interface AgentVersion {
   tts_fallback_label: string | null;
   stt_local_label: string | null;
   tts_local_label: string | null;
+  /** Tools this version may call. Empty denies every tool (spec 32). */
+  tool_ids: string[];
+  tool_names: string[];
   created_at: string;
   updated_at: string;
 }
@@ -799,6 +802,8 @@ export interface Tool {
   has_secret: boolean;
   /** {{placeholders}} found in the URL and headers. */
   variables: string[];
+  /** Platform handler (`builtin://…`) rather than a tenant HTTP endpoint. */
+  is_builtin: boolean;
   created_at: string;
   updated_at: string;
 }

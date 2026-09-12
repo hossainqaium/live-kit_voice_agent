@@ -27,10 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.crypto import CredentialCipher, CredentialEncryptionError
 from shared.logging import get_logger
-from shared.models import FallbackAction, ProviderKind
-from worker.providers.base import ProviderConfig
+from shared.models import FallbackAction, HttpMethod, ProviderKind, ToolAuthType
 from worker import routing as routing_engine
+from worker.providers.base import ProviderConfig
 from worker.routing import RoutingClosedError, RoutingDecision, RoutingHangupError
+from worker.tools.definitions import ToolDefinition
 
 logger = get_logger(__name__)
 
@@ -132,8 +133,9 @@ class CallContext:
     #: call belongs to for daily-limit and usage-rollup purposes (spec 47).
     tenant_timezone: str = "UTC"
 
-    #: Resolved tool definitions. Empty in Phase 1; populated in Phase 6.
-    tools: tuple[dict[str, Any], ...] = ()
+    #: Tools this version may call. Empty means none — absence is a denial
+    #: (spec 32). Frozen with the rest of the context (spec 45).
+    tools: tuple[ToolDefinition, ...] = ()
 
     knowledge_base_id: uuid.UUID | None = None
 
@@ -172,6 +174,7 @@ class CallContext:
             "stt": self.stt.redacted(),
             "llm": self.llm.redacted(),
             "tts": self.tts.redacted(),
+            "tools": [tool.name for tool in self.tools],
         }
 
 
@@ -325,6 +328,35 @@ _CREDENTIALS_SQL = text(
       AND provider_id = ANY(:provider_ids)
       AND status = 'ACTIVE'
       AND label = 'primary'
+    """
+)
+
+#: Only tools granted to this published version (spec 32). A tool in the
+#: tenant library that is not in ``agent_tools`` must not appear here.
+_TOOLS_SQL = text(
+    """
+    SELECT
+        t.id, t.name, t.description, t.http_method, t.url_template, t.headers,
+        t.request_schema, t.response_schema, t.auth_type, t.auth_header_name,
+        t.auth_secret_ciphertext, t.encryption_key_version,
+        t.timeout_seconds, t.max_retries
+    FROM agent_tools at
+    JOIN tools t ON t.id = at.tool_id AND t.tenant_id = at.tenant_id
+    WHERE at.agent_version_id = :version_id
+      AND at.tenant_id = :tenant_id
+      AND at.enabled IS TRUE
+      AND t.status = 'ACTIVE'
+    ORDER BY t.name
+    """
+)
+
+_TOOL_PERMISSIONS_SQL = text(
+    """
+    SELECT tool_id, agent_id, allowed, max_calls_per_conversation, denied_arguments
+    FROM tool_permissions
+    WHERE tenant_id = :tenant_id
+      AND tool_id = ANY(:tool_ids)
+      AND (agent_id = :agent_id OR agent_id IS NULL)
     """
 )
 
@@ -635,6 +667,12 @@ class CallConfigLoader:
                 skip_dtmf=version["transfer_skip_dtmf"],
             ),
             knowledge_base_id=version["knowledge_base_id"],
+            tools=await self._load_tools(
+                session,
+                tenant_id=row["tenant_id"],
+                agent_id=resolved_agent_id,
+                version_id=version["id"],
+            ),
         )
 
         logger.info("call_configuration_loaded", extra=context.redacted())
@@ -852,6 +890,89 @@ class CallConfigLoader:
             voice_id=voice_id,
         )
 
+    async def _load_tools(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> tuple[ToolDefinition, ...]:
+        """The tools this published version may call (spec 30, 32).
+
+        ``tool_permissions.allowed = false`` is a second denial on top of the
+        allow-list, so a shared tool can be revoked for one agent without
+        removing it from the library.
+        """
+        rows = (await session.execute(_TOOLS_SQL, {"version_id": version_id, "tenant_id": tenant_id})).mappings().all()
+        if not rows:
+            return ()
+
+        tool_ids = [row["id"] for row in rows]
+        perm_rows = (
+            await session.execute(
+                _TOOL_PERMISSIONS_SQL,
+                {"tenant_id": tenant_id, "tool_ids": tool_ids, "agent_id": agent_id},
+            )
+        ).mappings().all()
+
+        # Agent-specific rows override the tool-wide default.
+        permissions: dict[uuid.UUID, Any] = {}
+        for perm in perm_rows:
+            existing = permissions.get(perm["tool_id"])
+            if existing is None or (perm["agent_id"] is not None and existing.get("agent_id") is None):
+                permissions[perm["tool_id"]] = perm
+
+        loaded: list[ToolDefinition] = []
+        for row in rows:
+            perm = permissions.get(row["id"])
+            if perm is not None and perm["allowed"] is False:
+                logger.info(
+                    "tool_permission_denied",
+                    extra={"tool": row["name"], "agent_id": str(agent_id)},
+                )
+                continue
+            secret = None
+            ciphertext = row["auth_secret_ciphertext"]
+            if ciphertext:
+                if self._cipher is None:
+                    logger.warning(
+                        "tool_secret_skipped",
+                        extra={"tool": row["name"], "reason": self._cipher_error},
+                    )
+                else:
+                    try:
+                        secret = self._cipher.decrypt(
+                            bytes(ciphertext), row["encryption_key_version"]
+                        )
+                    except CredentialEncryptionError:
+                        logger.exception("tool_secret_decrypt_failed", extra={"tool": row["name"]})
+
+            loaded.append(
+                ToolDefinition(
+                    id=row["id"],
+                    name=row["name"],
+                    description=row["description"],
+                    url_template=row["url_template"],
+                    http_method=HttpMethod(row["http_method"]),
+                    headers=dict(row["headers"] or {}),
+                    request_schema=dict(row["request_schema"] or {}),
+                    response_schema=dict(row["response_schema"] or {}),
+                    auth_type=ToolAuthType(row["auth_type"]),
+                    auth_header_name=row["auth_header_name"],
+                    auth_secret=secret,
+                    timeout_seconds=int(row["timeout_seconds"] or 5),
+                    max_retries=int(row["max_retries"] or 0),
+                    max_calls_per_conversation=(
+                        int(perm["max_calls_per_conversation"])
+                        if perm is not None and perm["max_calls_per_conversation"] is not None
+                        else 5
+                    ),
+                    denied_arguments=dict((perm["denied_arguments"] or {}) if perm is not None else {}),
+                )
+            )
+        return tuple(loaded)
+
     def _provider_config(
         self,
         kind: ProviderKind,
@@ -994,7 +1115,7 @@ async def update_usage(
 async def write_recording_row(
     session: AsyncSession,
     *,
-    context: "CallContext",
+    context: CallContext,
     egress_id: str,
     bucket: str,
     object_key: str,

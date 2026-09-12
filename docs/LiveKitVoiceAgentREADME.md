@@ -1045,8 +1045,8 @@ misread as a fault:
 | Barge-in and interruption handling | **Working — Plan 2b.7 + 2b.11 complete (2026-09-12).** `turn_handling` uses VAD plus a **2 s / 6 s** endpointing window so a ~1.1 s transcript still joins its turn. The default local EOT model is not loaded (537 ms off `session.start`). |
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
-| Tools, function calling, RAG | Not yet — Phase 6.1+. Ticketing UI and Server Agent are in (Plan 6.0); the agent cannot file a ticket mid-call until `create_ticket()` is wired. |
-| Ticketing | **Working — Plan 6.0 complete (2026-09-12).** Tenant **Tickets** (`/tickets`): list, create, edit, start/resolve. Seed: **Server Agent** plus `TCK-0001`. Agent-filed tickets (`source=AGENT`) land in 6.1. |
+| Tools, function calling, RAG | **Tools working — Plan 6.1–6.5 complete (2026-09-12).** Granted tools are registered on the LiveKit agent and executed mid-call (builtins or HTTP). RAG / knowledge ingestion is still Phase 6.6+. |
+| Ticketing | **Working — Plan 6.0 + 6.1 complete (2026-09-12).** Console **Tickets**. Server Agent files rows via `create_ticket()` with `source=AGENT`. Seed: **Server Agent**, `TCK-0001`, and the builtin tool library. |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
 | Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 29 providers across LLM/STT/TTS/Embedding. See [`AIProviders.md`](./AIProviders.md). |
@@ -1386,14 +1386,14 @@ navigation and a platform account has no tenant to act in.
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync. Direction, codecs, DTMF, SRTP (Plan 5.2) |
 | Dispatch Rules | `/dispatch-rules` | Long-lived LiveKit rules: trunk, agent dispatch name, room prefix (Plan 5.3–5.5) |
 | Phone Numbers | `/phone-numbers` | DIDs, trunk, answering agent, **routing rule**, **business hours**, plus **Call Test** — a browser call to that number (§9d.7) |
-| Agents | `/agents` | The builder: provider and model selection per tier, versions, validation, publish, rollback. Provider dropdowns show only what is configured in AI Setup. |
+| Agents | `/agents` | The builder: provider and model selection per tier, **tool allow-list**, versions, validation, publish, rollback. Provider dropdowns show only what is configured in AI Setup. An invalid granted tool blocks publish (Plan 6.4–6.5). |
 | **AI Setup** | `/ai-setup` | Four tabs — **LLM**, **Embedding**, **STT**, **TTS**. Each tab lists stored provider credentials with Test / Rotate / Delete actions; the Add modal verifies a key before saving it. Providers configured here populate the agent builder dropdowns. See [`AIProviders.md`](./AIProviders.md). |
 | Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |
 | Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
 | Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |
-| Tools | `/tools` | HTTP tools with schema validation and a write-only secret (spec 31–33) |
+| Tools | `/tools` | HTTP and builtin tools: name, description, method, URL, auth, headers, request/response schema, timeout, retries (Plan 6.2). `{{caller_number}}` and other call-context placeholders (Plan 6.3). |
 | Knowledge Bases | `/knowledge-bases` | Create and assign a base; **ingestion is Phase 6** |
-| Tickets | `/tickets` | Support tickets — create and close here; Server Agent files them from a call in 6.1 |
+| Tickets | `/tickets` | Support tickets — create and close here; Server Agent files them from a call with `create_ticket()` |
 | Calls / Transcripts | `/calls` | History, per-call detail, transcript and events |
 | Recordings | `/recordings` | Recording metadata; **empty until egress lands (Plan 2b.3)** |
 | Analytics | `/analytics` | Volume and outcomes over a window (spec 57) |
@@ -2076,7 +2076,10 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Caller heard silence during transfer | Hold media not configured, or the announcement finished without looping. Check the agent's announcement and hold-media settings. |
 | Transfer never reaches the human agent | `transfer_status` says which step stalled; then check the PBX extension/queue and what SIP response the PBX returned. |
 | A service never becomes ready | `/ready` reports which dependency failed; check PostgreSQL, Redis, LiveKit, object storage. |
-| Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001` and **Server Agent**. Agent-filed tickets wait for Plan 6.1. |
+| Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001`, **Server Agent**, and the builtin tool library. |
+| Server Agent talks about a ticket but none appears | Re-run `seed-dev-tenant` so `create_ticket` is granted. Confirm the call used Server Agent (not Development Agent). Look for `tool_invoked` / `ticket_filed_by_agent` in the worker log. |
+| Publish blocked by an invalid tool schema | Fix the tool on `/tools`, or uncheck it on the agent. A granted tool with `schema_valid=false` cannot go live (Plan 6.4). |
+| The model asked for a tool the agent must not use | Check the agent's tool allow-list. Absence is a denial. Seeded `refund_order` is in the library and granted to nobody. |
 | AI Setup provider dropdown is empty (no providers listed in any tab) | The platform catalog has not been seeded yet, or a new migration was added and the seed was not re-run. Run `make migrate` then `docker compose ... exec configuration-api python -m app.cli seed-platform`. |
 | `TypeError: Failed to fetch` when opening the agent Configure dialog | The `agent_versions` table is missing the `embedding_provider_id` / `embedding_model_id` columns — run `make migrate`. If the columns exist, check API health with `make health`. |
 | `alembic upgrade head` fails with `type "providerkind" does not exist` | A migration written for a native PostgreSQL enum was applied to a VARCHAR column. Replace the migration body with a no-op (`pass` in `upgrade()`). See Plan §12.4. |

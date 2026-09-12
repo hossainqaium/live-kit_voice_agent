@@ -41,7 +41,6 @@ from worker.config_loader import (
     write_recording_row,
     write_transcript_summary,
 )
-from worker.summariser import generate_summary
 from worker.db import get_session_factory
 from worker.endpointing import turn_handling_for
 from worker.health import state as worker_state
@@ -49,6 +48,8 @@ from worker.pipeline.observer import CallObserver
 from worker.providers.registry import build_llm, build_stt, build_tts
 from worker.resilience import ATTEMPT_TIMEOUT
 from worker.settings import get_settings
+from worker.summariser import generate_summary
+from worker.tools import ToolRuntime, livekit_tools
 
 logger = get_logger(__name__)
 
@@ -168,18 +169,19 @@ async def _await_caller(ctx: JobContext) -> tuple[rtc.RemoteParticipant | None, 
         ctx.room.off("participant_connected", _on_join)
 
 
-def _build_agent(context: CallContext) -> Agent:
+def _build_agent(context: CallContext, runtime: ToolRuntime | None = None) -> Agent:
     """Construct the agent from configuration only.
 
-    The system prompt and greeting come from the published agent version, so
-    two tenants running the same worker behave completely differently without
-    a line of tenant-specific code (spec 9, 23).
+    The system prompt, greeting, and granted tools come from the published
+    agent version, so two tenants running the same worker behave completely
+    differently without a line of tenant-specific code (spec 9, 23).
     """
     instructions = context.system_prompt or (
         "You are a helpful voice assistant answering a phone call. "
         "Keep replies brief, since they are spoken aloud."
     )
-    return Agent(instructions=instructions)
+    tools = livekit_tools(runtime) if runtime is not None else []
+    return Agent(instructions=instructions, tools=tools)
 
 
 def _build_session(context: CallContext, vad: Any) -> AgentSession:
@@ -568,8 +570,9 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             await tracker.transition(CallState.AI_CONNECTED)
 
             started_at = asyncio.get_running_loop().time()
+            tool_runtime = ToolRuntime(context.tools, context, factory)
             await session.start(
-                agent=_build_agent(context),
+                agent=_build_agent(context, tool_runtime),
                 room=ctx.room,
                 room_input_options=RoomInputOptions(
                     # Telephony audio arrives already narrowband and

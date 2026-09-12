@@ -100,6 +100,9 @@ class ToolResponse(TimestampedResponse):
     #: model must supply.
     variables: list[str] = Field(default_factory=list)
 
+    #: Platform handler (``builtin://…``) rather than a tenant HTTP endpoint.
+    is_builtin: bool = False
+
 
 class KnowledgeBaseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")

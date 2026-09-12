@@ -26,12 +26,14 @@ from sqlalchemy import func, select
 from app.core.dependencies import ClientIp, CurrentTenant, require_permission
 from app.db.models import (
     Agent,
+    AgentTool,
     AgentVersion,
     KnowledgeBase,
     Model,
     PhoneNumber,
     Provider,
     ProviderCredential,
+    Tool,
     Voice,
 )
 from app.db.repository import TenantRepository
@@ -437,6 +439,84 @@ async def _version_labels(tenant: CurrentTenant, version: AgentVersion) -> dict[
     return labels
 
 
+async def _version_tools(tenant: CurrentTenant, version_id: uuid.UUID) -> dict:
+    """The allow-list for this version (spec 32)."""
+    rows = (
+        await tenant.session.execute(
+            select(AgentTool.tool_id, Tool.name)
+            .join(Tool, Tool.id == AgentTool.tool_id)
+            .where(
+                AgentTool.tenant_id == tenant.tenant_id,
+                AgentTool.agent_version_id == version_id,
+                AgentTool.enabled.is_(True),
+            )
+            .order_by(Tool.name)
+        )
+    ).all()
+    return {
+        "tool_ids": [tool_id for tool_id, _name in rows],
+        "tool_names": [name for _tool_id, name in rows],
+    }
+
+
+async def _copy_tool_grants(
+    tenant: CurrentTenant, *, source_version_id: uuid.UUID, target: AgentVersion
+) -> None:
+    """Copy the allow-list onto a new draft so a live version stays unchanged."""
+    grants = (
+        (
+            await tenant.session.execute(
+                select(AgentTool).where(
+                    AgentTool.tenant_id == tenant.tenant_id,
+                    AgentTool.agent_version_id == source_version_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for grant in grants:
+        tenant.session.add(
+            AgentTool(
+                tenant_id=tenant.tenant_id,
+                tool_id=grant.tool_id,
+                agent_version_id=target.id,
+                enabled=grant.enabled,
+            )
+        )
+    if grants:
+        await tenant.session.flush()
+
+
+async def _replace_tool_grants(
+    tenant: CurrentTenant, version: AgentVersion, tool_ids: list[uuid.UUID]
+) -> None:
+    existing = (
+        (
+            await tenant.session.execute(
+                select(AgentTool).where(
+                    AgentTool.tenant_id == tenant.tenant_id,
+                    AgentTool.agent_version_id == version.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in existing:
+        await tenant.session.delete(row)
+    for tool_id in dict.fromkeys(tool_ids):
+        tenant.session.add(
+            AgentTool(
+                tenant_id=tenant.tenant_id,
+                agent_version_id=version.id,
+                tool_id=tool_id,
+                enabled=True,
+            )
+        )
+    await tenant.session.flush()
+
+
 async def _version_response(tenant: CurrentTenant, version: AgentVersion) -> AgentVersionResponse:
     """Serialise a version, refreshing what the database wrote itself.
 
@@ -454,7 +534,9 @@ async def _version_response(tenant: CurrentTenant, version: AgentVersion) -> Age
     """
     await tenant.session.refresh(version)
     payload = AgentVersionResponse.model_validate(version, from_attributes=True)
-    return payload.model_copy(update=await _version_labels(tenant, version))
+    grants = await _version_tools(tenant, version.id)
+    labels = await _version_labels(tenant, version)
+    return payload.model_copy(update={**labels, **grants})
 
 
 @router.get(
@@ -536,6 +618,8 @@ async def _editable_draft(
     )
     repository.add(draft)
     await tenant.session.flush()
+    if latest is not None:
+        await _copy_tool_grants(tenant, source_version_id=latest.id, target=draft)
     logger.info(
         "agent_draft_created",
         extra={"agent_id": str(agent.id), "version_number": next_number},
@@ -570,10 +654,13 @@ async def save_draft(
     before = audit.snapshot(draft, *_VERSION_AUDITED)
 
     changes = payload.model_dump(exclude_unset=True)
-    await _validate_references(tenant, repository, changes)
+    tool_ids = changes.pop("tool_ids", None)
+    await _validate_references(tenant, repository, changes, tool_ids=tool_ids)
 
     for field, value in changes.items():
         setattr(draft, field, value)
+    if tool_ids is not None:
+        await _replace_tool_grants(tenant, draft, tool_ids)
 
     # The stored validation result is now stale; recompute so the builder can
     # show the current state without a second request.
@@ -596,13 +683,17 @@ async def save_draft(
 
 
 async def _validate_references(
-    tenant: CurrentTenant, repository: TenantRepository, changes: dict
+    tenant: CurrentTenant,
+    repository: TenantRepository,
+    changes: dict,
+    *,
+    tool_ids: list[uuid.UUID] | None = None,
 ) -> None:
-    """Check provider, model, voice and knowledge-base ids exist.
+    """Check provider, model, voice, knowledge-base and tool ids exist.
 
     Providers, models and voices are platform-level, so they are looked up
-    without tenant scoping; the knowledge base is tenant-owned and goes through
-    the repository.
+    without tenant scoping; the knowledge base and tools are tenant-owned and
+    go through the repository.
     """
     # Derived from the tier table rather than listed again: a new tier that is
     # rendered in the builder but not validated here would accept a dangling
@@ -650,6 +741,22 @@ async def _validate_references(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{emb_field}: no such record in the platform catalog",
+            )
+
+    if tool_ids:
+        found = set(
+            (
+                await tenant.session.execute(
+                    select(Tool.id).where(
+                        Tool.tenant_id == tenant.tenant_id, Tool.id.in_(tool_ids)
+                    )
+                )
+            ).scalars()
+        )
+        if any(tool_id not in found for tool_id in tool_ids):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="one or more tools are not in this tenant's library",
             )
 
 
@@ -838,6 +945,51 @@ async def _validate_version(
                         "and selected here (Phase 6)"
                     ),
                     severity="warning",
+                )
+            )
+
+    grants = (
+        (
+            await tenant.session.execute(
+                select(AgentTool, Tool)
+                .join(Tool, Tool.id == AgentTool.tool_id)
+                .where(
+                    AgentTool.tenant_id == tenant.tenant_id,
+                    AgentTool.agent_version_id == version.id,
+                    AgentTool.enabled.is_(True),
+                )
+            )
+        )
+        .all()
+    )
+    for _grant, tool in grants:
+        if tool.status is not ResourceStatus.ACTIVE:
+            issues.append(
+                ValidationIssue(
+                    field="tool_ids",
+                    message=f"tool {tool.name!r} is {tool.status.value.lower()} and cannot be used",
+                )
+            )
+        elif not tool.schema_valid:
+            issues.append(
+                ValidationIssue(
+                    field="tool_ids",
+                    message=(
+                        f"tool {tool.name!r} has an invalid request schema"
+                        + (
+                            f": {tool.schema_validation_error}"
+                            if tool.schema_validation_error
+                            else ""
+                        )
+                    ),
+                )
+            )
+        else:
+            dependencies.append(
+                ValidationIssue(
+                    field="tool_ids",
+                    message=f"Tool: {tool.name} ready",
+                    severity="ok",
                 )
             )
 

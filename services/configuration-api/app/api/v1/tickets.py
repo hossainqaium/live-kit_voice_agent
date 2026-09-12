@@ -1,8 +1,8 @@
 """Support ticket endpoints (Phase 6.0).
 
 Tickets are tenant-owned operations records. The console files them as
-``MANUAL``. Plan 6.1 adds ``create_ticket()`` so Server Agent can file them
-as ``AGENT`` during a call.
+``MANUAL``. Server Agent files them as ``AGENT`` during a call via the
+``create_ticket()`` builtin (Plan 6.1).
 """
 
 from __future__ import annotations

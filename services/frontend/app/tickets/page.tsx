@@ -3,8 +3,8 @@
 /**
  * Support tickets (Phase 6.0).
  *
- * Manual create from this screen. Plan 6.1 lets Server Agent file the same
- * rows during a call via create_ticket().
+ * Manual create from this screen. Server Agent files the same rows during
+ * a call via create_ticket() (source=AGENT).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -89,7 +89,7 @@ export default function TicketsPage() {
           <h1>Tickets</h1>
           <p className="page-subtitle">
             Support tickets for this tenant. File one here, or let Server Agent
-            file one during a call once tools land.
+            file one during a call with create_ticket.
           </p>
         </div>
         <div className="row">

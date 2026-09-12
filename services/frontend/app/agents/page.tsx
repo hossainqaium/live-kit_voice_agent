@@ -28,7 +28,7 @@ import Link from "next/link";
 import {
   ApiError, api,
   type Agent, type AgentVersion, type Catalog, type ProviderCredential,
-  type ValidationReport,
+  type Tool, type ValidationReport,
 } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 
@@ -276,6 +276,7 @@ function AgentBuilder({
   const [tab, setTab] = useState<"config" | "history">("config");
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
+  const [library, setLibrary] = useState<Tool[]>([]);
 
   const loadCredentials = useCallback(async () => {
     try {
@@ -299,6 +300,7 @@ function AgentBuilder({
   useEffect(() => {
     void loadCatalog();
     void loadCredentials();
+    void api.tools.list().then((page) => setLibrary(page.items)).catch(() => setLibrary([]));
   }, [loadCatalog, loadCredentials]);
 
   const load = useCallback(async () => {
@@ -361,6 +363,7 @@ function AgentBuilder({
         transcription_enabled: draft.transcription_enabled,
         transfer_enabled: draft.transfer_enabled,
         transfer_announcement_text: draft.transfer_announcement_text,
+        tool_ids: draft.tool_ids ?? [],
       });
       await onChanged(
         editingPublished
@@ -607,6 +610,49 @@ function AgentBuilder({
                   onChange={(e) => set("transfer_announcement_text", e.target.value)}
                   placeholder="Your call is being transferred to a human agent. Please wait." />}
               </Field>
+            )}
+
+            <div className="form-section-label">Tools</div>
+            <p className="subtle small" style={{ marginTop: 0 }}>
+              Only checked tools can be called. Everything else is denied, even
+              if the model asks for it.
+            </p>
+            {library.length === 0 ? (
+              <p className="subtle small">
+                No tools in the library. Add them on{" "}
+                <Link href="/tools" style={{ color: "var(--accent)" }}>Tools</Link>.
+              </p>
+            ) : (
+              <div className="stack" style={{ gap: 8, marginBottom: 14 }}>
+                {library.map((tool) => {
+                  const granted = (draft.tool_ids ?? []).includes(tool.id);
+                  return (
+                    <label key={tool.id} className="row small" style={{ gap: 8, alignItems: "flex-start" }}>
+                      <input
+                        type="checkbox"
+                        style={{ width: "auto", marginTop: 3 }}
+                        checked={granted}
+                        onChange={(e) => {
+                          const current = new Set(draft.tool_ids ?? []);
+                          if (e.target.checked) current.add(tool.id);
+                          else current.delete(tool.id);
+                          set("tool_ids", [...current] as AgentVersion["tool_ids"]);
+                        }}
+                      />
+                      <span>
+                        <span className="mono">{tool.name}</span>
+                        {!tool.schema_valid && (
+                          <> <Badge tone="err">invalid schema</Badge></>
+                        )}
+                        {tool.is_builtin && (
+                          <> <Badge tone="info">builtin</Badge></>
+                        )}
+                        <div className="subtle">{tool.description}</div>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
             )}
           </fieldset>
         </>
