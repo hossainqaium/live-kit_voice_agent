@@ -491,7 +491,13 @@ async def _copy_tool_grants(
 async def _replace_tool_grants(
     tenant: CurrentTenant, version: AgentVersion, tool_ids: list[uuid.UUID]
 ) -> None:
-    existing = (
+    """Sync the allow-list without delete-then-insert of the same pair.
+
+    Wiping and re-inserting the same ``(version, tool)`` in one flush trips
+    ``uq_agent_tools_version_tool`` — which is exactly the save that happens
+    when a published agent already has tools and the builder sends them back.
+    """
+    existing_rows = (
         (
             await tenant.session.execute(
                 select(AgentTool).where(
@@ -503,17 +509,25 @@ async def _replace_tool_grants(
         .scalars()
         .all()
     )
-    for row in existing:
-        await tenant.session.delete(row)
-    for tool_id in dict.fromkeys(tool_ids):
-        tenant.session.add(
-            AgentTool(
-                tenant_id=tenant.tenant_id,
-                agent_version_id=version.id,
-                tool_id=tool_id,
-                enabled=True,
+    existing = {row.tool_id: row for row in existing_rows}
+    wanted = list(dict.fromkeys(tool_ids))
+    wanted_set = set(wanted)
+    for tool_id, row in existing.items():
+        if tool_id not in wanted_set:
+            await tenant.session.delete(row)
+    for tool_id in wanted:
+        row = existing.get(tool_id)
+        if row is None:
+            tenant.session.add(
+                AgentTool(
+                    tenant_id=tenant.tenant_id,
+                    agent_version_id=version.id,
+                    tool_id=tool_id,
+                    enabled=True,
+                )
             )
-        )
+        else:
+            row.enabled = True
     await tenant.session.flush()
 
 

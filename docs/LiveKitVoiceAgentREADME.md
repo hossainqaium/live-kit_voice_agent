@@ -521,7 +521,8 @@ In the tenant console → **AI Agents** → **Create**:
 7. **Capability** — tools (explicitly allow-listed), knowledge base
 8. **Escalation** — transfer policy and destinations, business rules
 
-Then **Save Draft → Test → Publish**.
+Then **Save Draft → Test → Publish**. Changing a live agent and clicking **Publish**
+saves a new draft first, then publishes it — you do not have to click Save separately.
 
 Publishing validates STT, LLM, TTS, voice, prompt, tools, knowledge base, transfer destination,
 routing, PBX, SIP trunk, and DID. Invalid configuration cannot become production-active.
@@ -529,6 +530,8 @@ routing, PBX, SIP trunk, and DID. Invalid configuration cannot become production
 ### Versioning behavior
 
 - Versions carry state: `v1 Published`, `v2 Draft`, `v3 Testing`.
+- Editing a published version never writes in place. Save or Publish creates vN+1.
+- Any field change enables **Publish**. Publish persists unsaved edits, then goes live.
 - Publishing a new version **does not affect calls already in progress**.
 - In-flight calls finish on the version they started with.
 - New calls pick up the current published version.
@@ -1045,7 +1048,7 @@ misread as a fault:
 | Barge-in and interruption handling | **Working — Plan 2b.7 + 2b.11 complete (2026-09-12).** `turn_handling` uses VAD plus a **2 s / 6 s** endpointing window so a ~1.1 s transcript still joins its turn. The default local EOT model is not loaded (537 ms off `session.start`). |
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
-| Tools, function calling, RAG | **Tools working — Plan 6.1–6.5 complete (2026-09-12).** Granted tools are registered on the LiveKit agent and executed mid-call (builtins or HTTP). RAG / knowledge ingestion is still Phase 6.6+. |
+| Tools, function calling, RAG | **Tools working — Plan 6.1–6.5 complete (2026-09-12).** Granted tools are registered on the LiveKit agent and executed mid-call (builtins or HTTP). Saving or publishing a live agent that already has tools no longer 500s; a field change enables Publish, which persists then goes live. RAG / knowledge ingestion is still Phase 6.6+. |
 | Ticketing | **Working — Plan 6.0 + 6.1 complete (2026-09-12).** Console **Tickets**. Service Agent files rows via `create_ticket()` with `source=AGENT`. Seed: **Service Agent**, `TCK-0001`, and the builtin tool library. |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
@@ -1386,7 +1389,7 @@ navigation and a platform account has no tenant to act in.
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync. Direction, codecs, DTMF, SRTP (Plan 5.2) |
 | Dispatch Rules | `/dispatch-rules` | Long-lived LiveKit rules: trunk, agent dispatch name, room prefix (Plan 5.3–5.5) |
 | Phone Numbers | `/phone-numbers` | DIDs, trunk, answering agent, **routing rule**, **business hours**, plus **Call Test** — a browser call to that number (§9d.7) |
-| Agents | `/agents` | The builder: provider and model selection per tier, **tool allow-list**, versions, validation, publish, rollback. Provider dropdowns show only what is configured in AI Setup. An invalid granted tool blocks publish (Plan 6.4–6.5). |
+| Agents | `/agents` | The builder: provider and model selection per tier, **tool allow-list**, versions, validation, publish, rollback. A change on a live version enables **Publish**, which saves a draft then publishes. Provider dropdowns show only what is configured in AI Setup. An invalid granted tool blocks publish (Plan 6.4–6.5). |
 | **AI Setup** | `/ai-setup` | Four tabs — **LLM**, **Embedding**, **STT**, **TTS**. Each tab lists stored provider credentials with Test / Rotate / Delete actions; the Add modal verifies a key before saving it. Providers configured here populate the agent builder dropdowns. See [`AIProviders.md`](./AIProviders.md). |
 | Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |
 | Business Hours | `/business-hours` | Schedules with intervals and dated exceptions (spec 37) |
@@ -2079,6 +2082,8 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001`, **Service Agent**, and the builtin tool library. |
 | Service Agent talks about a ticket but none appears | Re-run `seed-dev-tenant` so `create_ticket` is granted. Confirm the call used Service Agent (not Development Agent). Look for `tool_invoked` / `ticket_filed_by_agent` in the worker log. |
 | Publish blocked by an invalid tool schema | Fix the tool on `/tools`, or uncheck it on the agent. A granted tool with `schema_valid=false` cannot go live (Plan 6.4). |
+| **Save as new draft** errors after changing a published agent | Fixed 2026-09-12. The save used to wipe and re-insert the same tool grants and hit `uq_agent_tools_version_tool`. Restart the API if the container is still on the old code. |
+| Publish stays disabled after changing the model | Change any field — that dirties the form and enables Publish. Publish now saves first, then goes live. Warnings (yellow) do not block; only validation **errors** do. |
 | The model asked for a tool the agent must not use | Check the agent's tool allow-list. Absence is a denial. Seeded `refund_order` is in the library and granted to nobody. |
 | AI Setup provider dropdown is empty (no providers listed in any tab) | The platform catalog has not been seeded yet, or a new migration was added and the seed was not re-run. Run `make migrate` then `docker compose ... exec configuration-api python -m app.cli seed-platform`. |
 | `TypeError: Failed to fetch` when opening the agent Configure dialog | The `agent_versions` table is missing the `embedding_provider_id` / `embedding_model_id` columns — run `make migrate`. If the columns exist, check API health with `make health`. |

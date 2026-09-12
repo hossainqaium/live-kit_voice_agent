@@ -637,7 +637,7 @@ and survive provider failure.
 | ~~6.2~~ | ~~API Tool Builder UI — name, description, method, URL, auth, headers, request/response schema, timeout, retry policy~~ **Done (2026-09-12):** `/tools` form now includes response schema, timeout (≤30s), and retry count. Builtin tools lock name and URL. | §31 |
 | ~~6.3~~ | ~~Variable substitution — `{{customer_id}}`, `{{order_id}}`, `{{caller_number}}`~~ **Done (2026-09-12):** `shared/tools.py` substitutes `{{name}}`. Call-context values (`caller_number`, `call_id`, `did`, `tenant_id`, `agent_name`) do not need to be in the request schema. Model-supplied names still must be declared. | §31 |
 | ~~6.4~~ | ~~Tool schema validation before agent publish~~ **Done (2026-09-12):** `_validate_version` blocks publish when a granted tool is inactive or `schema_valid` is false. | §31 |
-| ~~6.5~~ | ~~Tool permissions — explicit per-agent allow-list; everything else denied~~ **Done (2026-09-12):** Agent builder checkboxes write `tool_ids` onto the draft (`agent_tools`). Drafts copy grants. The worker registers only granted tools and `ToolRuntime.invoke` still denies any other name. Seeded `refund_order` is in the library and granted to no agent. | §32 |
+| ~~6.5~~ | ~~Tool permissions — explicit per-agent allow-list; everything else denied~~ **Done (2026-09-12):** Agent builder checkboxes write `tool_ids` onto the draft (`agent_tools`). Drafts copy grants. The worker registers only granted tools and `ToolRuntime.invoke` still denies any other name. Seeded `refund_order` is in the library and granted to no agent. **Follow-up (2026-09-12):** Saving a live agent that already had tools 500'd (`uq_agent_tools_version_tool`) because `_replace_tool_grants` deleted then re-inserted the same pairs. It now syncs. Changing any field dirties the builder and enables **Publish**, which persists first (creates a draft when the version is live) then publishes. Files: `app/api/v1/agents.py`, `app/agents/page.tsx`. Tests: `test_phase6_tools.py`. | §32 |
 | 6.6 | Knowledge bases from PDF, DOCX, TXT, CSV, web content; ingestion pipeline | §33 |
 | 6.7 | RAG retrieval on PostgreSQL + pgvector; knowledge bases assignable to agents | §33 |
 | 6.8 | Conversation summarization for long conversations | §34 |
@@ -1772,6 +1772,14 @@ Because the catalog seeder runs separately and is idempotent, the new popular pr
 - Add seed entries to `app/services/seed.py` (the DB accepts them immediately — no migration needed for the providers table).
 - Only add an Alembic migration if a *different* table gains a column or constraint referencing the new kind.
 - Never write `ALTER TYPE providerkind ...` — there is no such type.
+
+### 12.5 Phase 6 — Tools
+
+#### Save as new draft 500s; Publish stays disabled after a model change
+
+**Symptom:** On a published agent that already has tools (Service Agent, Development Agent), changing the language model leaves **Publish** disabled. **Save as new draft** returns Internal Server Error.
+**Cause (defect):** Two stacked bugs. (1) `_replace_tool_grants` deleted every `agent_tools` row and inserted the same `(agent_version_id, tool_id)` pairs in one flush, tripping `uq_agent_tools_version_tool`. That is the save the builder always does: `_editable_draft` copies grants onto vN+1, then the form sends the same `tool_ids` back. (2) Publish was gated on the *saved* validation report. A live version with no draft is not publishable, so a local model change never enabled the button; Publish also did not persist first, so even a forced click would 409 (`there is no draft to publish`).
+**Fix (defect):** Sync grants — delete only removed IDs, insert only new ones, leave existing rows. The builder tracks `dirty`; any field change enables Publish; Publish calls `saveDraft` then `publish`. Only `severity === "error"` issues block the button after a clean load.
 
 ---
 

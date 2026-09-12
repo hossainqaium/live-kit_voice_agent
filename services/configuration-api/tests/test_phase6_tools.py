@@ -60,6 +60,18 @@ class TestPublishValidatesToolSchemas:
         src = inspect.getsource(agents_api._editable_draft)
         assert "_copy_tool_grants" in src
 
+    def test_saving_grants_syncs_instead_of_wiping(self) -> None:
+        """A published agent already has rows. Sending the same tool_ids
+        back must not delete-then-insert — that trips the unique constraint."""
+        src = inspect.getsource(agents_api._replace_tool_grants)
+        assert "existing" in src
+        assert "wanted" in src
+        assert "row.enabled = True" in src
+        assert "await tenant.session.delete(row)" in src
+        # The old wipe-all-then-reinsert loop is what 500'd Save as new draft.
+        assert "for row in existing:\n        await tenant.session.delete(row)" not in src
+        assert src.index("if tool_id not in wanted_set") < src.index("if row is None")
+
     def test_draft_accepts_tool_ids(self) -> None:
         payload = AgentVersionConfig.model_validate({"tool_ids": []})
         assert payload.tool_ids == []
@@ -129,6 +141,20 @@ class TestConsole:
         assert "tool_ids" in src
         assert "Only checked tools can be called" in src
         assert "refund" in src or "denied" in src
+
+    def test_agent_builder_enables_publish_after_a_change(self) -> None:
+        path = frontend_file("app", "agents", "page.tsx")
+        if path is None:
+            pytest.skip("services/frontend is not mounted in this container")
+        src = path.read_text()
+        assert "const [dirty, setDirty] = useState(false);" in src
+        assert "setDirty(true);" in src
+        assert "publishEnabled" in src
+        assert "dirty || (hasDraft" in src
+        assert "disabled={!publishEnabled}" in src
+        assert "if (dirty || editingPublished)" in src
+        assert "await persistDraft();" in src
+        assert "severity === \"error\"" in src
 
     def test_tickets_page_mentions_create_ticket(self) -> None:
         path = frontend_file("app", "tickets", "page.tsx")

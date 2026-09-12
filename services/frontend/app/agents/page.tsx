@@ -277,6 +277,7 @@ function AgentBuilder({
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
   const [library, setLibrary] = useState<Tool[]>([]);
+  const [dirty, setDirty] = useState(false);
 
   const loadCredentials = useCallback(async () => {
     try {
@@ -310,6 +311,7 @@ function AgentBuilder({
     const editable = list.find((v) => v.state === "DRAFT") ?? list[0];
     if (editable) {
       setDraft(editable);
+      setDirty(false);
       try {
         setReport(await api.agents.validate(agent.id, editable.version_number));
       } catch {
@@ -323,48 +325,56 @@ function AgentBuilder({
   const editingVersion = versions?.find((v) => v.version_number === draft.version_number);
   const editingPublished = editingVersion?.state === "PUBLISHED";
 
+  function draftPayload() {
+    return {
+      language: draft.language,
+      greeting: draft.greeting,
+      system_prompt: draft.system_prompt,
+      temperature: draft.temperature,
+
+      // Every tier, including the ones cleared back to null: omitting a null
+      // would make "remove the fallback" indistinguishable from "leave it
+      // alone", and the draft would keep a tier the operator deleted.
+      stt_provider_id: draft.stt_provider_id ?? null,
+      stt_model_id: draft.stt_model_id ?? null,
+      llm_provider_id: draft.llm_provider_id ?? null,
+      llm_model_id: draft.llm_model_id ?? null,
+      tts_provider_id: draft.tts_provider_id ?? null,
+      tts_model_id: draft.tts_model_id ?? null,
+      voice_id: draft.voice_id ?? null,
+      stt_fallback_provider_id: draft.stt_fallback_provider_id ?? null,
+      stt_fallback_model_id: draft.stt_fallback_model_id ?? null,
+      llm_fallback_provider_id: draft.llm_fallback_provider_id ?? null,
+      llm_fallback_model_id: draft.llm_fallback_model_id ?? null,
+      tts_fallback_provider_id: draft.tts_fallback_provider_id ?? null,
+      tts_fallback_model_id: draft.tts_fallback_model_id ?? null,
+      tts_fallback_voice_id: draft.tts_fallback_voice_id ?? null,
+      stt_local_provider_id: draft.stt_local_provider_id ?? null,
+      stt_local_model_id: draft.stt_local_model_id ?? null,
+      tts_local_provider_id: draft.tts_local_provider_id ?? null,
+      tts_local_model_id: draft.tts_local_model_id ?? null,
+      tts_local_voice_id: draft.tts_local_voice_id ?? null,
+      embedding_provider_id: draft.embedding_provider_id ?? null,
+      embedding_model_id: draft.embedding_model_id ?? null,
+      interruption_enabled: draft.interruption_enabled,
+      silence_timeout_seconds: draft.silence_timeout_seconds,
+      max_call_duration_seconds: draft.max_call_duration_seconds,
+      recording_enabled: draft.recording_enabled,
+      transcription_enabled: draft.transcription_enabled,
+      transfer_enabled: draft.transfer_enabled,
+      transfer_announcement_text: draft.transfer_announcement_text,
+      tool_ids: draft.tool_ids ?? [],
+    };
+  }
+
+  async function persistDraft(): Promise<AgentVersion> {
+    return api.agents.saveDraft(agent.id, draftPayload());
+  }
+
   async function save() {
     setBusy(true);
     try {
-      const saved = await api.agents.saveDraft(agent.id, {
-        language: draft.language,
-        greeting: draft.greeting,
-        system_prompt: draft.system_prompt,
-        temperature: draft.temperature,
-
-        // Every tier, including the ones cleared back to null: omitting a null
-        // would make "remove the fallback" indistinguishable from "leave it
-        // alone", and the draft would keep a tier the operator deleted.
-        stt_provider_id: draft.stt_provider_id ?? null,
-        stt_model_id: draft.stt_model_id ?? null,
-        llm_provider_id: draft.llm_provider_id ?? null,
-        llm_model_id: draft.llm_model_id ?? null,
-        tts_provider_id: draft.tts_provider_id ?? null,
-        tts_model_id: draft.tts_model_id ?? null,
-        voice_id: draft.voice_id ?? null,
-        stt_fallback_provider_id: draft.stt_fallback_provider_id ?? null,
-        stt_fallback_model_id: draft.stt_fallback_model_id ?? null,
-        llm_fallback_provider_id: draft.llm_fallback_provider_id ?? null,
-        llm_fallback_model_id: draft.llm_fallback_model_id ?? null,
-        tts_fallback_provider_id: draft.tts_fallback_provider_id ?? null,
-        tts_fallback_model_id: draft.tts_fallback_model_id ?? null,
-        tts_fallback_voice_id: draft.tts_fallback_voice_id ?? null,
-        stt_local_provider_id: draft.stt_local_provider_id ?? null,
-        stt_local_model_id: draft.stt_local_model_id ?? null,
-        tts_local_provider_id: draft.tts_local_provider_id ?? null,
-        tts_local_model_id: draft.tts_local_model_id ?? null,
-        tts_local_voice_id: draft.tts_local_voice_id ?? null,
-        embedding_provider_id: draft.embedding_provider_id ?? null,
-        embedding_model_id: draft.embedding_model_id ?? null,
-        interruption_enabled: draft.interruption_enabled,
-        silence_timeout_seconds: draft.silence_timeout_seconds,
-        max_call_duration_seconds: draft.max_call_duration_seconds,
-        recording_enabled: draft.recording_enabled,
-        transcription_enabled: draft.transcription_enabled,
-        transfer_enabled: draft.transfer_enabled,
-        transfer_announcement_text: draft.transfer_announcement_text,
-        tool_ids: draft.tool_ids ?? [],
-      });
+      const saved = await persistDraft();
       await onChanged(
         editingPublished
           ? `Saved as a new draft, v${saved.version_number} — v${editingVersion?.version_number} stays live`
@@ -381,6 +391,12 @@ function AgentBuilder({
   async function publish() {
     setBusy(true);
     try {
+      // A published version cannot be edited in place. Persist first so a
+      // model change (or any other field) becomes the draft that Publish
+      // actually ships.
+      if (dirty || editingPublished) {
+        await persistDraft();
+      }
       const published = await api.agents.publish(agent.id);
       await onChanged(`v${published.version_number} published — new calls will use it`);
       await load();
@@ -406,8 +422,14 @@ function AgentBuilder({
     }
   }
 
-  const set = <K extends keyof AgentVersion>(key: K, value: AgentVersion[K]) =>
+  const set = <K extends keyof AgentVersion>(key: K, value: AgentVersion[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
+    setDirty(true);
+  };
+
+  const hasDraft = versions?.some((version) => version.state === "DRAFT") ?? false;
+  const blockingIssues = (report?.issues ?? []).filter((issue) => issue.severity === "error");
+  const publishEnabled = dirty || (hasDraft && (report ? report.publishable : true));
 
   return (
     <Dialog
@@ -425,11 +447,15 @@ function AgentBuilder({
             <Button
               variant="primary"
               busy={busy}
-              disabled={report ? !report.publishable : false}
+              disabled={!publishEnabled}
               onClick={publish}
-              title={report && !report.publishable
-                ? "Fix the validation issues first"
-                : "Publish this draft; new calls will use it"}
+              title={
+                !publishEnabled
+                  ? (blockingIssues.length
+                    ? "Fix the validation issues first"
+                    : "Change a field to create a new version")
+                  : "Save any changes and publish; new calls will use this version"
+              }
             >
               Publish
             </Button>
@@ -481,16 +507,16 @@ function AgentBuilder({
           {editingPublished && (
             <Notice tone="info">
               You are viewing v{editingVersion?.version_number}, which is live.
-              Saving creates a new draft rather than changing it, so calls in
-              progress are unaffected.
+              Changing a field and publishing creates a new version for new
+              calls; calls already in progress keep this one.
             </Notice>
           )}
 
-          {report && report.issues.length > 0 && (
+          {blockingIssues.length > 0 && !dirty && (
             <Notice tone="warn">
               <strong>Not publishable yet.</strong>
               <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-                {report.issues.map((issue) => (
+                {blockingIssues.map((issue) => (
                   <li key={issue.field + issue.message}>{issue.message}</li>
                 ))}
               </ul>
