@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+data:
+  # ------------------------------------------------------------------ #
+  # Database
+  # ------------------------------------------------------------------ #
+  POSTGRES_HOST: {{ include "voice-agent-platform.postgresHost" . | quote }}
+  POSTGRES_PORT: {{ include "voice-agent-platform.postgresPort" . | quote }}
+  POSTGRES_DB:   {{ include "voice-agent-platform.postgresDatabase" . | quote }}
+  POSTGRES_USER: {{ include "voice-agent-platform.postgresUser" . | quote }}
+
+  # ------------------------------------------------------------------ #
+  # Redis
+  # ------------------------------------------------------------------ #
+  REDIS_URL: {{ include "voice-agent-platform.redisUrl" . | quote }}
+
+  # ------------------------------------------------------------------ #
+  # Object storage (recordings)
+  # ------------------------------------------------------------------ #
+  S3_ENDPOINT_URL:      {{ include "voice-agent-platform.s3Endpoint" . | quote }}
+  S3_BUCKET_RECORDINGS: {{ include "voice-agent-platform.s3Bucket" . | quote }}
+
+  # ------------------------------------------------------------------ #
+  # LiveKit
+  # ------------------------------------------------------------------ #
+  LIVEKIT_URL:        {{ .Values.livekit.url | quote }}
+  LIVEKIT_PUBLIC_URL: {{ .Values.livekit.publicUrl | default .Values.configurationApi.livekitPublicUrl | quote }}
+  LIVEKIT_SIP_URI:    {{ .Values.livekit.sipUri | default .Values.configurationApi.livekitSipUri | quote }}
+  LIVEKIT_METRICS_URL: {{ .Values.livekit.metricsUrl | quote }}
+
+  # ------------------------------------------------------------------ #
+  # Platform-wide settings
+  # ------------------------------------------------------------------ #
+  WORKER_AGENT_NAME: {{ .Values.configurationApi.env.workerAgentName | quote }}
+  LOG_LEVEL:         {{ .Values.configurationApi.env.logLevel | quote }}
+  ENVIRONMENT:       {{ .Values.configurationApi.env.environment | quote }}
+  SERVICE_NAME:      "voice-agent-platform"
+
+  LIVEKIT_DRIFT_CHECK_ENABLED:           {{ .Values.configurationApi.env.livekitDriftCheckEnabled | quote }}
+  LIVEKIT_DRIFT_CHECK_INTERVAL_SECONDS:  {{ .Values.configurationApi.env.livekitDriftCheckIntervalSeconds | quote }}
+
+  WORKER_HEALTH_URLS:  {{ .Values.configurationApi.workerHealthUrls | quote }}
+  SIP_METRICS_URL:     ""
+
+  CORS_ALLOW_ORIGINS:  {{ .Values.configurationApi.env.corsAllowOrigins | quote }}
+  ALLOW_BROWSER_TEST_SESSIONS: {{ .Values.configurationApi.env.allowBrowserTestSessions | quote }}
+  ALLOW_BROWSER_TEST_PARTICIPANT: {{ .Values.aiAgentWorker.env.allowBrowserTestParticipant | quote }}

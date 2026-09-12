@@ -1,0 +1,81 @@
+# Prometheus Adapter custom metrics rules.
+#
+# These rules expose the voice_worker_load_ratio metric to the Kubernetes
+# HPA so it can scale the AI agent worker fleet based on call load rather
+# than CPU alone.
+#
+# Install the adapter:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
+#     --namespace monitoring \
+#     --set prometheus.url=http://prometheus.monitoring.svc.cluster.local \
+#     --set prometheus.port=9090 \
+#     -f deploy/prometheus/adapter-config.yaml
+#
+# Verify it is working:
+#   kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1" | jq '.resources[].name'
+#   # should include "pods/voice_worker_load_ratio"
+
+rules:
+  custom:
+    # ----------------------------------------------------------------- #
+    # voice_worker_load_ratio
+    #
+    # = active_calls / max_concurrent_calls  (per pod, averaged across
+    #   all pods in the deployment)
+    #
+    # voice_worker_active_calls   — exposed by the worker /metrics endpoint
+    # voice_worker_max_concurrent_calls — also from the worker
+    #
+    # The HPA targets 0.7 (700m in millivalue notation), meaning:
+    #   when the average pod has 70 % of its call slots occupied, add a pod.
+    # ----------------------------------------------------------------- #
+    - seriesQuery: 'voice_worker_active_calls{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod:       {resource: "pod"}
+      name:
+        matches: "^voice_worker_active_calls$"
+        as: "voice_worker_load_ratio"
+      metricsQuery: >-
+        (
+          voice_worker_active_calls{<<.LabelMatchers>>}
+          /
+          voice_worker_max_concurrent_calls{<<.LabelMatchers>>}
+        )
+
+  # Default CPU/memory rules — keep these so existing resource-based HPAs
+  # continue to work while the custom metric is being set up.
+  resource:
+    cpu:
+      containerQuery: |
+        sum by (<<.GroupBy>>) (
+          irate(container_cpu_usage_seconds_total{container!="",<<.LabelMatchers>>}[3m])
+        )
+      nodeQuery: |
+        sum by (<<.GroupBy>>) (
+          irate(node_cpu_seconds_total{mode!="idle",<<.LabelMatchers>>}[3m])
+        )
+      resources:
+        overrides:
+          node:      {resource: "node"}
+          namespace: {resource: "namespace"}
+          pod:       {resource: "pod"}
+      containerLabel: container
+    memory:
+      containerQuery: |
+        sum by (<<.GroupBy>>) (
+          container_memory_working_set_bytes{container!="",<<.LabelMatchers>>}
+        )
+      nodeQuery: |
+        sum by (<<.GroupBy>>) (
+          node_memory_MemTotal_bytes{<<.LabelMatchers>>}
+          - node_memory_MemAvailable_bytes{<<.LabelMatchers>>}
+        )
+      resources:
+        overrides:
+          node:      {resource: "node"}
+          namespace: {resource: "namespace"}
+          pod:       {resource: "pod"}
+      containerLabel: container

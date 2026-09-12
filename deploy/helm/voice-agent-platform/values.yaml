@@ -1,0 +1,391 @@
+# Default values for voice-agent-platform.
+#
+# Override only the keys you need to change; every key here has a safe default.
+# For a production deployment copy values.production.yaml and fill in the
+# secrets section — those have no defaults because they must never be empty.
+#
+# All image references use a global registry prefix so a private registry
+# can be set once rather than per-service.
+
+# --------------------------------------------------------------------------- #
+# Global
+# --------------------------------------------------------------------------- #
+global:
+  imageRegistry: ""          # e.g. "my-registry.example.com/"
+  imagePullSecrets: []       # names of existing pull-secret objects
+
+nameOverride: ""
+fullnameOverride: ""
+
+# --------------------------------------------------------------------------- #
+# Secrets
+#
+# In production, create these as Kubernetes Secrets externally (via Vault,
+# External Secrets Operator, or kubectl) and set `existingSecret` to the
+# name of that Secret.  The chart will never create a Secret whose value is
+# blank — missing required fields trigger a helm install error.
+# --------------------------------------------------------------------------- #
+secrets:
+  # If non-empty the chart reads all sensitive values from this existing
+  # Secret rather than creating one from the values below.
+  existingSecret: ""
+
+  # Required — set via --set or in an encrypted values file, never plain-text.
+  jwtSecret: ""
+  credentialEncryptionKey: ""
+  postgresPassword: ""
+  livekitApiKey: ""
+  livekitApiSecret: ""
+  minioRootUser: "minioadmin"
+  minioRootPassword: ""
+
+# --------------------------------------------------------------------------- #
+# Configuration API
+# --------------------------------------------------------------------------- #
+configurationApi:
+  image:
+    repository: voice-agent/configuration-api
+    tag: ""           # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  # Uvicorn workers per pod.  Set to (2 × CPU cores + 1) in production.
+  uvicornWorkers: 4
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  # Horizontal Pod Autoscaler
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  # Pod Disruption Budget — at least one pod must remain available during
+  # node drains and rolling upgrades.
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  # Spread replicas across nodes and availability zones.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: configuration-api
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: configuration-api
+
+  automigrateOnStartup: true
+
+  env:
+    logLevel: "info"
+    environment: "production"
+    corsAllowOrigins: ""   # Set to your frontend URL, e.g. "https://console.example.com"
+    livekitDriftCheckEnabled: "true"
+    livekitDriftCheckIntervalSeconds: "300"
+    workerAgentName: "voice-agent"
+    allowBrowserTestSessions: "false"
+
+  # Override the LiveKit public WebSocket URL seen by browsers.
+  livekitPublicUrl: ""       # e.g. "wss://livekit.example.com"
+  livekitSipUri: ""          # e.g. "sip:sip.example.com:5060"
+
+  # Comma-separated list of AI worker /ready URLs, for the capacity dashboard.
+  workerHealthUrls: ""
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: "/metrics"
+
+# --------------------------------------------------------------------------- #
+# AI Agent Worker
+# --------------------------------------------------------------------------- #
+aiAgentWorker:
+  image:
+    repository: voice-agent/ai-agent-worker
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Number of worker pods.  Each pod handles up to maxConcurrentCalls calls.
+  # HPA scales this up/down based on the voice_worker_load_ratio metric.
+  replicaCount: 2
+
+  # Maximum simultaneous calls per pod.  Keep this value consistent with
+  # WORKER_MAX_CONCURRENT_CALLS — the HPA metric is derived from it.
+  maxConcurrentCalls: 10
+
+  # Drain timeout in seconds.  Must match WORKER_DRAIN_TIMEOUT_SECONDS and
+  # must be less than terminationGracePeriodSeconds below.
+  drainTimeoutSeconds: 600
+
+  # Kubernetes gives the pod this many seconds to finish after SIGTERM.
+  # Must exceed drainTimeoutSeconds by a safety margin (we use +20s).
+  terminationGracePeriodSeconds: 620
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+
+  service:
+    type: ClusterIP
+    port: 8090          # /health and /ready
+
+  # HPA — scale on the voice_worker_load_ratio custom metric (active calls /
+  # max_concurrent_calls per pod).  Requires the Prometheus Adapter to be
+  # installed in the cluster and configured with the rules in
+  # deploy/prometheus/adapter-config.yaml.
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    # Scale up when average load ratio across all worker pods exceeds 70 %.
+    targetLoadRatio: "700m"   # 700 milli = 0.7 = 70 %
+    # CPU is the fallback when the custom metric is unavailable.
+    targetCPUUtilizationPercentage: 70
+    # Avoid flapping: wait longer before scaling down than scaling up.
+    scaleDown:
+      stabilizationWindowSeconds: 300    # 5 min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  # Anti-affinity: spread worker pods across nodes so a single node failure
+  # does not remove the entire worker fleet.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: ai-agent-worker
+
+  env:
+    logLevel: "info"
+    environment: "production"
+    workerAgentName: "voice-agent"
+    allowBrowserTestParticipant: "false"
+
+  nodeSelector: {}
+  tolerations: []
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8090"
+    prometheus.io/path: "/metrics"
+
+# --------------------------------------------------------------------------- #
+# Frontend
+# --------------------------------------------------------------------------- #
+frontend:
+  image:
+    repository: voice-agent/frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts:
+      - host: console.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: frontend-tls
+        hosts:
+          - console.example.com
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  # The API URL seen by browsers — must be publicly reachable.
+  apiBaseUrl: "https://api.example.com"
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# --------------------------------------------------------------------------- #
+# Database (Bitnami PostgreSQL sub-chart)
+#
+# Set postgresql.enabled=false and supply an external DSN via
+# externalDatabase.* when using a managed service (RDS, Cloud SQL, etc.).
+# --------------------------------------------------------------------------- #
+postgresql:
+  enabled: true
+  image:
+    # Must be the pgvector variant — standard PostgreSQL lacks the extension.
+    repository: pgvector/pgvector
+    tag: "pg16"
+    pullPolicy: IfNotPresent
+  auth:
+    database: voice_agent
+    username: voice_agent
+    # Password comes from the shared secret defined above.
+    existingSecret: ""
+    secretKeys:
+      adminPasswordKey: postgresPassword
+      userPasswordKey: postgresPassword
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+      limits:
+        cpu: "2000m"
+        memory: "2Gi"
+    initdb:
+      scripts:
+        init.sql: |
+          CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+          CREATE EXTENSION IF NOT EXISTS vector;
+
+# External database — used when postgresql.enabled=false.
+externalDatabase:
+  host: ""
+  port: 5432
+  database: voice_agent
+  username: voice_agent
+  # Loaded from the shared secret.
+
+# --------------------------------------------------------------------------- #
+# Redis (Bitnami Redis sub-chart)
+# --------------------------------------------------------------------------- #
+redis:
+  enabled: true
+  architecture: standalone       # Use "replication" for HA.
+  auth:
+    enabled: false               # Enable and set password for production.
+  master:
+    persistence:
+      enabled: true
+      size: 4Gi
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+
+externalRedis:
+  url: ""   # e.g. "redis://redis.example.com:6379/0" — used when redis.enabled=false.
+
+# --------------------------------------------------------------------------- #
+# MinIO (Bitnami MinIO sub-chart)
+# --------------------------------------------------------------------------- #
+minio:
+  enabled: true
+  auth:
+    rootUser: minioadmin
+    existingSecret: ""
+  defaultBuckets: "recordings"
+  persistence:
+    enabled: true
+    size: 100Gi
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+externalObjectStorage:
+  endpoint: ""     # e.g. "https://s3.amazonaws.com"
+  bucket: recordings
+  region: ""
+  # Credentials from the shared secret.
+
+# --------------------------------------------------------------------------- #
+# LiveKit
+#
+# The chart does not manage LiveKit itself — use the official LiveKit Helm
+# chart (https://github.com/livekit/livekit-helm) separately.
+# These values configure how our services connect to it.
+# --------------------------------------------------------------------------- #
+livekit:
+  # Internal WebSocket URL (pod-to-pod).
+  url: "ws://livekit:7880"
+  # External WebSocket URL for browser clients.
+  publicUrl: ""
+  # SIP ingress URI.
+  sipUri: ""
+  # Metrics endpoint for the capacity dashboard.
+  metricsUrl: "http://livekit:6789/metrics"
+
+# --------------------------------------------------------------------------- #
+# Service account
+# --------------------------------------------------------------------------- #
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

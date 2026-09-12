@@ -1,0 +1,24 @@
+{{- if .Values.aiAgentWorker.pdb.enabled -}}
+# --------------------------------------------------------------------------- #
+# PDB for the AI agent worker.
+#
+# minAvailable: 1 ensures that node drains and voluntary disruptions (node
+# upgrades, Cluster Autoscaler scale-down) never remove the last worker pod.
+# This does NOT prevent a total outage if the cluster has only one node — for
+# that, run at least two nodes and use the anti-affinity rule in values.yaml.
+# --------------------------------------------------------------------------- #
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-ai-agent-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent-worker
+spec:
+  minAvailable: {{ .Values.aiAgentWorker.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "voice-agent-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-agent-worker
+{{- end }}

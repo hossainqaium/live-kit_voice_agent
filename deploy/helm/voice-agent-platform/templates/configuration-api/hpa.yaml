@@ -1,0 +1,43 @@
+{{- if .Values.configurationApi.hpa.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-configuration-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: configuration-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "voice-agent-platform.fullname" . }}-configuration-api
+  minReplicas: {{ .Values.configurationApi.hpa.minReplicas }}
+  maxReplicas: {{ .Values.configurationApi.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.configurationApi.hpa.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.configurationApi.hpa.targetMemoryUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+{{- end }}

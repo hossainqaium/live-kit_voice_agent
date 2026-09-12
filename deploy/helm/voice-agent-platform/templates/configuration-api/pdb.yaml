@@ -1,0 +1,16 @@
+{{- if .Values.configurationApi.pdb.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-configuration-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: configuration-api
+spec:
+  minAvailable: {{ .Values.configurationApi.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "voice-agent-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: configuration-api
+{{- end }}

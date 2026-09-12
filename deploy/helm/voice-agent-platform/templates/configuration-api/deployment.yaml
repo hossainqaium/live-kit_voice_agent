@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-configuration-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: configuration-api
+spec:
+  {{- if not .Values.configurationApi.hpa.enabled }}
+  replicas: {{ .Values.configurationApi.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "voice-agent-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: configuration-api
+  strategy:
+    # RollingUpdate: new pods start before old ones stop, so there is
+    # always at least one pod serving requests during a deploy.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "voice-agent-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: configuration-api
+      {{- with .Values.configurationApi.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "voice-agent-platform.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.configurationApi.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.configurationApi.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.configurationApi.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.configurationApi.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ------------------------------------------------------------------ #
+      # Migration init-container — runs `alembic upgrade head` before the
+      # main container starts.  Only the first pod to acquire the advisory
+      # lock actually migrates; the rest wait and see the schema is current.
+      # ------------------------------------------------------------------ #
+      {{- if .Values.configurationApi.automigrateOnStartup }}
+      initContainers:
+        - name: db-migrate
+          image: {{ include "voice-agent-platform.image" (dict "image" .Values.configurationApi.image "global" .Values.global "chart" .Chart) }}
+          imagePullPolicy: {{ .Values.configurationApi.image.pullPolicy }}
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "voice-agent-platform.fullname" . }}-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: postgresPassword
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+      {{- end }}
+
+      containers:
+        - name: configuration-api
+          image: {{ include "voice-agent-platform.image" (dict "image" .Values.configurationApi.image "global" .Values.global "chart" .Chart) }}
+          imagePullPolicy: {{ .Values.configurationApi.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          command:
+            - uvicorn
+            - app.main:app
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --workers
+            - {{ .Values.configurationApi.uvicornWorkers | quote }}
+            # No --reload in production.
+          envFrom:
+            - configMapRef:
+                name: {{ include "voice-agent-platform.fullname" . }}-config
+          env:
+            - name: SERVICE_NAME
+              value: configuration-api
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: postgresPassword
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: jwtSecret
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: credentialEncryptionKey
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: livekitApiKey
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: livekitApiSecret
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: minioRootUser
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: minioRootPassword
+          resources:
+            {{- toYaml .Values.configurationApi.resources | nindent 12 }}
+          # ---------------------------------------------------------------- #
+          # Liveness: restart the pod if it is completely unresponsive.
+          # Readiness: remove the pod from the service endpoint while it is
+          # starting up or unhealthy, so traffic never reaches a broken pod.
+          # ---------------------------------------------------------------- #
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          # Uvicorn handles SIGTERM natively — it stops accepting new
+          # requests and waits for in-flight ones to complete.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          # Uvicorn writes a temporary socket; this tmpfs covers it.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      # Give in-flight requests a chance to drain before the pod is removed.
+      terminationGracePeriodSeconds: 30

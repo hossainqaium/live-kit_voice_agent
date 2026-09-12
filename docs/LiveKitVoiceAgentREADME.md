@@ -1943,7 +1943,9 @@ pattern — `1000 / calls_per_worker = workers`, plus headroom — is only meani
 
 ## 15. Production Deployment
 
-Kubernetes + Helm. Each of these scales **independently**:
+**Status (2026-09-13):** Phase 7.1–7.4 complete — Helm chart, HA, HPA, graceful drain.
+
+Kubernetes + Helm. Each service scales **independently**:
 
 ```
 Frontend · API · LiveKit · LiveKit SIP · AI Agent Workers
@@ -1967,34 +1969,71 @@ LiveKit Cluster    AI Worker Cluster
 LiveKit SIP Cluster
 ```
 
-Install:
+The full chart lives at `deploy/helm/voice-agent-platform/` with a
+`values.production.yaml` override file and a step-by-step
+[deployment guide](../deploy/helm/DEPLOYMENT.md).
+
+### Quick install
 
 ```bash
-helm upgrade --install voice-agent deploy/helm/voice-agent -f deploy/helm/values.production.yaml
+cd deploy/helm/voice-agent-platform && helm dependency update && cd ../../..
+
+helm upgrade --install voice-agent-platform \
+  deploy/helm/voice-agent-platform \
+  -f deploy/helm/voice-agent-platform/values.production.yaml \
+  --set secrets.jwtSecret="$JWT_SECRET" \
+  --set secrets.livekitApiKey="$LIVEKIT_API_KEY" \
+  --set secrets.livekitApiSecret="$LIVEKIT_API_SECRET" \
+  --set secrets.postgresPassword="$POSTGRES_PASSWORD" \
+  --set secrets.credentialEncryptionKey="$CREDENTIAL_ENCRYPTION_KEY" \
+  --set secrets.minioRootPassword="$MINIO_ROOT_PASSWORD" \
+  --namespace voice-agent --create-namespace
 ```
 
-### Autoscaling
+### Autoscaling (7.3)
 
-Kubernetes HPA (or equivalent) driven by **active AI jobs, worker utilization, CPU, memory**.
-Voice calls are long-running **jobs/sessions**, not short HTTP requests — configure
-`terminationGracePeriodSeconds` to exceed your maximum call duration so drains complete.
+The AI worker uses an `autoscaling/v2` HPA with a custom Prometheus metric:
 
-### Graceful shutdown
+```
+voice_worker_load_ratio = active_calls / max_concurrent_calls  (per pod)
+```
 
-On `SIGTERM` a worker stops accepting new calls, finishes existing calls, disconnects cleanly,
-and exits. Deployments must not drop active calls.
+Target: **0.7** (70 % of slots occupied → add a pod). Requires the
+[Prometheus Adapter](../deploy/prometheus/adapter-config.yaml) installed
+in the cluster. CPU is the fallback when the adapter is unavailable.
 
-### High availability
+Scale-up: 2 pods per 60 s window — responds to sudden call spikes.  
+Scale-down: 1 pod per 120 s, 5-min stabilisation window — avoids evicting pods that are still draining.
 
-Multiple LiveKit nodes · multiple SIP nodes · multiple AI workers · multiple API replicas ·
-PostgreSQL HA · Redis HA · redundant load balancers. No single points of failure.
+### Graceful shutdown (7.4)
+
+On `SIGTERM`, the sequence is:
+
+1. Kubernetes removes the pod from Service Endpoints (no new calls routed here).
+2. `preStop` sleep (5 s) lets kube-proxy flush the endpoint before SIGTERM fires.
+3. The worker catches `SIGTERM`, sets `DRAINING=true`, stops picking up new jobs.
+4. Active calls run to completion (up to `WORKER_DRAIN_TIMEOUT_SECONDS = 600 s`).
+5. `terminationGracePeriodSeconds = 620 s` is the hard ceiling — Kubernetes sends `SIGKILL` after that.
+
+`maxUnavailable: 0` rolling strategy ensures a new pod is always `Ready` before an old one starts draining.
+
+### High availability (7.2)
+
+| Component | HA mechanism |
+|---|---|
+| Configuration API | 2+ replicas, `topologySpreadConstraints` across zones, PDB `minAvailable: 1` |
+| AI Agent Workers | 2+ replicas, hard `podAntiAffinity` across nodes, PDB `minAvailable: 1` |
+| Frontend | 2+ replicas, PDB `minAvailable: 1` |
+| PostgreSQL | Bitnami chart with replication (or external managed PG with pgvector) |
+| Redis | `architecture: replication` (Sentinel) in `values.production.yaml` |
+| MinIO | Single-node chart; swap for AWS S3 / GCS for object-store HA |
 
 ### Adding capacity
 
-Adding LiveKit, SIP, API, or AI worker capacity is a **scaling operation, not a code change**.
+Adding worker capacity is a scaling operation, not a code change:
 
 ```bash
-kubectl scale deployment/ai-agent-worker --replicas=40
+kubectl scale deployment/voice-agent-platform-ai-agent-worker --replicas=20 -n voice-agent
 ```
 
 ---

@@ -1,0 +1,232 @@
+# Production value overrides.
+#
+# Start from this file when deploying to production:
+#
+#   helm upgrade --install voice-agent-platform ./deploy/helm/voice-agent-platform \
+#     -f deploy/helm/voice-agent-platform/values.production.yaml \
+#     --set secrets.jwtSecret="$JWT_SECRET" \
+#     --set secrets.livekitApiKey="$LIVEKIT_API_KEY" \
+#     --set secrets.livekitApiSecret="$LIVEKIT_API_SECRET" \
+#     --set secrets.postgresPassword="$POSTGRES_PASSWORD" \
+#     --set secrets.credentialEncryptionKey="$CREDENTIAL_ENCRYPTION_KEY" \
+#     --set secrets.minioRootPassword="$MINIO_ROOT_PASSWORD" \
+#     --namespace voice-agent --create-namespace
+#
+# For zero-plaintext deployments, use External Secrets Operator and set
+# secrets.existingSecret instead.
+
+# --------------------------------------------------------------------------- #
+# Global
+# --------------------------------------------------------------------------- #
+# global:
+#   imageRegistry: "your-registry.example.com"
+
+# --------------------------------------------------------------------------- #
+# Configuration API — 2 replicas minimum; HPA scales to 10 under load.
+# --------------------------------------------------------------------------- #
+configurationApi:
+  replicaCount: 2
+  uvicornWorkers: 4
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "1Gi"
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  env:
+    environment: production
+    logLevel: info
+    corsAllowOrigins: "https://console.example.com"   # ← set to real domain
+    allowBrowserTestSessions: "false"
+
+  livekitPublicUrl: "wss://livekit.example.com"       # ← set to real LiveKit URL
+  livekitSipUri: "sip:sip.example.com:5060"           # ← set to real SIP URI
+  # Comma-separated /ready URLs for all worker pods, used by capacity dashboard.
+  # In Kubernetes, the headless service DNS resolves to all pods.
+  workerHealthUrls: "http://voice-agent-platform-ai-agent-worker:8090"
+
+# --------------------------------------------------------------------------- #
+# AI Agent Worker — 2 replicas minimum; HPA scales to 20 under load.
+#
+# Sizing example for 100 concurrent calls:
+#   maxConcurrentCalls = 10 per pod
+#   minReplicas = 2  → baseline capacity = 20 calls
+#   HPA target ratio = 0.7  → new pod added when 7/10 slots occupied
+#   At 100 calls steady-state: 100/0.7 = ~143 slots needed = 15 pods
+# --------------------------------------------------------------------------- #
+aiAgentWorker:
+  replicaCount: 2
+  maxConcurrentCalls: 10
+  drainTimeoutSeconds: 600
+  terminationGracePeriodSeconds: 620
+
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "1Gi"
+    limits:
+      cpu: "4000m"
+      memory: "4Gi"
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetLoadRatio: "700m"
+    targetCPUUtilizationPercentage: 70
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  affinity:
+    podAntiAffinity:
+      # Hard: never place two worker pods on the same node.
+      # Change to preferredDuringScheduling if you have fewer nodes than pods.
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: ai-agent-worker
+
+# --------------------------------------------------------------------------- #
+# Frontend
+# --------------------------------------------------------------------------- #
+frontend:
+  replicaCount: 2
+
+  apiBaseUrl: "https://api.example.com"   # ← set to real API URL
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    hosts:
+      - host: console.example.com           # ← set to real domain
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: frontend-tls
+        hosts:
+          - console.example.com             # ← set to real domain
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# --------------------------------------------------------------------------- #
+# PostgreSQL
+#
+# For production, disable the sub-chart and point at a managed PostgreSQL
+# instance (AWS RDS, Google Cloud SQL, Azure Database for PostgreSQL) that has
+# the pgvector extension enabled.
+# --------------------------------------------------------------------------- #
+postgresql:
+  enabled: true   # Set to false and fill externalDatabase.* for managed PG.
+  primary:
+    persistence:
+      enabled: true
+      size: 100Gi
+      storageClass: ""   # e.g. "gp3" on EKS, "standard-rwo" on GKE
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "1Gi"
+      limits:
+        cpu: "4000m"
+        memory: "4Gi"
+
+# --------------------------------------------------------------------------- #
+# Redis
+#
+# Use architecture: replication for Sentinel-based HA.
+# For managed Redis (ElastiCache, Cloud Memorystore) set redis.enabled=false
+# and populate externalRedis.url.
+# --------------------------------------------------------------------------- #
+redis:
+  enabled: true
+  architecture: replication   # "standalone" for single-node dev/staging
+  auth:
+    enabled: true
+    existingSecret: ""       # Set to your secret name if using external secret
+    existingSecretPasswordKey: redisPassword
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+  replica:
+    replicaCount: 1
+    persistence:
+      enabled: true
+      size: 8Gi
+
+# --------------------------------------------------------------------------- #
+# MinIO
+#
+# For production, consider AWS S3, Google Cloud Storage, or Azure Blob Storage.
+# Set minio.enabled=false and populate externalObjectStorage.* for that.
+# --------------------------------------------------------------------------- #
+minio:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 500Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"

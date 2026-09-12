@@ -1,0 +1,59 @@
+{{- if .Values.aiAgentWorker.hpa.enabled -}}
+# --------------------------------------------------------------------------- #
+# HPA for the AI agent worker fleet.
+#
+# Primary metric: voice_worker_load_ratio
+#   = voice_worker_active_calls / voice_worker_max_concurrent_calls  (per pod)
+#
+# This is a custom metric surfaced by the Prometheus Adapter.  Install the
+# adapter and apply deploy/prometheus/adapter-config.yaml before enabling it.
+# The CPU metric below is the fallback when Prometheus Adapter is unavailable.
+#
+# Scaling policy:
+#   - Scale UP fast (2 pods / 60 s) so a call spike gets capacity quickly.
+#   - Scale DOWN slowly (1 pod / 120 s, 5-min stabilisation window) to avoid
+#     evicting pods mid-call during a lull.  Active calls hold the load ratio
+#     above the threshold anyway, so the slow-down is rarely needed in practice.
+# --------------------------------------------------------------------------- #
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-ai-agent-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "voice-agent-platform.fullname" . }}-ai-agent-worker
+  minReplicas: {{ .Values.aiAgentWorker.hpa.minReplicas }}
+  maxReplicas: {{ .Values.aiAgentWorker.hpa.maxReplicas }}
+  metrics:
+    # Primary: custom metric from Prometheus — active calls relative to capacity.
+    # Requires prometheus-adapter with the rules in deploy/prometheus/adapter-config.yaml.
+    - type: Pods
+      pods:
+        metric:
+          name: voice_worker_load_ratio
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.aiAgentWorker.hpa.targetLoadRatio }}
+    # Fallback: CPU utilisation, used when the custom metric is unavailable.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.aiAgentWorker.hpa.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.aiAgentWorker.hpa.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        {{- toYaml .Values.aiAgentWorker.hpa.scaleDown.policies | nindent 8 }}
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.aiAgentWorker.hpa.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        {{- toYaml .Values.aiAgentWorker.hpa.scaleUp.policies | nindent 8 }}
+{{- end }}

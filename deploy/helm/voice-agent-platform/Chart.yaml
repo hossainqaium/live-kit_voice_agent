@@ -1,0 +1,46 @@
+apiVersion: v2
+name: voice-agent-platform
+description: >
+  Multi-tenant AI voice agent platform — configuration API, AI worker fleet,
+  and administration frontend. LiveKit, PostgreSQL, Redis and MinIO are
+  optional sub-charts; use the flags below to swap in external instances.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - voice
+  - ai
+  - livekit
+  - sip
+home: https://github.com/hossainqaium/live-kit_voice_agent
+maintainers:
+  - name: Platform Team
+
+# --------------------------------------------------------------------------- #
+# Sub-chart dependencies.
+#
+# Each dependency is guarded by a `<name>.enabled` value so production
+# deployments can point at managed cloud services instead.
+#
+# Pin major+minor to avoid a dependency chart update changing behaviour under
+# us; run `helm dependency update` to pull the archives into charts/.
+# --------------------------------------------------------------------------- #
+dependencies:
+  # pgvector-enabled PostgreSQL.  Use CloudNativePG in production; the Bitnami
+  # chart is the lowest-friction option for everything else.
+  - name: postgresql
+    version: "16.4.3"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+
+  # Redis — used by LiveKit for room state and by the API for caching.
+  - name: redis
+    version: "20.6.3"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+
+  # MinIO — S3-compatible object store for recordings.
+  - name: minio
+    version: "14.8.5"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: minio.enabled

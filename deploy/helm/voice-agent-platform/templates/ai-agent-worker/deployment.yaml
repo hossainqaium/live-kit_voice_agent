@@ -1,0 +1,178 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-ai-agent-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent-worker
+spec:
+  {{- if not .Values.aiAgentWorker.hpa.enabled }}
+  replicas: {{ .Values.aiAgentWorker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "voice-agent-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-agent-worker
+  strategy:
+    # RollingUpdate: bring up new pods before terminating old ones.
+    # During a rollout, old pods drain their active calls while new pods
+    # start accepting.  maxUnavailable=0 guarantees no capacity drop.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "voice-agent-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ai-agent-worker
+        # Expose maxConcurrentCalls as a pod label so the Prometheus Adapter
+        # can use it when computing the load-ratio metric.
+        voice-agent/max-concurrent-calls: {{ .Values.aiAgentWorker.maxConcurrentCalls | quote }}
+      {{- with .Values.aiAgentWorker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "voice-agent-platform.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aiAgentWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aiAgentWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aiAgentWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ------------------------------------------------------------------ #
+      # Graceful drain (spec §51)
+      #
+      # When Kubernetes sends SIGTERM the sequence is:
+      #   1. The pod is immediately removed from the Service Endpoints (no
+      #      new calls reach it).
+      #   2. worker/main.py catches SIGTERM and calls worker.drain(), which
+      #      sets WORKER_DRAINING=true and stops it from picking up new jobs
+      #      from LiveKit.
+      #   3. Active calls continue to completion.  WORKER_DRAIN_TIMEOUT_SECONDS
+      #      is the hard ceiling; the process exits after that even if calls
+      #      are still running.
+      #   4. terminationGracePeriodSeconds (= drainTimeout + 20s safety margin)
+      #      is the last line of defence — Kubernetes sends SIGKILL if the
+      #      process has not exited by then.
+      #
+      # The preStop sleep gives kube-proxy and cloud LBs time to flush the
+      # Endpoint removal before SIGTERM fires, so no new calls slip through
+      # the gap.  Five seconds is conservative but well below the drain window.
+      # ------------------------------------------------------------------ #
+      terminationGracePeriodSeconds: {{ .Values.aiAgentWorker.terminationGracePeriodSeconds }}
+
+      containers:
+        - name: ai-agent-worker
+          image: {{ include "voice-agent-platform.image" (dict "image" .Values.aiAgentWorker.image "global" .Values.global "chart" .Chart) }}
+          imagePullPolicy: {{ .Values.aiAgentWorker.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: 8090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "voice-agent-platform.fullname" . }}-config
+          env:
+            - name: SERVICE_NAME
+              value: ai-agent-worker
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: postgresPassword
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: credentialEncryptionKey
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: livekitApiKey
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: livekitApiSecret
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: minioRootUser
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-agent-platform.secretName" . }}
+                  key: minioRootPassword
+            - name: WORKER_MAX_CONCURRENT_CALLS
+              value: {{ .Values.aiAgentWorker.maxConcurrentCalls | quote }}
+            - name: WORKER_DRAIN_TIMEOUT_SECONDS
+              value: {{ .Values.aiAgentWorker.drainTimeoutSeconds | quote }}
+            - name: WORKER_AGENT_NAME
+              value: {{ .Values.aiAgentWorker.env.workerAgentName | quote }}
+          resources:
+            {{- toYaml .Values.aiAgentWorker.resources | nindent 12 }}
+          # ---------------------------------------------------------------- #
+          # Health checks.
+          #
+          # Liveness: restart if the process is stuck (e.g. deadlock).
+          #   — Long failureThreshold (× periodSeconds = 90 s) avoids
+          #     killing a worker that is legitimately busy.
+          #
+          # Readiness: remove from LB while starting up.
+          #   — Does NOT remove from LB once calls are active; the drain
+          #     lifecycle manages that.  A worker that is draining stays
+          #     ready so Kubernetes does not interfere with the drain.
+          # ---------------------------------------------------------------- #
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 6    # 90 s before a restart — tolerate LLM latency spikes
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          # preStop runs before SIGTERM.  The 5-second sleep lets kube-proxy
+          # propagate the Endpoint removal so no new SIP calls are routed
+          # to this pod after the drain window starts.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
