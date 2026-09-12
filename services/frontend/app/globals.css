@@ -805,3 +805,36 @@ input[aria-invalid="true"] {
   white-space: pre;
   margin: 0;
 }
+
+.wizard-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+}
+.wizard-rail button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.wizard-rail button[aria-current="step"] {
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 500;
+}
+.wizard-rail button[data-done="true"]:not([aria-current="step"]) {
+  color: var(--text);
+}
+.wizard-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 20px;
+}

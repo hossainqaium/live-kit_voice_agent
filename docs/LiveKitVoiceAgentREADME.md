@@ -474,7 +474,7 @@ Reconciliation offers **Synchronize**, **Retry**, and **Repair** from the UI/API
 
 ## 8. Connecting a PBX
 
-Use the **SIP Configuration Wizard** in the tenant console — no config-file editing:
+Use Telephony → **SIP Setup Wizard** (`/sip-wizard`) in the tenant console — no config-file editing:
 
 ```
 1. Select PBX        6. Connection Test
@@ -484,9 +484,10 @@ Use the **SIP Configuration Wizard** in the tenant console — no config-file ed
 5. Security         10. Complete
 ```
 
-On completion the platform: validates the input, writes PostgreSQL rows, creates the matching
-LiveKit SIP trunk and dispatch rule through the LiveKit API, stores the returned LiveKit
-resource IDs, and marks the records `SYNCED`.
+The wizard is the same PBX, trunk and DID APIs in order. Security creates the trunk (and
+syncs it to LiveKit with an empty accepted-number list). Phone Number writes the DID and
+calls `POST /sip-trunks/{id}/sync` again so LiveKit accepts that number. Dispatch rules
+are long-lived and created separately (seed / LiveKit), not per wizard run.
 
 On the PBX side, point an outbound trunk/route for the DID at `LIVEKIT_SIP_URI`, and allow the
 LiveKit SIP signalling and RTP ranges through your firewall.
@@ -1054,6 +1055,7 @@ misread as a fault:
 | DID form — routing rule, business hours, fallback | **Working — Plan 4b.2 complete (2026-09-12).** Phone Numbers create/edit offers a routing-rule pin and a business-hours schedule. Fallback is configured on the routing rule (no DID columns); the form shows the pinned rule's fallback and closed action. List view shows Routing and Hours names. |
 | Self-service password change | **Working — Plan 3b.3a complete (2026-09-12).** Any signed-in user: topbar **Change password**. `POST /auth/me/password` requires the current password, hashes the new one, and revokes every session in the same change. Sign in again afterwards. Admin reset (`POST /users/{id}/password`) is unchanged. |
 | Voice Library Test / preview | **Working — Plan 4b.5 complete (2026-09-12).** Platform Voices → **Test** synthesises a phrase, stores MP3 in object storage (`voices.sample_object_key`), and plays it in the dialog. Playback is streamed from `GET /platform/voices/{id}/sample` (authenticated) so the browser does not talk to MinIO. |
+| SIP Configuration Wizard | **Working — Plan 4b.1 complete (2026-09-12).** Tenant console **SIP Setup Wizard** (`/sip-wizard`): 10 guided steps from PBX to a synced DID. Reuses existing APIs; re-syncs the trunk after the number is assigned. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1344,7 +1346,7 @@ navigation and a platform account has no tenant to act in.
 | **Platform console** | http://localhost:3200/platform | **Working** — every section in spec 60 |
 | Swagger UI | http://localhost:8200/docs | Working — still the fastest way to reach an endpoint with a specific payload |
 | ReDoc | http://localhost:8200/redoc | Working, read-only reference |
-| Grafana | http://localhost:3201 | Working; no voice dashboard yet (Phase 2b.6) |
+| Grafana | http://localhost:3201 | Working — voice-latency dashboard auto-provisioned (Plan 2b.6) |
 | Prometheus | http://localhost:9290 | Working, metrics scraped |
 | MinIO console | http://localhost:9201 | Working, empty until recording lands (Phase 2b.3) |
 | LiveKit admin UI | — | **None exists** for self-hosted LiveKit. The platform console is the configuration surface, by design — §9d.6 |
@@ -1355,6 +1357,7 @@ navigation and a platform account has no tenant to act in.
 | Section | Path | What it does |
 |---|---|---|
 | Dashboard | `/` | Counts, connection-test state, API reachability |
+| **SIP Setup Wizard** | `/sip-wizard` | Ten-step PBX → trunk → DID onboarding (Plan 4b.1). Needs `sip_trunks.write`. |
 | PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
 | Phone Numbers | `/phone-numbers` | DIDs, trunk, answering agent, **routing rule**, **business hours**, plus **Call Test** — a browser call to that number (§9d.7) |
@@ -2008,6 +2011,7 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Long silence before the first word | Voice-latency metrics: STT latency, LLM first-token, TTS first-audio. Streaming enabled on all three? |
 | Agent talks over the caller | Barge-in path: VAD → turn detection → TTS cancellation; check interruption and silence-timeout settings. |
 | `SIP trunk = Missing` in LiveKit | Configuration drift — run Synchronize/Repair. |
+| SIP Setup Wizard created a trunk but calls still `486 flood` | Finish the Phone Number step — that is what re-syncs accepted numbers. A trunk created at Security still has an empty list. |
 | Calls rejected at peak | Tenant call limits, or platform capacity exhausted — check Available Capacity and worker utilization. |
 | Provider errors in bursts | Circuit breaker state and fallback provider configuration. |
 | Caller heard the summary whisper | Audio isolation bug — the whisper was published to the wrong leg. Treat as a release blocker; check which participant the whisper track was published to. |
