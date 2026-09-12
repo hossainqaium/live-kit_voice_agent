@@ -17,8 +17,9 @@ import {
   ToastStack, useToasts,
 } from "@/components/ui";
 import {
-  ApiError, api,
-  type Agent, type Pbx, type PhoneNumber, type PhoneNumberInput, type SipTrunk,
+  ApiError, api, FALLBACK_ACTION_LABELS,
+  type Agent, type BusinessHours, type Pbx, type PhoneNumber, type PhoneNumberInput,
+  type RoutingRule, type SipTrunk,
 } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 
@@ -31,6 +32,8 @@ export default function PhoneNumbersPage() {
   const [pbxs, setPbxs] = useState<Pbx[]>([]);
   const [trunks, setTrunks] = useState<SipTrunk[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [rules, setRules] = useState<RoutingRule[]>([]);
+  const [hours, setHours] = useState<BusinessHours[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<PhoneNumber | null>(null);
   const [calling, setCalling] = useState<{ did: string; agent: string } | null>(null);
@@ -41,13 +44,20 @@ export default function PhoneNumbersPage() {
 
   const load = useCallback(async () => {
     try {
-      const [numbers, pbxPage, trunkPage, agentPage] = await Promise.all([
-        api.phoneNumbers.list(), api.pbxs.list(200), api.sipTrunks.list(200), api.agents.list(200),
+      const [numbers, pbxPage, trunkPage, agentPage, rulePage, hoursPage] = await Promise.all([
+        api.phoneNumbers.list(),
+        api.pbxs.list(200),
+        api.sipTrunks.list(200),
+        api.agents.list(200),
+        api.routingRules.list(200),
+        api.businessHours.list(200),
       ]);
       setRows(numbers.items);
       setPbxs(pbxPage.items);
       setTrunks(trunkPage.items);
       setAgents(agentPage.items);
+      setRules(rulePage.items);
+      setHours(hoursPage.items);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "could not load numbers");
@@ -88,7 +98,8 @@ export default function PhoneNumbersPage() {
           <table>
             <thead>
               <tr>
-                <th>Number</th><th>Trunk</th><th>Answered by</th><th>PBX</th>
+                <th>Number</th><th>Trunk</th><th>Answered by</th>
+                <th>Routing</th><th>Hours</th><th>PBX</th>
                 <th>Status</th><th style={{ textAlign: "right" }}>Actions</th>
               </tr>
             </thead>
@@ -106,6 +117,12 @@ export default function PhoneNumbersPage() {
                     {row.agent_name ?? (
                       <Badge tone="warn">no agent</Badge>
                     )}
+                  </td>
+                  <td className="small">
+                    {row.routing_rule_name ?? <span className="subtle">any matching rule</span>}
+                  </td>
+                  <td className="small">
+                    {row.business_hours_name ?? <span className="subtle">—</span>}
                   </td>
                   <td className="small">{row.pbx_name ?? <span className="subtle">—</span>}</td>
                   <td>
@@ -170,6 +187,7 @@ export default function PhoneNumbersPage() {
       {(creating || editing) && (
         <NumberForm
           number={editing} pbxs={pbxs} trunks={trunks} agents={agents}
+          rules={rules} hours={hours}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSaved={async (msg) => { setCreating(false); setEditing(null); toasts.ok(msg); await load(); }}
         />
@@ -208,10 +226,11 @@ export default function PhoneNumbersPage() {
 }
 
 function NumberForm({
-  number, pbxs, trunks, agents, onClose, onSaved,
+  number, pbxs, trunks, agents, rules, hours, onClose, onSaved,
 }: {
   number: PhoneNumber | null;
   pbxs: Pbx[]; trunks: SipTrunk[]; agents: Agent[];
+  rules: RoutingRule[]; hours: BusinessHours[];
   onClose(): void;
   onSaved(message: string): void | Promise<void>;
 }) {
@@ -221,12 +240,15 @@ function NumberForm({
     pbx_id: number?.pbx_id ?? null,
     sip_trunk_id: number?.sip_trunk_id ?? null,
     inbound_agent_id: number?.inbound_agent_id ?? null,
+    routing_rule_id: number?.routing_rule_id ?? null,
+    business_hours_id: number?.business_hours_id ?? null,
   });
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const chosenAgent = agents.find((a) => a.id === form.inbound_agent_id);
   const agentUnpublished = chosenAgent && chosenAgent.published_version_number === null;
+  const chosenRule = rules.find((r) => r.id === form.routing_rule_id);
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -311,6 +333,53 @@ function NumberForm({
             </select>
           )}
         </Field>
+
+        <Field
+          label="Routing rule"
+          hint="Optional. Pin this DID to one rule. Without a pin, every matching rule is evaluated in priority order."
+        >
+          {(id) => (
+            <select id={id} value={form.routing_rule_id ?? ""}
+              onChange={(e) => setForm({ ...form, routing_rule_id: e.target.value || null })}>
+              <option value="">Evaluate all matching rules</option>
+              {rules.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name}{r.status !== "ACTIVE" ? ` (${r.status.toLowerCase()})` : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
+        <Field
+          label="Business hours"
+          hint="Optional schedule attached to this number. Hours on a pinned routing rule take precedence at call setup."
+        >
+          {(id) => (
+            <select id={id} value={form.business_hours_id ?? ""}
+              onChange={(e) => setForm({ ...form, business_hours_id: e.target.value || null })}>
+              <option value="">None</option>
+              {hours.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.name}{h.open_now === true ? " (open now)" : h.open_now === false ? " (closed now)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
+        {chosenRule && (
+          <Notice tone="info">
+            Fallback for <strong>{chosenRule.name}</strong>:{" "}
+            {chosenRule.fallback_action
+              ? FALLBACK_ACTION_LABELS[chosenRule.fallback_action]
+              : "none — a failed handoff drops the caller."}
+            {chosenRule.closed_action
+              ? ` Outside hours: ${FALLBACK_ACTION_LABELS[chosenRule.closed_action]}.`
+              : ""}
+            {" "}Edit the chain on the Routing page.
+          </Notice>
+        )}
 
         {agentUnpublished && (
           <Notice tone="warn">

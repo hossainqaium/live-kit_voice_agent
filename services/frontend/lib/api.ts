@@ -330,6 +330,8 @@ export interface PhoneNumber {
   pbx_name: string | null;
   sip_trunk_name: string | null;
   agent_name: string | null;
+  routing_rule_name: string | null;
+  business_hours_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -340,6 +342,8 @@ export interface PhoneNumberInput {
   pbx_id?: string | null;
   sip_trunk_id?: string | null;
   inbound_agent_id?: string | null;
+  routing_rule_id?: string | null;
+  business_hours_id?: string | null;
 }
 
 // --- Agents (spec 18, 19) ------------------------------------------------- //

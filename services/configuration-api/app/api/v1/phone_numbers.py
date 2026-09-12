@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy import select
 
 from app.core.dependencies import ClientIp, CurrentTenant, require_permission
-from app.db.models import Agent, Pbx, PhoneNumber, SipTrunk
+from app.db.models import Agent, BusinessHours, Pbx, PhoneNumber, RoutingRule, SipTrunk
 from app.db.repository import TenantRepository
 from app.db.util import as_lookup
 from app.schemas.common import Page
@@ -53,6 +53,8 @@ async def _decorate(tenant: CurrentTenant, rows: list[PhoneNumber]) -> list[Phon
     pbx_ids = {row.pbx_id for row in rows if row.pbx_id}
     trunk_ids = {row.sip_trunk_id for row in rows if row.sip_trunk_id}
     agent_ids = {row.inbound_agent_id for row in rows if row.inbound_agent_id}
+    rule_ids = {row.routing_rule_id for row in rows if row.routing_rule_id}
+    hours_ids = {row.business_hours_id for row in rows if row.business_hours_id}
 
     async def names(model, ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
         if not ids:
@@ -67,6 +69,8 @@ async def _decorate(tenant: CurrentTenant, rows: list[PhoneNumber]) -> list[Phon
     pbx_names = await names(Pbx, pbx_ids)
     trunk_names = await names(SipTrunk, trunk_ids)
     agent_names = await names(Agent, agent_ids)
+    rule_names = await names(RoutingRule, rule_ids)
+    hours_names = await names(BusinessHours, hours_ids)
 
     return [
         PhoneNumberResponse.model_validate(row, from_attributes=True).model_copy(
@@ -75,6 +79,12 @@ async def _decorate(tenant: CurrentTenant, rows: list[PhoneNumber]) -> list[Phon
                 "sip_trunk_name": trunk_names.get(row.sip_trunk_id) if row.sip_trunk_id else None,
                 "agent_name": agent_names.get(row.inbound_agent_id)
                 if row.inbound_agent_id
+                else None,
+                "routing_rule_name": rule_names.get(row.routing_rule_id)
+                if row.routing_rule_id
+                else None,
+                "business_hours_name": hours_names.get(row.business_hours_id)
+                if row.business_hours_id
                 else None,
             }
         )
@@ -114,6 +124,8 @@ async def _validate_references(
         ("pbx_id", Pbx, "PBX"),
         ("sip_trunk_id", SipTrunk, "SIP trunk"),
         ("inbound_agent_id", Agent, "agent"),
+        ("routing_rule_id", RoutingRule, "routing rule"),
+        ("business_hours_id", BusinessHours, "business hours schedule"),
     ):
         value = payload.get(field)
         if value is not None and not await repository.exists(model, value):

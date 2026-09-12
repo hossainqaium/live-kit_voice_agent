@@ -1051,6 +1051,7 @@ misread as a fault:
 | Post-call conversation summary | **Working — Plan 2b.5 complete (2026-09-12).** `worker/summariser.py` generates a 3-5 sentence summary from transcript segments after the call ends. Stored in `call_transcripts.summary` + `full_text`. Skips calls with fewer than 2 turns; uses tenant's `summary_template` when set (also what Phase 6 warm-transfer whisper reads). 25 new tests. |
 | Audit trail coverage — every mutating endpoint | **Complete — Plan 3b.5 done (2026-09-12).** Fixed gap: `POST /catalog/credentials/{id}/verify` now writes a `credential.verified` audit row. `tests/test_audit_coverage.py` statically walks all `POST/PUT/PATCH/DELETE` routes and asserts `audit.record` is present (direct or via private helper); two intentional exemptions documented. New endpoints without audit fail the test immediately. |
 | Grafana voice-latency dashboard | **Working — Plan 2b.6 complete (2026-09-12).** `deploy/grafana/dashboards/voice-latency.json` — 18 panels auto-provisioned on next Grafana refresh. Covers all 6 spec-56 metrics (STT/LLM/TTS per-stage + time-to-first-response + time-to-first-audio + end-to-end), active calls, worker utilization, provider circuit breaker state, fallbacks. Filter by tenant and agent via template variables. View at http://localhost:3201 (admin/admin). |
+| DID form — routing rule, business hours, fallback | **Working — Plan 4b.2 complete (2026-09-12).** Phone Numbers create/edit offers a routing-rule pin and a business-hours schedule. Fallback is configured on the routing rule (no DID columns); the form shows the pinned rule's fallback and closed action. List view shows Routing and Hours names. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1354,7 +1355,7 @@ navigation and a platform account has no tenant to act in.
 | Dashboard | `/` | Counts, connection-test state, API reachability |
 | PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
 | SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
-| Phone Numbers | `/phone-numbers` | DIDs, their trunk and the agent that answers, plus **Call Test** — a browser call to that number (§9d.7) |
+| Phone Numbers | `/phone-numbers` | DIDs, trunk, answering agent, **routing rule**, **business hours**, plus **Call Test** — a browser call to that number (§9d.7) |
 | Agents | `/agents` | The builder: provider and model selection per tier, versions, validation, publish, rollback. Provider dropdowns show only what is configured in AI Setup. |
 | **AI Setup** | `/ai-setup` | Four tabs — **LLM**, **Embedding**, **STT**, **TTS**. Each tab lists stored provider credentials with Test / Rotate / Delete actions; the Add modal verifies a key before saving it. Providers configured here populate the agent builder dropdowns. See [`AIProviders.md`](./AIProviders.md). |
 | Routing | `/routing` | Priority-ordered rules with their fallback chain (spec 20, 38) |

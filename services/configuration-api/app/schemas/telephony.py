@@ -184,3 +184,5 @@ class PhoneNumberResponse(TimestampedResponse):
     pbx_name: str | None = None
     sip_trunk_name: str | None = None
     agent_name: str | None = None
+    routing_rule_name: str | None = None
+    business_hours_name: str | None = None
