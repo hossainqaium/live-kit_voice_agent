@@ -1,0 +1,179 @@
+# OpenTelemetry Collector configuration (spec §3, Plan 7.8).
+#
+# Deploy via the OTel Operator or as a standalone Deployment/DaemonSet.
+# This config:
+#   - Receives OTLP traces/metrics/logs from the platform services
+#   - Exports traces to Tempo (or Jaeger) and metrics to Prometheus
+#   - Exports logs to Loki
+#
+# Install the OTel Operator (required for the Collector CRD below):
+#   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+#   helm upgrade --install opentelemetry-operator open-telemetry/opentelemetry-operator \
+#     --namespace opentelemetry-operator-system --create-namespace \
+#     --set "manager.collectorImage.repository=otel/opentelemetry-collector-k8s"
+#
+# Then apply this file:
+#   kubectl apply -f deploy/otel/otel-collector.yaml -n voice-agent
+
+---
+apiVersion: opentelemetry.io/v1alpha1
+kind: OpenTelemetryCollector
+metadata:
+  name: voice-agent-otel
+  namespace: voice-agent
+spec:
+  mode: deployment
+  replicas: 1
+  config: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      zpages:
+        endpoint: 0.0.0.0:55679
+
+    receivers:
+      # OTLP over gRPC and HTTP — the platform services send traces here.
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # Scrape Prometheus metrics from our platform services (pull model).
+      # The push model (services push to OTLP) is preferred in new code,
+      # but Prometheus scraping gives a migration-free path for existing
+      # /metrics endpoints.
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: voice-platform-otel-pull
+              kubernetes_sd_configs:
+                - role: pod
+                  namespaces:
+                    names: [voice-agent]
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                  action: keep
+                  regex: "true"
+
+    processors:
+      # Drop high-cardinality debug spans in production.
+      filter/traces:
+        traces:
+          span:
+            - 'attributes["http.url"] == "/health"'
+            - 'attributes["http.url"] == "/ready"'
+            - 'attributes["http.url"] == "/metrics"'
+
+      # Batch before export to reduce network round-trips.
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+
+      # Add Kubernetes metadata to every signal (pod, node, namespace).
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.deployment.name
+            - k8s.namespace.name
+            - k8s.node.name
+          labels:
+            - tag_name: service.component
+              key: app.kubernetes.io/component
+              from: pod
+          annotations:
+            - tag_name: service.version
+              key: app.kubernetes.io/version
+              from: pod
+
+      memory_limiter:
+        check_interval: 5s
+        limit_mib: 400
+        spike_limit_mib: 100
+
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: production
+            action: upsert
+
+    exporters:
+      # Traces → Tempo
+      otlp/tempo:
+        endpoint: http://tempo.monitoring.svc.cluster.local:4317
+        tls:
+          insecure: true
+
+      # Metrics → Prometheus (remote write)
+      prometheusremotewrite:
+        endpoint: http://prometheus.monitoring.svc.cluster.local:9090/api/v1/write
+        tls:
+          insecure: true
+
+      # Logs → Loki
+      loki:
+        endpoint: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+        labels:
+          resource:
+            service.name: "service_name"
+            k8s.namespace.name: "namespace"
+            k8s.pod.name: "pod"
+            service.component: "component"
+
+      # Debug exporter — disable in production by removing from pipelines.
+      debug:
+        verbosity: basic
+
+    service:
+      extensions: [health_check, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, filter/traces, batch, resource]
+          exporters: [otlp/tempo]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, k8sattributes, batch, resource]
+          exporters: [prometheusremotewrite]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, batch, resource]
+          exporters: [loki]
+
+---
+# RBAC so the collector can discover pods.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: voice-agent-otel-collector
+  namespace: voice-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: voice-agent-otel-collector
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: voice-agent-otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: voice-agent-otel-collector
+    namespace: voice-agent
+roleRef:
+  kind: ClusterRole
+  name: voice-agent-otel-collector
+  apiGroup: rbac.authorization.k8s.io

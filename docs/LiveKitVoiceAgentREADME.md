@@ -1943,7 +1943,7 @@ pattern — `1000 / calls_per_worker = workers`, plus headroom — is only meani
 
 ## 15. Production Deployment
 
-**Status (2026-09-13):** Phase 7.1–7.4 complete — Helm chart, HA, HPA, graceful drain.
+**Status (2026-09-13):** Phase 7 complete — Helm chart, HA, HPA, graceful drain, Prometheus Kubernetes scraping, three Grafana dashboards, 18 alerting rules, OTel/Loki/Tempo, External Secrets Operator, PostgreSQL backup CronJob, DR runbook, and 12-scenario failure testing playbook.
 
 Kubernetes + Helm. Each service scales **independently**:
 
@@ -2035,6 +2035,57 @@ Adding worker capacity is a scaling operation, not a code change:
 ```bash
 kubectl scale deployment/voice-agent-platform-ai-agent-worker --replicas=20 -n voice-agent
 ```
+
+### Observability stack (7.5–7.8)
+
+| Component | What it covers | File |
+|---|---|---|
+| Prometheus (Kubernetes) | Pod autodiscovery, cAdvisor, LiveKit | `deploy/prometheus/prometheus-k8s.yml` |
+| ServiceMonitor CRDs | Prometheus Operator integration | `templates/monitoring/servicemonitor.yaml` |
+| Alert rules (18 rules) | Capacity, quality, providers, infra | `deploy/prometheus/rules/voice-platform.yml` |
+| Grafana dashboards | Latency & Quality, Platform Overview, Worker Fleet | `deploy/grafana/dashboards/` |
+| OTel Collector | Traces → Tempo, logs → Loki, metrics → Prometheus | `deploy/otel/otel-collector.yaml` |
+
+Install the OTel Operator + Loki + Tempo via their Helm charts, then apply:
+
+```bash
+kubectl apply -f deploy/otel/otel-collector.yaml -n voice-agent
+```
+
+### Secrets management (7.9)
+
+Use External Secrets Operator to pull credentials from Vault, AWS Secrets Manager, or GCP Secret Manager:
+
+```bash
+# 1. Install ESO
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets-system --create-namespace
+
+# 2. Edit deploy/secrets/external-secrets.yaml — uncomment your backend
+# 3. Apply
+kubectl apply -f deploy/secrets/external-secrets.yaml -n voice-agent
+
+# 4. Tell Helm to use the externally-managed Secret
+helm upgrade ... --set secrets.existingSecret=voice-agent-platform-credentials
+```
+
+### Backup and DR (7.10–7.11)
+
+Enable the PostgreSQL backup CronJob:
+
+```bash
+helm upgrade voice-agent-platform ... \
+  --set backup.postgresql.enabled=true \
+  --set backup.postgresql.s3Bucket=backups \
+  --set backup.postgresql.schedule="0 2 * * *"
+```
+
+Full restore procedure: [`docs/runbooks/disaster-recovery.md`](../docs/runbooks/disaster-recovery.md)
+
+### Failure testing (7.12)
+
+12-scenario playbook covering every §73 failure mode:
+[`docs/runbooks/failure-testing.md`](../docs/runbooks/failure-testing.md)
 
 ---
 

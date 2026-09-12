@@ -383,6 +383,49 @@ livekit:
   metricsUrl: "http://livekit:6789/metrics"
 
 # --------------------------------------------------------------------------- #
+# Monitoring
+# --------------------------------------------------------------------------- #
+monitoring:
+  # Set to true when kube-prometheus-stack (Prometheus Operator) is installed.
+  # Creates ServiceMonitor CRDs instead of relying on pod annotations.
+  serviceMonitor:
+    enabled: false
+    # Namespace where the Prometheus Operator is watching for ServiceMonitors.
+    # Leave empty to use the release namespace.
+    namespace: ""
+    # Labels that the Prometheus Operator's serviceMonitorSelector must match.
+    # e.g. { release: kube-prometheus-stack }
+    labels: {}
+    interval: "15s"
+    scrapeTimeout: "10s"
+
+# --------------------------------------------------------------------------- #
+# Backup
+# --------------------------------------------------------------------------- #
+backup:
+  postgresql:
+    enabled: false
+    # S3/MinIO bucket and prefix for pg_dump archives.
+    s3Bucket: "backups"
+    s3Prefix: "postgresql"
+    # Cron schedule (default: 2 AM UTC daily).
+    schedule: "0 2 * * *"
+    # Keep this many recent dumps before deleting older ones.
+    retentionDays: 30
+    # Image that has pg_dump and the aws/mc CLI.
+    image:
+      repository: postgres
+      tag: "16"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+
+# --------------------------------------------------------------------------- #
 # Service account
 # --------------------------------------------------------------------------- #
 serviceAccount:

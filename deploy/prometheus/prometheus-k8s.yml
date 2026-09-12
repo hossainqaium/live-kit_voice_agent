@@ -1,0 +1,136 @@
+# Prometheus configuration for Kubernetes deployments (spec 57).
+#
+# This file is used when Prometheus runs inside the cluster (e.g. via
+# kube-prometheus-stack).  It uses Kubernetes service discovery to
+# automatically find and scrape all platform pods — no static IPs.
+#
+# Mount via ConfigMap; typically managed by the kube-prometheus-stack
+# operator rather than this file directly (it reads ServiceMonitor CRDs).
+# This file is the manual equivalent for non-Operator setups.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: production
+    cluster: voice-agent-cluster
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# --------------------------------------------------------------------- #
+# Alertmanager integration (set to your Alertmanager service address)
+# --------------------------------------------------------------------- #
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # ------------------------------------------------------------------- #
+  # Kubernetes API server — cluster health
+  # ------------------------------------------------------------------- #
+  - job_name: kubernetes-apiservers
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  # ------------------------------------------------------------------- #
+  # Kubernetes nodes (kubelet cAdvisor) — CPU, memory, network per pod
+  # ------------------------------------------------------------------- #
+  - job_name: kubernetes-nodes-cadvisor
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+  # ------------------------------------------------------------------- #
+  # Voice platform pods — scrapes any pod with the annotation:
+  #   prometheus.io/scrape: "true"
+  # ------------------------------------------------------------------- #
+  - job_name: voice-platform-pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [voice-agent]
+    relabel_configs:
+      # Only scrape pods that opt in.
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      # Use the pod-level metrics path annotation if set.
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      # Use the pod-level port annotation if set.
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      # Carry useful Kubernetes metadata as labels.
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        action: replace
+        target_label: kubernetes_node
+      # Carry the app component label (configuration-api, ai-agent-worker, frontend).
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+        action: replace
+        target_label: component
+
+  # ------------------------------------------------------------------- #
+  # LiveKit server — served on a separate metrics port
+  # ------------------------------------------------------------------- #
+  - job_name: livekit
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [voice-agent]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        action: keep
+        regex: livekit
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:6789
+        target_label: __address__
+      - target_label: job
+        replacement: livekit
+      - target_label: plane
+        replacement: voice
+
+  # ------------------------------------------------------------------- #
+  # Prometheus self-monitoring
+  # ------------------------------------------------------------------- #
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

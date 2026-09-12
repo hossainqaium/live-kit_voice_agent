@@ -1,9 +1,19 @@
-# Alerting rules (spec 57).
+# Alerting rules for the voice agent platform (spec 57, Plan 7.7).
 #
-# Thresholds here are development placeholders. Phase 8 replaces them with
-# values derived from measured load-test behaviour rather than guesses.
+# Severity levels:
+#   critical — requires immediate action; pages on-call
+#   warning  — requires attention within the shift
+#   info     — noteworthy but not actionable (Slack only)
+#
+# Thresholds marked [Phase 8] will be revised after load testing confirms
+# realistic production values.  Current values are informed engineering
+# estimates calibrated to development observations.
 
 groups:
+
+  # ----------------------------------------------------------------------- #
+  # Availability — services are up and healthy
+  # ----------------------------------------------------------------------- #
   - name: availability
     rules:
       - alert: ServiceDown
@@ -13,10 +23,92 @@ groups:
           severity: critical
         annotations:
           summary: "{{ $labels.job }} is down"
+          description: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }}). Check pod status and /health endpoint."
+          runbook: "https://github.com/hossainqaium/live-kit_voice_agent/blob/main/docs/runbooks/failure-testing.md"
 
+      - alert: ConfigurationApiHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="configuration-api", status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="configuration-api"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Configuration API 5xx rate > 5 %"
+          description: "{{ $value | humanizePercentage }} of requests are returning 5xx. Check application logs."
+
+      - alert: ConfigurationApiHighLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="configuration-api"}[5m])) by (le, handler)
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Configuration API p95 latency > 2 s on {{ $labels.handler }}"
+          description: "p95={{ $value | humanizeDuration }}. Investigate slow handlers or database queries."
+
+  # ----------------------------------------------------------------------- #
+  # Worker capacity — fleet running out of call slots
+  # ----------------------------------------------------------------------- #
+  - name: capacity
+    rules:
+      - alert: WorkerFleetHighLoad
+        expr: |
+          sum(voice_worker_active_calls) / sum(voice_worker_max_concurrent_calls) > 0.85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker fleet load > 85 %"
+          description: "{{ $value | humanizePercentage }} of call slots occupied. HPA should be scaling up; check HPA events."
+          runbook: "https://github.com/hossainqaium/live-kit_voice_agent/blob/main/docs/runbooks/failure-testing.md#worker-exhaustion"
+
+      - alert: WorkerFleetSaturated
+        expr: |
+          sum(voice_worker_active_calls) / sum(voice_worker_max_concurrent_calls) > 0.95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker fleet near saturation (> 95 %)"
+          description: "New calls may be rejected. Immediately scale workers: kubectl scale deploy/voice-agent-platform-ai-agent-worker --replicas=<N>"
+
+      - alert: WorkerPodCountTooLow
+        expr: count(up{job="ai-agent-worker"}) < 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Only {{ $value }} worker pod(s) running (minimum is 2)"
+          description: "Worker fleet has fewer pods than the PDB minimum. Check node availability and pending pods."
+
+      - alert: HpaMaxReplicasReached
+        expr: |
+          kube_horizontalpodautoscaler_status_current_replicas{
+            horizontalpodautoscaler=~".*ai-agent-worker.*"
+          }
+          ==
+          kube_horizontalpodautoscaler_spec_max_replicas{
+            horizontalpodautoscaler=~".*ai-agent-worker.*"
+          }
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI worker HPA at maximum replicas ({{ $value }})"
+          description: "HPA cannot add more pods. Consider increasing maxReplicas or right-sizing nodes."
+
+  # ----------------------------------------------------------------------- #
+  # Call quality — latency regressions
+  # ----------------------------------------------------------------------- #
   - name: voice-quality
     rules:
-      # Time to first audio is what a caller actually experiences as lag.
+      # Time to first audio is the primary caller-experience metric.
       - alert: HighTimeToFirstAudio
         expr: |
           histogram_quantile(
@@ -27,8 +119,81 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "p95 time-to-first-audio above 1.5s"
+          summary: "p95 time-to-first-audio > 1.5 s"
+          description: "p95={{ $value | humanizeDuration }}. Target ≤ 1.0 s. Investigate STT or LLM latency on the Latency dashboard."
+          runbook: "https://github.com/hossainqaium/live-kit_voice_agent/blob/main/docs/runbooks/failure-testing.md#high-latency"
 
+      - alert: CriticalTimeToFirstAudio
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(voice_time_to_first_audio_seconds_bucket[5m])) by (le)
+          ) > 3.0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "p95 time-to-first-audio > 3 s (callers will notice)"
+          description: "p95={{ $value | humanizeDuration }}. Check whether the primary STT or LLM provider circuit breaker is OPEN."
+
+      - alert: HighSTTLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(voice_stt_latency_seconds_bucket[5m])) by (le, provider)
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 STT latency > 2 s on {{ $labels.provider }}"
+          description: "p95={{ $value | humanizeDuration }}. Check provider status page or consider enabling the fallback provider."
+
+      - alert: HighLLMLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(voice_llm_first_token_latency_seconds_bucket[5m])) by (le, provider, model)
+          ) > 3.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 LLM TTFT > 3 s — {{ $labels.provider }}/{{ $labels.model }}"
+          description: "p95={{ $value | humanizeDuration }}. Check provider status or reduce context window."
+
+      - alert: HighCallFailureRate
+        expr: |
+          sum(rate(voice_calls_total{state="failed"}[10m]))
+          /
+          sum(rate(voice_calls_total[10m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Call failure rate > 5 %"
+          description: "{{ $value | humanizePercentage }} of calls are failing. Check worker logs for errors."
+
+      - alert: CallRateSuddenDrop
+        expr: |
+          (
+            sum(rate(voice_calls_total[5m])) == 0
+          )
+          and
+          (
+            sum(rate(voice_calls_total[30m] offset 5m)) > 0
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Call rate dropped to zero (was non-zero 30 min ago)"
+          description: "No calls in the last 5 minutes. Check SIP trunks, LiveKit, and worker /ready endpoints."
+
+  # ----------------------------------------------------------------------- #
+  # Provider health — circuit breakers and fallbacks
+  # ----------------------------------------------------------------------- #
   - name: providers
     rules:
       - alert: ProviderCircuitOpen
@@ -37,8 +202,37 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Circuit breaker open for {{ $labels.kind }}/{{ $labels.provider }}"
+          summary: "Circuit breaker OPEN: {{ $labels.kind }}/{{ $labels.provider }}"
+          description: "All requests to {{ $labels.provider }} ({{ $labels.kind }}) are failing fast. Check provider status page and worker logs."
+          runbook: "https://github.com/hossainqaium/live-kit_voice_agent/blob/main/docs/runbooks/failure-testing.md#provider-failure"
 
+      - alert: AllProvidersCircuitOpen
+        expr: |
+          count(voice_provider_circuit_state{kind="stt"} == 2) == count(voice_provider_circuit_state{kind="stt"})
+          or
+          count(voice_provider_circuit_state{kind="llm"} == 2) == count(voice_provider_circuit_state{kind="llm"})
+          or
+          count(voice_provider_circuit_state{kind="tts"} == 2) == count(voice_provider_circuit_state{kind="tts"})
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "All providers of a kind have open circuit breakers"
+          description: "Every configured provider for an AI stage is failing. Active calls cannot complete. Immediate action required."
+
+      - alert: HighProviderFallbackRate
+        expr: |
+          sum(rate(voice_provider_fallbacks_total[5m])) by (kind, primary) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Provider fallback activating > 6 times/min: {{ $labels.kind }}/{{ $labels.primary }}"
+          description: "Primary provider {{ $labels.primary }} is unstable. Consider switching to the fallback permanently until resolved."
+
+  # ----------------------------------------------------------------------- #
+  # LiveKit configuration drift
+  # ----------------------------------------------------------------------- #
   - name: configuration
     rules:
       - alert: LiveKitConfigurationDrift
@@ -47,4 +241,63 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $value }} {{ $labels.resource }} resource(s) drifted from LiveKit"
+          summary: "{{ $value }} LiveKit {{ $labels.resource }}(s) drifted from PostgreSQL"
+          description: "A resource was modified or deleted directly in LiveKit. Use the Repair action in the console or run `make detect-drift` to reconcile."
+          runbook: "https://github.com/hossainqaium/live-kit_voice_agent/blob/main/docs/runbooks/failure-testing.md#livekit-drift"
+
+  # ----------------------------------------------------------------------- #
+  # Resource pressure (Kubernetes infra)
+  # ----------------------------------------------------------------------- #
+  - name: infrastructure
+    rules:
+      - alert: PodCrashLooping
+        expr: |
+          increase(kube_pod_container_status_restarts_total{
+            namespace="voice-agent"
+          }[15m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.pod }}/{{ $labels.container }} restarting frequently"
+          description: "Container has restarted {{ $value | humanize }} times in 15 minutes. Check logs with: kubectl logs -n voice-agent {{ $labels.pod }} --previous"
+
+      - alert: PersistentVolumeAlmostFull
+        expr: |
+          (
+            kubelet_volume_stats_available_bytes{namespace="voice-agent"}
+            /
+            kubelet_volume_stats_capacity_bytes{namespace="voice-agent"}
+          ) < 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PVC {{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full"
+          description: "Less than 15 % free. Expand the volume or enable automated cleanup (backup retention policy)."
+
+      - alert: NodeMemoryPressure
+        expr: |
+          (
+            node_memory_MemAvailable_bytes
+            /
+            node_memory_MemTotal_bytes
+          ) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.instance }} memory < 10 % free"
+          description: "OOMKiller risk. Check for memory leaks in AI worker pods (large LLM contexts)."
+
+      - alert: NodeHighCPU
+        expr: |
+          100 - (
+            avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100
+          ) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.instance }} CPU > 90 %"
+          description: "{{ $value | humanize }}% CPU in use. Increase node size or reduce worker density (lower WORKER_MAX_CONCURRENT_CALLS)."

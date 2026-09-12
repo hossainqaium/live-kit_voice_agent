@@ -1,0 +1,150 @@
+{{- if .Values.backup.postgresql.enabled -}}
+# PostgreSQL backup CronJob (spec §66, Plan 7.10).
+#
+# Runs pg_dump on a schedule, compresses the output, and uploads it to
+# the configured S3/MinIO bucket.  Old dumps are pruned after retentionDays.
+#
+# The job uses the same Secret as the rest of the platform for credentials.
+# It does NOT use Bitnami's built-in backup — this gives us control over
+# retention, naming, and verification.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "voice-agent-platform.fullname" . }}-pg-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voice-agent-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pg-backup
+spec:
+  schedule: {{ .Values.backup.postgresql.schedule | quote }}
+  concurrencyPolicy: Forbid          # Never run two backups at once.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Fail fast if pg_dump hangs.
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "voice-agent-platform.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: pg-backup
+        spec:
+          serviceAccountName: {{ include "voice-agent-platform.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999   # postgres user in the postgres image
+            fsGroup: 999
+          containers:
+            - name: pg-backup
+              image: {{ include "voice-agent-platform.image" (dict "image" .Values.backup.postgresql.image "global" .Values.global "chart" .Chart) }}
+              imagePullPolicy: {{ .Values.backup.postgresql.image.pullPolicy }}
+              resources:
+                {{- toYaml .Values.backup.postgresql.resources | nindent 16 }}
+              env:
+                - name: PGHOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ include "voice-agent-platform.fullname" . }}-config
+                      key: POSTGRES_HOST
+                - name: PGPORT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ include "voice-agent-platform.fullname" . }}-config
+                      key: POSTGRES_PORT
+                - name: PGDATABASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ include "voice-agent-platform.fullname" . }}-config
+                      key: POSTGRES_DB
+                - name: PGUSER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ include "voice-agent-platform.fullname" . }}-config
+                      key: POSTGRES_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "voice-agent-platform.secretName" . }}
+                      key: postgresPassword
+                - name: S3_ENDPOINT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ include "voice-agent-platform.fullname" . }}-config
+                      key: S3_ENDPOINT_URL
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "voice-agent-platform.secretName" . }}
+                      key: minioRootUser
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "voice-agent-platform.secretName" . }}
+                      key: minioRootPassword
+                - name: S3_BUCKET
+                  value: {{ .Values.backup.postgresql.s3Bucket | quote }}
+                - name: S3_PREFIX
+                  value: {{ .Values.backup.postgresql.s3Prefix | quote }}
+                - name: RETENTION_DAYS
+                  value: {{ .Values.backup.postgresql.retentionDays | quote }}
+              command:
+                - /bin/bash
+                - -euo
+                - pipefail
+                - -c
+                - |
+                  TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+                  FILENAME="${S3_PREFIX}/${PGDATABASE}-${TIMESTAMP}.sql.gz"
+                  BUCKET_PATH="s3://${S3_BUCKET}/${FILENAME}"
+
+                  echo "[backup] Starting pg_dump → ${BUCKET_PATH}"
+                  pg_dump \
+                    --format=plain \
+                    --no-acl \
+                    --no-owner \
+                    --verbose \
+                    "${PGDATABASE}" \
+                  | gzip -9 \
+                  | aws s3 cp \
+                      --endpoint-url "${S3_ENDPOINT}" \
+                      --storage-class STANDARD \
+                      - "${BUCKET_PATH}"
+
+                  echo "[backup] Upload complete: ${BUCKET_PATH}"
+
+                  # Prune dumps older than RETENTION_DAYS.
+                  CUTOFF=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
+                           || date -u -v "-${RETENTION_DAYS}d" +%Y-%m-%dT%H:%M:%S)
+
+                  echo "[backup] Pruning dumps older than ${CUTOFF}"
+                  aws s3 ls \
+                    --endpoint-url "${S3_ENDPOINT}" \
+                    "s3://${S3_BUCKET}/${S3_PREFIX}/" \
+                  | awk '{print $4}' \
+                  | while read -r key; do
+                      TS=$(echo "${key}" | grep -oE '[0-9]{8}T[0-9]{6}Z' | head -1)
+                      if [[ -n "${TS}" ]]; then
+                        DUMP_DATE=$(echo "${TS}" | sed 's/T/ /;s/Z//')
+                        if [[ "${DUMP_DATE}" < "${CUTOFF}" ]]; then
+                          echo "[backup] Deleting old dump: ${key}"
+                          aws s3 rm \
+                            --endpoint-url "${S3_ENDPOINT}" \
+                            "s3://${S3_BUCKET}/${S3_PREFIX}/${key}"
+                        fi
+                      fi
+                    done
+
+                  echo "[backup] Done."
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+{{- end }}
