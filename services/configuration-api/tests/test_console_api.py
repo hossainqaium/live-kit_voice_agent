@@ -542,6 +542,44 @@ class TestProviderSelectionAndCredentials:
         with pytest.raises(pydantic.ValidationError):
             CredentialUpsert(provider_id=uuid.uuid4(), api_key="abc")
 
+    def test_catalog_provider_exposes_default_base_url_for_cloud(self) -> None:
+        """AI Setup pre-populates the endpoint field from this value (CR-2).
+
+        Cloud providers have a known public API URL that the Add modal should
+        fill in automatically so the user does not have to look it up.
+        """
+        from app.schemas.catalog import CatalogProvider
+
+        provider = CatalogProvider(
+            id=uuid.uuid4(),
+            kind=ProviderKind.LLM,
+            slug="openai_hosted",
+            display_name="OpenAI",
+            supports_streaming=True,
+            requires_credential=True,
+            self_hosted=False,
+            default_base_url="https://api.openai.com/v1",
+        )
+        dumped = provider.model_dump(mode="json")
+        assert dumped["default_base_url"] == "https://api.openai.com/v1"
+
+    def test_catalog_provider_hides_default_base_url_for_self_hosted(self) -> None:
+        """Internal platform URLs are not surfaced to tenants (spec 13)."""
+        from app.schemas.catalog import CatalogProvider
+
+        provider = CatalogProvider(
+            id=uuid.uuid4(),
+            kind=ProviderKind.STT,
+            slug="openai_compatible",
+            display_name="Self-hosted STT",
+            supports_streaming=True,
+            requires_credential=False,
+            self_hosted=True,
+            default_base_url=None,  # suppressed for self-hosted
+        )
+        dumped = provider.model_dump(mode="json")
+        assert dumped["default_base_url"] is None
+
     @pytest.mark.parametrize(
         "field",
         [
