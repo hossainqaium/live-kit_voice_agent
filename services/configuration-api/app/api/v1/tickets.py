@@ -1,7 +1,7 @@
 """Support ticket endpoints (Phase 6.0).
 
 Tickets are tenant-owned operations records. The console files them as
-``MANUAL``. Server Agent files them as ``AGENT`` during a call via the
+``MANUAL``. Service Agent files them as ``AGENT`` during a call via the
 ``create_ticket()`` builtin (Plan 6.1).
 """
 

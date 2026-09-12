@@ -55,9 +55,9 @@ class TestRoutes:
 
 
 class TestSeed:
-    def test_seed_creates_server_agent(self) -> None:
+    def test_seed_creates_service_agent(self) -> None:
         src = inspect.getsource(seed_mod.seed_dev_tenant)
-        assert 'name == "Server Agent"' in src or 'name="Server Agent"' in src
+        assert 'name="Service Agent"' in src or '"Service Agent"' in src
         assert "Files support tickets" in src or "file a support ticket" in src
 
     def test_seed_creates_one_ticket(self) -> None:
@@ -73,7 +73,7 @@ class TestConsole:
             pytest.skip("services/frontend is not mounted in this container")
         src = path.read_text()
         assert "tickets.create" in src
-        assert "Server Agent" in src
+        assert "Service Agent" in src
         assert "Create a ticket" in src
 
     def test_nav_lists_tickets(self) -> None:

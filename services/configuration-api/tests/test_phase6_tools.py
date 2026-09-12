@@ -19,8 +19,8 @@ class TestSeededBuiltins:
         src = inspect.getsource(seed_mod)
         assert "create_ticket" in src
         assert "builtin://create_ticket" in src or 'f"builtin://{name}"' in src
-        assert "_SERVER_AGENT_PROMPT" in src
-        assert "create_ticket" in seed_mod._SERVER_AGENT_PROMPT
+        assert "_SERVICE_AGENT_PROMPT" in src
+        assert "create_ticket" in seed_mod._SERVICE_AGENT_PROMPT
 
     def test_prd_examples_are_seeded(self) -> None:
         names = {item[0] for item in seed_mod._BUILTIN_TOOLS}
@@ -37,7 +37,7 @@ class TestSeededBuiltins:
             "refund_order",
         }
 
-    def test_server_agent_gets_create_ticket_only(self) -> None:
+    def test_service_agent_gets_create_ticket_only(self) -> None:
         src = inspect.getsource(seed_mod.seed_dev_tenant)
         assert 'tools_by_name["create_ticket"]' in src
         assert "refund_order" not in src

@@ -62,8 +62,8 @@ from shared.tools import validate_request_schema
 
 logger = get_logger(__name__)
 
-_SERVER_AGENT_PROMPT = (
-    "You are Server Agent. Your job is to file a support ticket when a caller "
+_SERVICE_AGENT_PROMPT = (
+    "You are Service Agent. Your job is to file a support ticket when a caller "
     "reports a problem with a building, room, or service. Ask for a short title "
     "and what is wrong. Confirm before calling create_ticket. After it returns "
     "a ticket number, read that number back to the caller. Keep spoken replies "
@@ -948,42 +948,48 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
         )
         await session.flush()
 
-    server_agent = (
+    service_agent = (
         await session.execute(
-            select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == "Server Agent")
-        )
-    ).scalar_one_or_none()
-    if server_agent is None:
-        server_agent = Agent(
-            tenant_id=tenant.id,
-            name="Server Agent",
-            description="Files support tickets when a caller reports a problem",
-        )
-        session.add(server_agent)
-        await session.flush()
-
-    server_version = (
-        await session.execute(
-            select(AgentVersion).where(
-                AgentVersion.agent_id == server_agent.id, AgentVersion.version_number == 1
+            select(Agent).where(
+                Agent.tenant_id == tenant.id,
+                Agent.name.in_(("Service Agent", "Server Agent")),
             )
         )
     ).scalar_one_or_none()
-    if server_version is None:
+    if service_agent is None:
+        service_agent = Agent(
+            tenant_id=tenant.id,
+            name="Service Agent",
+            description="Files support tickets when a caller reports a problem",
+        )
+        session.add(service_agent)
+        await session.flush()
+    elif service_agent.name != "Service Agent":
+        service_agent.name = "Service Agent"
+        service_agent.description = "Files support tickets when a caller reports a problem"
+
+    service_version = (
+        await session.execute(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == service_agent.id, AgentVersion.version_number == 1
+            )
+        )
+    ).scalar_one_or_none()
+    if service_version is None:
         stt = await _provider(session, ProviderKind.STT, "openai_compatible")
         llm = await _provider(session, ProviderKind.LLM, spec.llm_provider_slug)
         tts = await _provider(session, ProviderKind.TTS, "openai_compatible")
-        server_version = AgentVersion(
+        service_version = AgentVersion(
             tenant_id=tenant.id,
-            agent_id=server_agent.id,
+            agent_id=service_agent.id,
             version_number=1,
             state=AgentVersionState.PUBLISHED,
             language="en",
             greeting=(
-                "Hello, this is the server desk. Tell me what is broken and I "
+                "Hello, this is the service desk. Tell me what is broken and I "
                 "will file a ticket."
             ),
-            system_prompt=_SERVER_AGENT_PROMPT,
+            system_prompt=_SERVICE_AGENT_PROMPT,
             stt_provider_id=stt.id,
             stt_model_id=await _model_id(session, stt.id, spec.stt_model),
             llm_provider_id=llm.id,
@@ -998,9 +1004,9 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
             recording_enabled=False,
             transcription_enabled=True,
         )
-        session.add(server_version)
+        session.add(service_version)
         await session.flush()
-        server_agent.published_version_id = server_version.id
+        service_agent.published_version_id = service_version.id
         await session.flush()
 
     ticket = (
@@ -1028,12 +1034,23 @@ async def seed_dev_tenant(session: AsyncSession, spec: DevTenantSpec) -> SeededT
         )
         await session.flush()
 
-    if server_version is not None and "Until the ticket tool" in (server_version.system_prompt or ""):
-        server_version.system_prompt = _SERVER_AGENT_PROMPT
+    if service_version is not None:
+        prompt = service_version.system_prompt or ""
+        greeting = service_version.greeting or ""
+        if (
+            "Until the ticket tool" in prompt
+            or "You are Server Agent" in prompt
+            or "server desk" in greeting
+        ):
+            service_version.system_prompt = _SERVICE_AGENT_PROMPT
+            service_version.greeting = (
+                "Hello, this is the service desk. Tell me what is broken and I "
+                "will file a ticket."
+            )
 
     tools_by_name = await _seed_builtin_tools(session, tenant.id)
-    server_version_id = server_agent.published_version_id or server_version.id
-    await _grant_tool(session, tenant.id, server_version_id, tools_by_name["create_ticket"].id)
+    service_version_id = service_agent.published_version_id or service_version.id
+    await _grant_tool(session, tenant.id, service_version_id, tools_by_name["create_ticket"].id)
     dev_version_id = agent.published_version_id or version.id
     for name in ("get_customer", "check_order", "create_order", "check_inventory"):
         await _grant_tool(session, tenant.id, dev_version_id, tools_by_name[name].id)

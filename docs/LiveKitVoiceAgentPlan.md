@@ -632,8 +632,8 @@ and survive provider failure.
 
 | # | Work item | Spec |
 |---|---|---|
-| ~~6.0~~ | ~~Simple ticketing — tenant `tickets` table, CRUD API, `/tickets` UI; seed one ticket and a **Server Agent** whose job is to file tickets~~ **Done (2026-09-12):** `tickets` is tenant-owned with RLS. `GET/POST /tickets`, `PUT/DELETE /tickets/{id}`. Console **Tickets**. `seed-dev-tenant` creates **Server Agent** (published) and `TCK-0001` ("Lobby access card reader offline"). Agent-filed tickets are Plan 6.1. Tests: `tests/test_tickets.py`. | new |
-| ~~6.1~~ | ~~Tools / function calling in the pipeline — `create_ticket()` (Server Agent only) plus `get_customer()`, `check_order()`, `create_order()`, `cancel_order()`, `check_inventory()`, `send_sms()`, `send_email()`, `transfer_call()`; assignable per agent~~ **Done (2026-09-12):** Worker loads granted tools onto `CallContext`, registers them with LiveKit `function_tool(raw_schema=…)`, and executes builtins (`builtin://name`) or HTTP. `create_ticket()` inserts a tenant ticket with `source=AGENT`. Seed creates the PRD example tools plus `refund_order`; Server Agent is granted `create_ticket` only. Tests: `tests/test_tools.py` (worker), `tests/test_phase6_tools.py`. | §30 |
+| ~~6.0~~ | ~~Simple ticketing — tenant `tickets` table, CRUD API, `/tickets` UI; seed one ticket and a **Service Agent** whose job is to file tickets~~ **Done (2026-09-12):** `tickets` is tenant-owned with RLS. `GET/POST /tickets`, `PUT/DELETE /tickets/{id}`. Console **Tickets**. `seed-dev-tenant` creates **Service Agent** (published) and `TCK-0001` ("Lobby access card reader offline"). Agent-filed tickets are Plan 6.1. Tests: `tests/test_tickets.py`. | new |
+| ~~6.1~~ | ~~Tools / function calling in the pipeline — `create_ticket()` (Service Agent only) plus `get_customer()`, `check_order()`, `create_order()`, `cancel_order()`, `check_inventory()`, `send_sms()`, `send_email()`, `transfer_call()`; assignable per agent~~ **Done (2026-09-12):** Worker loads granted tools onto `CallContext`, registers them with LiveKit `function_tool(raw_schema=…)`, and executes builtins (`builtin://name`) or HTTP. `create_ticket()` inserts a tenant ticket with `source=AGENT`. Seed creates the PRD example tools plus `refund_order`; Service Agent is granted `create_ticket` only. Tests: `tests/test_tools.py` (worker), `tests/test_phase6_tools.py`. | §30 |
 | ~~6.2~~ | ~~API Tool Builder UI — name, description, method, URL, auth, headers, request/response schema, timeout, retry policy~~ **Done (2026-09-12):** `/tools` form now includes response schema, timeout (≤30s), and retry count. Builtin tools lock name and URL. | §31 |
 | ~~6.3~~ | ~~Variable substitution — `{{customer_id}}`, `{{order_id}}`, `{{caller_number}}`~~ **Done (2026-09-12):** `shared/tools.py` substitutes `{{name}}`. Call-context values (`caller_number`, `call_id`, `did`, `tenant_id`, `agent_name`) do not need to be in the request schema. Model-supplied names still must be declared. | §31 |
 | ~~6.4~~ | ~~Tool schema validation before agent publish~~ **Done (2026-09-12):** `_validate_version` blocks publish when a granted tool is inactive or `schema_valid` is false. | §31 |
@@ -659,8 +659,8 @@ and survive provider failure.
 
 ### Exit criteria
 
-- A tenant administrator can list, create, and close tickets in `/tickets`. Seed data includes one ticket and a **Server Agent**.
-- On a call to Server Agent, the model files a ticket via `create_ticket()` and the row appears in `/tickets` with `source=AGENT`.
+- A tenant administrator can list, create, and close tickets in `/tickets`. Seed data includes one ticket and a **Service Agent**.
+- On a call to Service Agent, the model files a ticket via `create_ticket()` and the row appears in `/tickets` with `source=AGENT`.
 - An agent calls a tenant-configured HTTP tool mid-call and uses the result in its reply.
 - An agent denied the Refund API cannot invoke it, even when the LLM tries. [§32]
 - A tenant knowledge base answers a question that is not in the system prompt, retrieved from
@@ -1805,7 +1805,7 @@ rediscover:
 | 5 | Orphan detection is the LiveKit-to-database direction (5.7). Per-row GETs still miss leftovers from a failed delete-and-recreate. |
 | 5 | `UpdateSIPInboundTrunk` may still be unimplemented; keep the delete-and-recreate path and the dependent-rule rebuild. |
 | 7 | IP allow-listing must be verified on real infrastructure. It cannot be validated on Docker Desktop at all. |
-| 6 | An existing stack that was seeded before 6.1 has Server Agent but no `create_ticket` grant. Re-run `seed-dev-tenant` — it is idempotent and adds the builtin library plus the allow-list. |
+| 6 | An existing stack that was seeded before 6.1 has Service Agent but no `create_ticket` grant. Re-run `seed-dev-tenant` — it is idempotent and adds the builtin library plus the allow-list. |
 | 8 | **RTC media is one muxed UDP port** in development, not a range — a range cost 15 s of ICE gathering per call through Docker Desktop (§12.1). Muxing is also LiveKit's production advice, so the Helm values should mux too rather than widening a range. SIP's RTP range is still 50 ports, roughly two per call, and does need widening before load testing or concurrency caps near 25 calls for reasons that look like LiveKit faults. |
 
 ---

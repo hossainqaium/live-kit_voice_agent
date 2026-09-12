@@ -3,7 +3,7 @@
 /**
  * Support tickets (Phase 6.0).
  *
- * Manual create from this screen. Server Agent files the same rows during
+ * Manual create from this screen. Service Agent files the same rows during
  * a call via create_ticket() (source=AGENT).
  */
 
@@ -88,7 +88,7 @@ export default function TicketsPage() {
         <div>
           <h1>Tickets</h1>
           <p className="page-subtitle">
-            Support tickets for this tenant. File one here, or let Server Agent
+            Support tickets for this tenant. File one here, or let Service Agent
             file one during a call with create_ticket.
           </p>
         </div>
@@ -122,7 +122,7 @@ export default function TicketsPage() {
           >
             {filter
               ? "Try a different filter."
-              : "Create one, or wait for Server Agent to file one from a call."}
+              : "Create one, or wait for Service Agent to file one from a call."}
           </EmptyState>
         ) : (
           <table>

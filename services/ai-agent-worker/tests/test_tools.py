@@ -31,7 +31,7 @@ def _context(**overrides: Any) -> CallContext:
         "tenant_slug": "dev",
         "agent_id": uuid.uuid4(),
         "agent_version_id": uuid.uuid4(),
-        "agent_name": "Server Agent",
+        "agent_name": "Service Agent",
         "version_number": 1,
         "room_name": "room",
         "did": "1801",

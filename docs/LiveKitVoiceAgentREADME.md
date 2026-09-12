@@ -1046,7 +1046,7 @@ misread as a fault:
 | The agent answering a real PBX call and replying | **Working** — confirmed on a live FusionPBX call to DID 1801, greeting then a full turn. Time to first audio 5247 ms, which is still too slow. |
 | Warm transfer to a human agent | Not yet — Phase 6 |
 | Tools, function calling, RAG | **Tools working — Plan 6.1–6.5 complete (2026-09-12).** Granted tools are registered on the LiveKit agent and executed mid-call (builtins or HTTP). RAG / knowledge ingestion is still Phase 6.6+. |
-| Ticketing | **Working — Plan 6.0 + 6.1 complete (2026-09-12).** Console **Tickets**. Server Agent files rows via `create_ticket()` with `source=AGENT`. Seed: **Server Agent**, `TCK-0001`, and the builtin tool library. |
+| Ticketing | **Working — Plan 6.0 + 6.1 complete (2026-09-12).** Console **Tickets**. Service Agent files rows via `create_ticket()` with `source=AGENT`. Seed: **Service Agent**, `TCK-0001`, and the builtin tool library. |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
 | Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 29 providers across LLM/STT/TTS/Embedding. See [`AIProviders.md`](./AIProviders.md). |
@@ -1393,7 +1393,7 @@ navigation and a platform account has no tenant to act in.
 | Transfer Targets | `/transfer-destinations` | Where a warm transfer goes, and whether it whispers the summary (CR-1) |
 | Tools | `/tools` | HTTP and builtin tools: name, description, method, URL, auth, headers, request/response schema, timeout, retries (Plan 6.2). `{{caller_number}}` and other call-context placeholders (Plan 6.3). |
 | Knowledge Bases | `/knowledge-bases` | Create and assign a base; **ingestion is Phase 6** |
-| Tickets | `/tickets` | Support tickets — create and close here; Server Agent files them from a call with `create_ticket()` |
+| Tickets | `/tickets` | Support tickets — create and close here; Service Agent files them from a call with `create_ticket()` |
 | Calls / Transcripts | `/calls` | History, per-call detail, transcript and events |
 | Recordings | `/recordings` | Recording metadata; **empty until egress lands (Plan 2b.3)** |
 | Analytics | `/analytics` | Volume and outcomes over a window (spec 57) |
@@ -2076,8 +2076,8 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Caller heard silence during transfer | Hold media not configured, or the announcement finished without looping. Check the agent's announcement and hold-media settings. |
 | Transfer never reaches the human agent | `transfer_status` says which step stalled; then check the PBX extension/queue and what SIP response the PBX returned. |
 | A service never becomes ready | `/ready` reports which dependency failed; check PostgreSQL, Redis, LiveKit, object storage. |
-| Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001`, **Server Agent**, and the builtin tool library. |
-| Server Agent talks about a ticket but none appears | Re-run `seed-dev-tenant` so `create_ticket` is granted. Confirm the call used Server Agent (not Development Agent). Look for `tool_invoked` / `ticket_filed_by_agent` in the worker log. |
+| Tickets page is empty after a migrate | Apply `c8e1a4b70d29` (`make migrate`) then `seed-dev-tenant`. That creates `TCK-0001`, **Service Agent**, and the builtin tool library. |
+| Service Agent talks about a ticket but none appears | Re-run `seed-dev-tenant` so `create_ticket` is granted. Confirm the call used Service Agent (not Development Agent). Look for `tool_invoked` / `ticket_filed_by_agent` in the worker log. |
 | Publish blocked by an invalid tool schema | Fix the tool on `/tools`, or uncheck it on the agent. A granted tool with `schema_valid=false` cannot go live (Plan 6.4). |
 | The model asked for a tool the agent must not use | Check the agent's tool allow-list. Absence is a denial. Seeded `refund_order` is in the library and granted to nobody. |
 | AI Setup provider dropdown is empty (no providers listed in any tab) | The platform catalog has not been seeded yet, or a new migration was added and the seed was not re-run. Run `make migrate` then `docker compose ... exec configuration-api python -m app.cli seed-platform`. |
