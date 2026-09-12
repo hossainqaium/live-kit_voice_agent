@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     livekit_drift_check_interval_seconds: float = 300.0
     livekit_drift_check_jitter_seconds: float = 30.0
 
+    #: HTTP handlers mark the row PENDING and return; LiveKit work runs in a
+    #: background task (spec 80). Tests turn this off so an in-process client
+    #: does not open a second session against LiveKit.
+    livekit_background_sync: bool = True
+
+    #: Worker readiness URLs scraped by the capacity dashboard (spec 48).
+    worker_health_urls: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://ai-agent-worker:8090"]
+    )
+    livekit_metrics_url: str = "http://livekit:6789/metrics"
+    sip_metrics_url: str = ""
+
     # --- Object storage --------------------------------------------------- #
     s3_endpoint_url: str | None = "http://minio:9000"
     s3_bucket_recordings: str = "recordings"
@@ -97,7 +109,7 @@ class Settings(BaseSettings):
     #: keeps the connection open while Kubernetes retries.
     readiness_timeout_seconds: float = 2.0
 
-    @field_validator("cors_allow_origins", mode="before")
+    @field_validator("cors_allow_origins", "worker_health_urls", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):

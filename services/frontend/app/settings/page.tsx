@@ -198,6 +198,13 @@ export default function SettingsPage() {
               regardless of role.
             </p>
           </div>
+
+          <Notice tone="info">
+            Cluster infrastructure is platform-controlled. Redis, media ports,
+            RTP ranges, external IPs, TLS termination, load balancers,
+            Kubernetes, networking, firewall rules and topology are not visible
+            or editable from this tenant.
+          </Notice>
         </div>
       )}
 

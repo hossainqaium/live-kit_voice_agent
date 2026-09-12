@@ -123,22 +123,30 @@ export default function DispatchRulesPage() {
                     <div className="cell-actions">
                       {canWrite && (
                         <>
-                          <Button size="sm" busy={busyId === rule.id} onClick={async () => {
-                            setBusyId(rule.id);
-                            try {
-                              const updated = await api.dispatchRules.sync(rule.id);
-                              (updated.sync_status === "SYNCED" ? toasts.ok : toasts.err)(
-                                updated.sync_status === "SYNCED"
-                                  ? `${rule.name} is in sync with LiveKit`
-                                  : `${rule.name}: ${updated.sync_error ?? "sync failed"}`,
-                              );
-                              await load();
-                            } catch (err) {
-                              toasts.err(err instanceof Error ? err.message : "sync failed");
-                            } finally {
-                              setBusyId(null);
-                            }
-                          }}>Sync</Button>
+                          <SyncActions
+                            status={rule.sync_status}
+                            busy={busyId === rule.id}
+                            onAct={async (action) => {
+                              setBusyId(rule.id);
+                              try {
+                                const updated = await (
+                                  action === "repair"
+                                    ? api.dispatchRules.repair(rule.id)
+                                    : action === "retry"
+                                      ? api.dispatchRules.retry(rule.id)
+                                      : api.dispatchRules.sync(rule.id)
+                                );
+                                toasts.info(
+                                  `${rule.name}: ${action} queued (${updated.sync_status.toLowerCase()})`,
+                                );
+                                await load();
+                              } catch (err) {
+                                toasts.err(err instanceof Error ? err.message : "the action failed");
+                              } finally {
+                                setBusyId(null);
+                              }
+                            }}
+                          />
                           <Button size="sm" onClick={() => setEditing(rule)}>Edit</Button>
                           <Button size="sm" variant="danger" onClick={() => setDeleting(rule)}>Delete</Button>
                         </>
@@ -190,6 +198,26 @@ export default function DispatchRulesPage() {
 
       <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </Shell>
+  );
+}
+
+function SyncActions({
+  status, busy, onAct,
+}: {
+  status: SyncStatus;
+  busy: boolean;
+  onAct(action: "synchronize" | "retry" | "repair"): void | Promise<void>;
+}) {
+  return (
+    <>
+      <Button size="sm" busy={busy} onClick={() => void onAct("synchronize")}>Synchronize</Button>
+      {(status === "FAILED" || status === "PENDING") && (
+        <Button size="sm" busy={busy} onClick={() => void onAct("retry")}>Retry</Button>
+      )}
+      {(status === "DRIFTED" || status === "FAILED") && (
+        <Button size="sm" busy={busy} onClick={() => void onAct("repair")}>Repair</Button>
+      )}
+    </>
   );
 }
 
@@ -256,13 +284,11 @@ function RuleForm({
       };
       if (rule) {
         await api.dispatchRules.update(rule.id, payload);
-        await onSaved(`${payload.name} updated and re-synced`);
+        await onSaved(`${payload.name} saved — LiveKit sync is running in the background`);
       } else {
         const created = await api.dispatchRules.create(payload);
         await onSaved(
-          created.sync_status === "SYNCED"
-            ? `${created.name} created and synced to LiveKit`
-            : `${created.name} created, but LiveKit sync failed — use Sync to retry`,
+          `${created.name} saved — LiveKit sync is running in the background (${created.sync_status.toLowerCase()})`,
         );
       }
     } catch (err) {
@@ -280,7 +306,7 @@ function RuleForm({
         <>
           <Button onClick={onClose} disabled={busy}>Cancel</Button>
           <Button variant="primary" busy={busy} onClick={onSubmit}>
-            {rule ? "Save and re-sync" : "Create"}
+            {rule ? "Save" : "Create"}
           </Button>
         </>
       }

@@ -313,14 +313,32 @@ class ComponentHealth(BaseModel):
     detail: str | None = None
 
 
+class ResourceUsage(BaseModel):
+    """One scraped resource reading. ``value`` is null when the probe has no gauge."""
+
+    source: str
+    value: float | None = None
+    unit: str
+    detail: str | None = None
+
+
+class ProviderHealthStatus(BaseModel):
+    """Catalog row plus optional worker circuit-breaker overlay (spec 48)."""
+
+    slug: str
+    kind: str
+    display_name: str
+    status: str
+    credentialed_tenants: int
+    detail: str | None = None
+
+
 class CapacityResponse(BaseModel):
     """Platform capacity (spec 48).
 
-    Counts come from PostgreSQL and LiveKit. Worker headroom is reported as
-    the number of LiveKit rooms against the configured concurrency sum rather
-    than as a guess at CPU: the plan's autoscaling signal is Phase 5, and
-    inventing a utilisation percentage now would be a number nobody can act
-    on.
+    Inventory counts come from PostgreSQL. Fleet figures are probed from
+    worker ``/ready`` and Prometheus metrics. A probe that does not answer
+    leaves the field null rather than inventing a percentage.
     """
 
     tenant_count: int
@@ -338,8 +356,30 @@ class CapacityResponse(BaseModel):
     #: a ceiling.
     licensed_concurrent_calls: int | None = None
 
+    #: Licensed concurrency when every tenant is capped; otherwise the sum of
+    #: worker ``/ready`` capacities. Null when neither is known.
+    total_capacity: int | None = None
+    available_capacity: int | None = None
+
     livekit_rooms: int | None = None
+    livekit_nodes: int | None = None
+    sip_nodes: int | None = None
+    ai_workers: int | None = None
+    worker_utilization: float | None = None
+    cpu: ResourceUsage | None = None
+    memory: ResourceUsage | None = None
+    network: ResourceUsage | None = None
+    providers: list[ProviderHealthStatus] = Field(default_factory=list)
     components: list[ComponentHealth] = Field(default_factory=list)
+
+
+class LiveKitSyncActionResponse(BaseModel):
+    """Immediate ack after queueing Synchronize / Retry / Repair (spec 12, 80)."""
+
+    kind: str
+    id: uuid.UUID
+    action: str
+    sync_status: str
 
 
 # --------------------------------------------------------------------------- #

@@ -60,7 +60,10 @@ export default function SipTrunksPage() {
 
   useEffect(() => { if (principal) void load(); }, [principal, load]);
 
-  async function act(trunk: SipTrunk, what: "test" | "sync" | "toggle") {
+  async function act(
+    trunk: SipTrunk,
+    what: "test" | "synchronize" | "retry" | "repair" | "toggle",
+  ) {
     setBusyId(trunk.id);
     try {
       if (what === "test") {
@@ -69,12 +72,16 @@ export default function SipTrunksPage() {
           `${trunk.name}: ${outcome.detail}` +
             (outcome.latency_ms ? ` (${outcome.latency_ms} ms)` : ""),
         );
-      } else if (what === "sync") {
-        const updated = await api.sipTrunks.sync(trunk.id);
-        (updated.sync_status === "SYNCED" ? toasts.ok : toasts.err)(
-          updated.sync_status === "SYNCED"
-            ? `${trunk.name} is in sync with LiveKit`
-            : `${trunk.name}: ${updated.sync_error ?? "sync failed"}`,
+      } else if (what === "synchronize" || what === "retry" || what === "repair") {
+        const updated = await (
+          what === "repair"
+            ? api.sipTrunks.repair(trunk.id)
+            : what === "retry"
+              ? api.sipTrunks.retry(trunk.id)
+              : api.sipTrunks.sync(trunk.id)
+        );
+        toasts.info(
+          `${trunk.name}: ${what} queued (${updated.sync_status.toLowerCase()})`,
         );
       } else {
         await (trunk.status === "ACTIVE"
@@ -168,7 +175,11 @@ export default function SipTrunksPage() {
                       <Button size="sm" busy={busyId === trunk.id} onClick={() => void act(trunk, "test")}>Test</Button>
                       {canWrite && (
                         <>
-                          <Button size="sm" busy={busyId === trunk.id} onClick={() => void act(trunk, "sync")}>Sync</Button>
+                          <SyncActions
+                            status={trunk.sync_status}
+                            busy={busyId === trunk.id}
+                            onAct={(action) => void act(trunk, action)}
+                          />
                           <Button size="sm" onClick={() => setEditing(trunk)}>Edit</Button>
                           <Button size="sm" onClick={() => void act(trunk, "toggle")}>
                             {trunk.status === "ACTIVE" ? "Disable" : "Enable"}
@@ -227,6 +238,26 @@ export default function SipTrunksPage() {
 
       <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </Shell>
+  );
+}
+
+function SyncActions({
+  status, busy, onAct,
+}: {
+  status: SyncStatus;
+  busy: boolean;
+  onAct(action: "synchronize" | "retry" | "repair"): void;
+}) {
+  return (
+    <>
+      <Button size="sm" busy={busy} onClick={() => onAct("synchronize")}>Synchronize</Button>
+      {(status === "FAILED" || status === "PENDING") && (
+        <Button size="sm" busy={busy} onClick={() => onAct("retry")}>Retry</Button>
+      )}
+      {(status === "DRIFTED" || status === "FAILED") && (
+        <Button size="sm" busy={busy} onClick={() => onAct("repair")}>Repair</Button>
+      )}
+    </>
   );
 }
 
@@ -289,13 +320,11 @@ function TrunkForm({
 
       if (trunk) {
         await api.sipTrunks.update(trunk.id, payload);
-        await onSaved(`${payload.name} updated and re-synced`);
+        await onSaved(`${payload.name} saved — LiveKit sync is running in the background`);
       } else {
         const created = await api.sipTrunks.create(payload);
         await onSaved(
-          created.sync_status === "SYNCED"
-            ? `${created.name} created and synced to LiveKit`
-            : `${created.name} created, but the LiveKit sync failed — use Sync to retry`,
+          `${created.name} saved — LiveKit sync is running in the background (${created.sync_status.toLowerCase()})`,
         );
       }
     } catch (err) {
@@ -313,7 +342,7 @@ function TrunkForm({
         <>
           <Button onClick={onClose} disabled={busy}>Cancel</Button>
           <Button variant="primary" busy={busy} onClick={onSubmit}>
-            {trunk ? "Save and re-sync" : "Create"}
+            {trunk ? "Save" : "Create"}
           </Button>
         </>
       }

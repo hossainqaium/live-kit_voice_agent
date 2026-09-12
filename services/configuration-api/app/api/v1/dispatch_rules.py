@@ -12,18 +12,16 @@ is an orphan the drift job reports.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from shared.logging import get_logger
 from shared.models import Permission, ResourceStatus, RoomStrategy, SyncStatus
 from sqlalchemy import select
 
 from app.core.dependencies import ClientIp, CurrentTenant, require_permission
 from app.db.models import LiveKitDispatchRule, PhoneNumber, SipTrunk
 from app.db.repository import TenantRepository
-from app.livekit import LiveKitError, SipResourceManager
+from app.livekit import LiveKitError, SipResourceManager, enqueue_dispatch_rule_sync
 from app.schemas.common import Page
 from app.schemas.telephony import (
     DispatchRuleCreate,
@@ -31,8 +29,6 @@ from app.schemas.telephony import (
     DispatchRuleUpdate,
 )
 from app.services import audit
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/dispatch-rules", tags=["dispatch-rules"])
 
@@ -80,67 +76,10 @@ async def _trunk_dids(tenant: CurrentTenant, trunk_id: uuid.UUID) -> list[str]:
     return sorted(rows.scalars().all())
 
 
-async def _sync_to_livekit(tenant: CurrentTenant, rule: LiveKitDispatchRule) -> None:
-    """Create or replace the LiveKit dispatch rule (spec 12).
-
-    LiveKit has no reliable in-place update for dispatch rules, so a change
-    that the mirror cares about is delete-and-recreate. The PostgreSQL row
-    keeps its identity; only ``livekit_resource_id`` changes.
-    """
-    if rule.room_strategy is not RoomStrategy.INDIVIDUAL:
-        rule.sync_status = SyncStatus.FAILED
-        rule.sync_error = (
-            "only INDIVIDUAL rooms are supported — a shared room would mix callers (spec 22)"
-        )
-        return
-
-    manager = SipResourceManager()
+def _mark_pending(rule: LiveKitDispatchRule) -> None:
+    """Queue LiveKit work after the caller commits (spec 80)."""
     rule.sync_status = SyncStatus.PENDING
-    await tenant.session.flush()
-
-    trunk_ids: list[str] = []
-    if rule.sip_trunk_id:
-        trunk = await TenantRepository(tenant.session, tenant.tenant_id).get(
-            SipTrunk, rule.sip_trunk_id
-        )
-        if trunk is not None and trunk.livekit_resource_id:
-            trunk_ids.append(trunk.livekit_resource_id)
-
-    if not trunk_ids:
-        rule.sync_status = SyncStatus.FAILED
-        rule.sync_error = "no synced SIP trunk to attach the rule to"
-        rule.sync_attempts = (rule.sync_attempts or 0) + 1
-        return
-
-    if rule.livekit_resource_id:
-        try:
-            await manager.delete_dispatch_rule(rule.livekit_resource_id)
-        except LiveKitError as exc:
-            logger.info(
-                "dispatch_rule_delete_before_recreate",
-                extra={"rule_id": str(rule.id), "reason": str(exc)[:200]},
-            )
-        rule.livekit_resource_id = None
-
-    try:
-        snapshot = await manager.create_dispatch_rule(rule, livekit_trunk_ids=trunk_ids)
-        rule.livekit_resource_id = snapshot.livekit_rule_id
-        rule.sync_status = SyncStatus.SYNCED
-        rule.last_synced_at = datetime.now(UTC)
-        rule.sync_error = None
-        rule.sync_attempts = 0
-        logger.info(
-            "dispatch_rule_synced",
-            extra={"rule_id": str(rule.id), "livekit_rule_id": snapshot.livekit_rule_id},
-        )
-    except LiveKitError as exc:
-        rule.sync_status = SyncStatus.FAILED
-        rule.sync_error = str(exc)[:1000]
-        rule.sync_attempts = (rule.sync_attempts or 0) + 1
-        logger.error(
-            "dispatch_rule_sync_failed",
-            extra={"rule_id": str(rule.id), "reason": str(exc)[:300]},
-        )
+    rule.sync_error = None
 
 
 @router.get(
@@ -221,7 +160,7 @@ async def create_rule(
     row = LiveKitDispatchRule(**payload.model_dump())
     repository.add(row)
     await tenant.session.flush()
-    await _sync_to_livekit(tenant, row)
+    _mark_pending(row)
 
     await audit.record(
         tenant.session,
@@ -234,6 +173,7 @@ async def create_rule(
         request_id=getattr(request.state, "request_id", None),
     )
     await tenant.session.commit()
+    enqueue_dispatch_rule_sync(row.id)
     return await _decorate(tenant, row)
 
 
@@ -296,8 +236,9 @@ async def update_rule(
         "agent_dispatch_name",
         "matched_numbers",
     }
-    if mirrored & set(changes):
-        await _sync_to_livekit(tenant, row)
+    should_sync = bool(mirrored & set(changes))
+    if should_sync:
+        _mark_pending(row)
 
     await audit.record(
         tenant.session,
@@ -311,13 +252,15 @@ async def update_rule(
         request_id=getattr(request.state, "request_id", None),
     )
     await tenant.session.commit()
+    if should_sync:
+        enqueue_dispatch_rule_sync(row.id)
     return await _decorate(tenant, row)
 
 
 @router.post(
     "/{rule_id}/sync",
     response_model=DispatchRuleResponse,
-    summary="Retry synchronisation with LiveKit",
+    summary="Synchronize this dispatch rule with LiveKit",
     dependencies=[Depends(require_permission(Permission.SIP_TRUNKS_WRITE))],
 )
 async def sync_rule(
@@ -326,23 +269,72 @@ async def sync_rule(
     request: Request,
     client_ip: ClientIp,
 ) -> DispatchRuleResponse:
+    return await _enqueue_action(
+        rule_id, tenant, request, client_ip, action="synchronized", repair=False
+    )
+
+
+@router.post(
+    "/{rule_id}/retry",
+    response_model=DispatchRuleResponse,
+    summary="Retry a failed or pending LiveKit sync",
+    dependencies=[Depends(require_permission(Permission.SIP_TRUNKS_WRITE))],
+)
+async def retry_rule(
+    rule_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> DispatchRuleResponse:
+    return await _enqueue_action(
+        rule_id, tenant, request, client_ip, action="retried", repair=False
+    )
+
+
+@router.post(
+    "/{rule_id}/repair",
+    response_model=DispatchRuleResponse,
+    summary="Delete a leftover LiveKit rule and recreate it from PostgreSQL",
+    dependencies=[Depends(require_permission(Permission.SIP_TRUNKS_WRITE))],
+)
+async def repair_rule(
+    rule_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> DispatchRuleResponse:
+    return await _enqueue_action(
+        rule_id, tenant, request, client_ip, action="repaired", repair=True
+    )
+
+
+async def _enqueue_action(
+    rule_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+    *,
+    action: str,
+    repair: bool,
+) -> DispatchRuleResponse:
     repository = TenantRepository(tenant.session, tenant.tenant_id)
     row = await repository.get(LiveKitDispatchRule, rule_id)
     if row is None:
         raise _not_found(rule_id)
 
-    await _sync_to_livekit(tenant, row)
+    _mark_pending(row)
     await audit.record(
         tenant.session,
         principal=tenant.principal,
-        action="dispatch_rule.synchronized",
+        action=f"dispatch_rule.{action}",
         resource_type="dispatch_rule",
         resource_id=row.id,
-        new_value={"sync_status": row.sync_status.value, "sync_error": row.sync_error},
+        new_value={"action": action, "repair": repair},
         ip_address=client_ip,
         request_id=getattr(request.state, "request_id", None),
     )
     await tenant.session.commit()
+    enqueue_dispatch_rule_sync(row.id, repair=repair)
     return await _decorate(tenant, row)
 
 

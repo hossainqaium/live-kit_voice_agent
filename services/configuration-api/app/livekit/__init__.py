@@ -19,6 +19,12 @@ from app.livekit.errors import (
     LiveKitUnavailableError,
     LiveKitUnsupportedError,
 )
+from app.livekit.jobs import (
+    apply_dispatch_rule_sync,
+    apply_trunk_sync,
+    enqueue_dispatch_rule_sync,
+    enqueue_trunk_sync,
+)
 from app.livekit.sip import DispatchRuleSnapshot, SipResourceManager, TrunkSnapshot
 
 __all__ = [
@@ -27,14 +33,18 @@ __all__ = [
     "DriftKind",
     "DriftReport",
     "LiveKitAdminClient",
-    "RoomSnapshot",
     "LiveKitError",
     "LiveKitRejectedError",
     "LiveKitResourceMissingError",
     "LiveKitUnavailableError",
     "LiveKitUnsupportedError",
+    "RoomSnapshot",
     "SipResourceManager",
     "TrunkSnapshot",
+    "apply_dispatch_rule_sync",
+    "apply_trunk_sync",
     "detect_drift",
+    "enqueue_dispatch_rule_sync",
+    "enqueue_trunk_sync",
     "last_report",
 ]

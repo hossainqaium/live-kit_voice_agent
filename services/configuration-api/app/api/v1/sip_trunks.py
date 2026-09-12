@@ -18,12 +18,14 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from shared.crypto import CredentialCipher, CredentialEncryptionError
+from shared.models import ConnectionTestResult, Permission, ResourceStatus, SyncStatus
 from sqlalchemy import select
 
 from app.core.dependencies import ClientIp, CurrentTenant, require_permission
 from app.db.models import PhoneNumber, SipCredential, SipTrunk
 from app.db.repository import TenantRepository
-from app.livekit import LiveKitError, SipResourceManager
+from app.livekit import LiveKitError, SipResourceManager, enqueue_trunk_sync
 from app.schemas.common import Page
 from app.schemas.telephony import (
     SipTrunkCreate,
@@ -32,11 +34,6 @@ from app.schemas.telephony import (
 )
 from app.services import audit
 from app.services.connection_test import probe_sip_endpoint
-from shared.crypto import CredentialCipher, CredentialEncryptionError
-from shared.logging import get_logger
-from shared.models import ConnectionTestResult, Permission, ResourceStatus, SyncStatus
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/sip-trunks", tags=["sip-trunks"])
 
@@ -202,47 +199,15 @@ async def _accepted_numbers(tenant: CurrentTenant, trunk_id: uuid.UUID) -> list[
     return sorted(rows.scalars().all())
 
 
-async def _sync_to_livekit(tenant: CurrentTenant, trunk: SipTrunk, password: str | None) -> None:
-    """Create or update the LiveKit SIP resource for a trunk (spec 12).
+def _mark_pending(trunk: SipTrunk) -> None:
+    """Queue LiveKit work after the caller commits (spec 80).
 
-    A failure is recorded on the row rather than raised: the configuration is
-    saved, the mirror is not, and the operator gets a `FAILED` state with the
-    reason and a Retry action. Raising would roll back a valid configuration
-    change because a separate system was briefly unavailable.
+    The password is decrypted in the background job from ``sip_credentials``,
+    so the request never waits on LiveKit and never carries the secret past
+    the commit.
     """
-    manager = SipResourceManager()
-
     trunk.sync_status = SyncStatus.PENDING
-    await tenant.session.flush()
-
-    numbers = await _accepted_numbers(tenant, trunk.id)
-
-    try:
-        if trunk.livekit_resource_id:
-            snapshot = await manager.update_inbound_trunk(
-                trunk.livekit_resource_id, trunk, numbers=numbers, auth_password=password
-            )
-        else:
-            snapshot = await manager.create_inbound_trunk(
-                trunk, numbers=numbers, auth_password=password
-            )
-        trunk.livekit_resource_id = snapshot.livekit_trunk_id
-        trunk.sync_status = SyncStatus.SYNCED
-        trunk.last_synced_at = datetime.now(UTC)
-        trunk.sync_error = None
-        trunk.sync_attempts = 0
-        logger.info(
-            "trunk_synced",
-            extra={"trunk_id": str(trunk.id), "livekit_trunk_id": snapshot.livekit_trunk_id},
-        )
-    except LiveKitError as exc:
-        trunk.sync_status = SyncStatus.FAILED
-        trunk.sync_error = str(exc)[:1000]
-        trunk.sync_attempts = (trunk.sync_attempts or 0) + 1
-        logger.error(
-            "trunk_sync_failed",
-            extra={"trunk_id": str(trunk.id), "reason": str(exc)[:300]},
-        )
+    trunk.sync_error = None
 
 
 @router.post(
@@ -286,7 +251,7 @@ async def create_trunk(
     if payload.auth_password:
         await _store_password(tenant, row, payload.auth_username, payload.auth_password)
 
-    await _sync_to_livekit(tenant, row, payload.auth_password)
+    _mark_pending(row)
 
     await audit.record(
         tenant.session,
@@ -299,6 +264,7 @@ async def create_trunk(
         request_id=getattr(request.state, "request_id", None),
     )
     await tenant.session.commit()
+    enqueue_trunk_sync(row.id)
 
     return await _to_response(
         row,
@@ -355,8 +321,9 @@ async def update_trunk(
     # still matters: the LiveKit resource carries the name too, and leaving it
     # stale makes the two systems disagree in the admin view.
     mirrored = {"name", "allowed_ips", "auth_username", "media_encryption_required"}
-    if mirrored & set(changes) or payload.auth_password:
-        await _sync_to_livekit(tenant, row, payload.auth_password)
+    should_sync = bool(mirrored & set(changes) or payload.auth_password)
+    if should_sync:
+        _mark_pending(row)
 
     await audit.record(
         tenant.session,
@@ -370,6 +337,8 @@ async def update_trunk(
         request_id=getattr(request.state, "request_id", None),
     )
     await tenant.session.commit()
+    if should_sync:
+        enqueue_trunk_sync(row.id)
 
     credentials = await _credential_map(tenant, [row.id])
     return await _to_response(
@@ -382,7 +351,7 @@ async def update_trunk(
 @router.post(
     "/{trunk_id}/sync",
     response_model=SipTrunkResponse,
-    summary="Retry synchronisation with LiveKit",
+    summary="Synchronize this trunk with LiveKit",
     dependencies=[Depends(require_permission(Permission.SIP_TRUNKS_WRITE))],
 )
 async def sync_trunk(
@@ -391,32 +360,85 @@ async def sync_trunk(
     request: Request,
     client_ip: ClientIp,
 ) -> SipTrunkResponse:
-    """Re-create or refresh the LiveKit resource (spec 12 Synchronize/Retry).
+    """Push PostgreSQL onto LiveKit (spec 12 Synchronize).
 
-    Note what cannot be done here: the stored password is encrypted and is
-    *not* decrypted to re-sync. LiveKit keeps the credential it was given, so a
-    retry after a failed create needs the password supplied again through an
-    update. Silently syncing without it would produce a trunk that rejects
-    every call while reporting SYNCED.
+    Updates in place when a LiveKit ID exists. A missing resource is FAILED
+    so Repair can recreate it. The stored password is decrypted in the
+    background job, not in this request.
     """
+    return await _enqueue_action(
+        trunk_id, tenant, request, client_ip, action="synchronized", repair=False
+    )
+
+
+@router.post(
+    "/{trunk_id}/retry",
+    response_model=SipTrunkResponse,
+    summary="Retry a failed or pending LiveKit sync",
+    dependencies=[Depends(require_permission(Permission.SIP_TRUNKS_WRITE))],
+)
+async def retry_trunk(
+    trunk_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> SipTrunkResponse:
+    """The same push as Synchronize, named for the FAILED / PENDING case."""
+    return await _enqueue_action(
+        trunk_id, tenant, request, client_ip, action="retried", repair=False
+    )
+
+
+@router.post(
+    "/{trunk_id}/repair",
+    response_model=SipTrunkResponse,
+    summary="Delete a leftover LiveKit trunk and recreate it from PostgreSQL",
+    dependencies=[Depends(require_permission(Permission.SIP_TRUNKS_WRITE))],
+)
+async def repair_trunk(
+    trunk_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> SipTrunkResponse:
+    """Restore a DRIFTED trunk (spec 12 Repair).
+
+    Deletes any leftover LiveKit resource, clears ``livekit_resource_id``,
+    and creates from the PostgreSQL row. Dependent dispatch rules are
+    repaired after the new trunk ID exists.
+    """
+    return await _enqueue_action(
+        trunk_id, tenant, request, client_ip, action="repaired", repair=True
+    )
+
+
+async def _enqueue_action(
+    trunk_id: uuid.UUID,
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+    *,
+    action: str,
+    repair: bool,
+) -> SipTrunkResponse:
     repository = TenantRepository(tenant.session, tenant.tenant_id)
     row = await repository.get(SipTrunk, trunk_id)
     if row is None:
         raise _not_found(trunk_id)
 
-    await _sync_to_livekit(tenant, row, None)
-
+    _mark_pending(row)
     await audit.record(
         tenant.session,
         principal=tenant.principal,
-        action="trunk.synchronized",
+        action=f"trunk.{action}",
         resource_type="sip_trunk",
         resource_id=row.id,
-        new_value={"sync_status": row.sync_status.value, "sync_error": row.sync_error},
+        new_value={"action": action, "repair": repair},
         ip_address=client_ip,
         request_id=getattr(request.state, "request_id", None),
     )
     await tenant.session.commit()
+    enqueue_trunk_sync(row.id, repair=repair)
 
     credentials = await _credential_map(tenant, [row.id])
     return await _to_response(

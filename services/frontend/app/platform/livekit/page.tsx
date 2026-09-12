@@ -51,6 +51,7 @@ export default function LiveKitPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [actingId, setActingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -63,6 +64,25 @@ export default function LiveKitPage() {
       setBusy(false);
     }
   }, []);
+
+  const act = useCallback(async (
+    kind: string,
+    id: string,
+    action: "synchronize" | "retry" | "repair",
+    name: string,
+  ) => {
+    if (kind !== "sip_trunk" && kind !== "dispatch_rule") return;
+    setActingId(id);
+    try {
+      const result = await api.platform.syncLivekitResource(kind, id, action);
+      toasts.info(`${name}: ${action} queued (${result.sync_status.toLowerCase()})`);
+      await load();
+    } catch (err) {
+      toasts.err(err instanceof Error ? err.message : "the action failed");
+    } finally {
+      setActingId(null);
+    }
+  }, [load, toasts]);
 
   const checkNow = useCallback(async () => {
     setChecking(true);
@@ -270,6 +290,7 @@ export default function LiveKitPage() {
                   <tr>
                     <th>Resource</th><th>Tenant</th><th>Kind</th><th>State</th>
                     <th>Attempts</th><th>Last synced</th><th>Error</th>
+                    <th style={{ textAlign: "right" }}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -293,6 +314,35 @@ export default function LiveKitPage() {
                       <td className="small subtle" style={{ overflowWrap: "anywhere", maxWidth: "34ch" }}>
                         {row.sync_error ?? ""}
                       </td>
+                      <td>
+                        <div className="cell-actions">
+                          <Button
+                            size="sm"
+                            busy={actingId === row.id}
+                            onClick={() => void act(row.kind, row.id, "synchronize", row.name)}
+                          >
+                            Synchronize
+                          </Button>
+                          {(row.sync_status === "FAILED" || row.sync_status === "PENDING") && (
+                            <Button
+                              size="sm"
+                              busy={actingId === row.id}
+                              onClick={() => void act(row.kind, row.id, "retry", row.name)}
+                            >
+                              Retry
+                            </Button>
+                          )}
+                          {(row.sync_status === "DRIFTED" || row.sync_status === "FAILED") && (
+                            <Button
+                              size="sm"
+                              busy={actingId === row.id}
+                              onClick={() => void act(row.kind, row.id, "repair", row.name)}
+                            >
+                              Repair
+                            </Button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -301,10 +351,10 @@ export default function LiveKitPage() {
           )}
 
           <Notice tone="info">
-            Re-syncing a trunk is done from the tenant's own SIP Trunks screen,
-            which is where the credential lives. A platform-wide re-sync button
-            here would act across tenants with no way to review what it
-            changed first.
+            Synchronize updates LiveKit in place. Retry is the same push after
+            FAILED or PENDING. Repair deletes any leftover LiveKit resource and
+            recreates it from PostgreSQL — the exit path when a trunk was
+            deleted in LiveKit and the row is DRIFTED.
           </Notice>
         </div>
       )}

@@ -55,7 +55,9 @@ from app.db.session import get_session
 from app.db.util import as_lookup
 from app.livekit import LiveKitAdminClient, RoomSnapshot
 from app.livekit.drift import DriftReport, detect_drift, last_report
+from app.livekit.jobs import enqueue_dispatch_rule_sync, enqueue_trunk_sync
 from app.livekit.sip import SipResourceManager
+from app.services.fleet import collect_fleet
 from app.schemas.common import Page
 from app.schemas.platform import (
     AuditLogResponse,
@@ -66,11 +68,14 @@ from app.schemas.platform import (
     LiveKitAdminSection,
     LiveKitOverview,
     LiveKitRoom,
+    LiveKitSyncActionResponse,
     ModelCreate,
     ModelResponse,
     ModelUpdate,
     OrphanedResource,
     PlatformSettingsResponse,
+    ProviderHealthStatus,
+    ResourceUsage,
     PlatformUserCreate,
     PlatformUserResponse,
     PlatformUserUpdate,
@@ -1402,6 +1407,12 @@ async def capacity(session: SessionDep) -> CapacityResponse:
     # rather than concurrently with the others.
     postgres = await _probe_postgres(session)
     (livekit, room_list), redis = await asyncio.gather(_probe_livekit(), _probe_redis())
+    fleet = await collect_fleet(session, livekit_reachable=livekit.reachable)
+
+    total_capacity = licensed if licensed is not None else fleet.worker_capacity
+    available = (
+        max(0, total_capacity - active_calls) if total_capacity is not None else None
+    )
 
     return CapacityResponse(
         tenant_count=tenant_count,
@@ -1413,8 +1424,39 @@ async def capacity(session: SessionDep) -> CapacityResponse:
         active_calls=active_calls,
         calls_last_24h=calls_24h,
         licensed_concurrent_calls=licensed,
+        total_capacity=total_capacity,
+        available_capacity=available,
         livekit_rooms=len(room_list) if livekit.reachable else None,
+        livekit_nodes=fleet.livekit_nodes,
+        sip_nodes=fleet.sip_nodes,
+        ai_workers=fleet.ai_workers,
+        worker_utilization=fleet.worker_utilization,
+        cpu=_usage(fleet.cpu),
+        memory=_usage(fleet.memory),
+        network=_usage(fleet.network),
+        providers=[
+            ProviderHealthStatus(
+                slug=item.slug,
+                kind=item.kind,
+                display_name=item.display_name,
+                status=item.status,
+                credentialed_tenants=item.credentialed_tenants,
+                detail=item.detail,
+            )
+            for item in fleet.providers
+        ],
         components=[postgres, livekit, redis],
+    )
+
+
+def _usage(sample) -> ResourceUsage | None:
+    if sample is None:
+        return None
+    return ResourceUsage(
+        source=sample.source,
+        value=sample.value,
+        unit=sample.unit,
+        detail=sample.detail,
     )
 
 
@@ -1659,9 +1701,9 @@ async def run_drift_check(
 ) -> DriftCheckResponse:
     """On-demand drift detection (spec 46).
 
-    Marks missing or mismatched rows ``DRIFTED``. Does not Repair — that is
-    still the tenant Synchronize action or ``sync-livekit``, because a
-    platform-wide recreate would act across tenants with no review.
+    Marks missing or mismatched rows ``DRIFTED``. Does not Repair — use the
+    per-row Synchronize / Retry / Repair actions, because a platform-wide
+    recreate would act across tenants with no review.
     """
     report = await detect_drift(
         session, SipResourceManager(), metrics=request.app.state.metrics
@@ -1682,6 +1724,65 @@ async def run_drift_check(
     )
     await session.commit()
     return _drift_check_response(report)
+
+
+@router.post(
+    "/livekit/{kind}/{resource_id}/{action}",
+    response_model=LiveKitSyncActionResponse,
+    summary="Synchronize, retry, or repair one mirrored LiveKit resource",
+    dependencies=[Depends(require_platform_user())],
+)
+async def livekit_resource_action(
+    kind: str,
+    resource_id: uuid.UUID,
+    action: str,
+    session: SessionDep,
+    request: Request,
+    client_ip: ClientIp,
+    principal: CurrentPrincipal,
+) -> LiveKitSyncActionResponse:
+    """Per-row spec-12 actions. The UI returns immediately (spec 80)."""
+    if kind not in {"sip_trunk", "dispatch_rule"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"unknown kind {kind}")
+    if action not in {"synchronize", "retry", "repair"}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"unknown action {action}"
+        )
+
+    model = SipTrunk if kind == "sip_trunk" else LiveKitDispatchRule
+    row = await session.get(model, resource_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"no {kind} with id {resource_id}",
+        )
+
+    row.sync_status = SyncStatus.PENDING
+    row.sync_error = None
+    await audit.record(
+        session,
+        principal=principal,
+        action=f"livekit.{kind}.{action}",
+        resource_type=kind,
+        resource_id=row.id,
+        new_value={"action": action},
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await session.commit()
+
+    repair = action == "repair"
+    if kind == "sip_trunk":
+        enqueue_trunk_sync(row.id, repair=repair)
+    else:
+        enqueue_dispatch_rule_sync(row.id, repair=repair)
+
+    return LiveKitSyncActionResponse(
+        kind=kind,
+        id=row.id,
+        action=action,
+        sync_status=row.sync_status.value,
+    )
 
 
 def _orphans_from_report(report: DriftReport | None) -> list[OrphanedResource]:
@@ -2048,6 +2149,17 @@ async def platform_settings() -> PlatformSettingsResponse:
                 plain(
                     "LIVEKIT_DRIFT_CHECK_JITTER_SECONDS",
                     settings.livekit_drift_check_jitter_seconds,
+                ),
+                plain(
+                    "WORKER_HEALTH_URLS",
+                    ", ".join(settings.worker_health_urls),
+                    note="Capacity dashboard probes these worker /ready endpoints.",
+                ),
+                plain("LIVEKIT_METRICS_URL", settings.livekit_metrics_url),
+                plain(
+                    "SIP_METRICS_URL",
+                    settings.sip_metrics_url or "(not set)",
+                    note="Optional. Without it, SIP node count is 1 when LIVEKIT_SIP_URI is set.",
                 ),
             ],
             "Object storage": [

@@ -1083,6 +1083,22 @@ export interface ComponentHealth {
   detail: string | null;
 }
 
+export interface ResourceUsage {
+  source: string;
+  value: number | null;
+  unit: string;
+  detail: string | null;
+}
+
+export interface ProviderHealthStatus {
+  slug: string;
+  kind: string;
+  display_name: string;
+  status: string;
+  credentialed_tenants: number;
+  detail: string | null;
+}
+
 export interface Capacity {
   tenant_count: number;
   active_tenant_count: number;
@@ -1094,8 +1110,25 @@ export interface Capacity {
   calls_last_24h: number;
   /** Null when a tenant is uncapped: the sum would be a floor, not a ceiling. */
   licensed_concurrent_calls: number | null;
+  total_capacity: number | null;
+  available_capacity: number | null;
   livekit_rooms: number | null;
+  livekit_nodes: number | null;
+  sip_nodes: number | null;
+  ai_workers: number | null;
+  worker_utilization: number | null;
+  cpu: ResourceUsage | null;
+  memory: ResourceUsage | null;
+  network: ResourceUsage | null;
+  providers: ProviderHealthStatus[];
   components: ComponentHealth[];
+}
+
+export interface LiveKitSyncAction {
+  kind: string;
+  id: string;
+  action: string;
+  sync_status: SyncStatus;
 }
 
 export interface DriftedResource {
@@ -1291,6 +1324,12 @@ export const api = {
     sync(id: string): Promise<SipTrunk> {
       return request<SipTrunk>(`/sip-trunks/${id}/sync`, { method: "POST" });
     },
+    retry(id: string): Promise<SipTrunk> {
+      return request<SipTrunk>(`/sip-trunks/${id}/retry`, { method: "POST" });
+    },
+    repair(id: string): Promise<SipTrunk> {
+      return request<SipTrunk>(`/sip-trunks/${id}/repair`, { method: "POST" });
+    },
     enable(id: string): Promise<SipTrunk> {
       return request<SipTrunk>(`/sip-trunks/${id}/enable`, { method: "POST" });
     },
@@ -1314,6 +1353,12 @@ export const api = {
     },
     sync(id: string): Promise<DispatchRule> {
       return request<DispatchRule>(`/dispatch-rules/${id}/sync`, { method: "POST" });
+    },
+    retry(id: string): Promise<DispatchRule> {
+      return request<DispatchRule>(`/dispatch-rules/${id}/retry`, { method: "POST" });
+    },
+    repair(id: string): Promise<DispatchRule> {
+      return request<DispatchRule>(`/dispatch-rules/${id}/repair`, { method: "POST" });
     },
   },
 
@@ -1707,6 +1752,15 @@ export const api = {
     },
     checkLivekitDrift(): Promise<DriftCheckResult> {
       return request<DriftCheckResult>("/platform/livekit/drift-check", { method: "POST" });
+    },
+    syncLivekitResource(
+      kind: "sip_trunk" | "dispatch_rule",
+      id: string,
+      action: "synchronize" | "retry" | "repair",
+    ): Promise<LiveKitSyncAction> {
+      return request<LiveKitSyncAction>(`/platform/livekit/${kind}/${id}/${action}`, {
+        method: "POST",
+      });
     },
     users: {
       list(): Promise<Page<PlatformUser>> {

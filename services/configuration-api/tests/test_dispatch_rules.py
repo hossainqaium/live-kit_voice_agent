@@ -58,16 +58,19 @@ class TestLongLivedOnly:
         assert "spec 22" in src
 
     def test_sync_is_postgres_then_livekit(self) -> None:
-        src = inspect.getsource(rules_api._sync_to_livekit)
+        from app.livekit import jobs
+
+        src = inspect.getsource(jobs.apply_dispatch_rule_sync)
         assert "PENDING" in src
         assert "create_dispatch_rule" in src
         assert src.index("PENDING") < src.index("create_dispatch_rule")
 
-    def test_create_writes_then_syncs(self) -> None:
+    def test_create_writes_then_enqueues(self) -> None:
         src = inspect.getsource(rules_api.create_rule)
         assert "repository.add" in src
-        assert "_sync_to_livekit" in src
-        assert src.index("repository.add") < src.index("_sync_to_livekit")
+        assert "enqueue_dispatch_rule_sync" in src
+        assert src.index("repository.add") < src.index("enqueue_dispatch_rule_sync")
+        assert src.index("commit") < src.index("enqueue_dispatch_rule_sync")
 
     def test_no_per_call_create_in_worker(self) -> None:
         if not _WORKER.exists():
@@ -83,6 +86,8 @@ class TestAuditAndRoutes:
         paths = (await client.get("/openapi.json")).json()["paths"]
         assert "/api/v1/dispatch-rules" in paths
         assert "/api/v1/dispatch-rules/{rule_id}/sync" in paths
+        assert "/api/v1/dispatch-rules/{rule_id}/retry" in paths
+        assert "/api/v1/dispatch-rules/{rule_id}/repair" in paths
 
     async def test_writes_require_auth(self, client) -> None:
         response = await client.post(
@@ -108,6 +113,9 @@ class TestConsole:
         assert "never created per call" in src or "Never created per call" in src
         assert "dispatchRules.create" in src
         assert "dispatchRules.sync" in src
+        assert "Synchronize" in src
+        assert "Repair" in src
+        assert "running in the background" in src
         assert "WORKER_AGENT_NAME" in src
         assert "486 flood" in src
 

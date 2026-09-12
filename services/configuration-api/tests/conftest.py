@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,20 @@ os.environ.setdefault("POSTGRES_HOST", "localhost")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 # The drift loop would call LiveKit from the in-process ASGI lifespan.
 os.environ.setdefault("LIVEKIT_DRIFT_CHECK_ENABLED", "false")
+os.environ.setdefault("LIVEKIT_BACKGROUND_SYNC", "false")
+
+
+def frontend_file(*parts: str) -> Path | None:
+    """Resolve a frontend source file, or None when it is not mounted."""
+    roots: list[Path] = [Path("/opt/frontend")]
+    here = Path(__file__).resolve()
+    if len(here.parents) > 3:
+        roots.append(here.parents[3] / "services" / "frontend")
+    for root in roots:
+        path = root.joinpath(*parts)
+        if path.is_file():
+            return path
+    return None
 
 
 @pytest.fixture(scope="session")

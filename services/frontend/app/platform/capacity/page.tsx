@@ -3,16 +3,16 @@
 /**
  * Platform capacity (spec 48).
  *
- * Every figure is measured. There is deliberately no "utilisation percentage"
- * or headroom estimate: the autoscaling signal is Phase 5, and a number nobody
- * can act on is worse than an honest count.
+ * Inventory is counted in PostgreSQL. Fleet figures are probed from worker
+ * /ready and Prometheus metrics. A probe that does not answer shows a dash
+ * rather than a guessed percentage.
  */
 
 import { useCallback, useEffect, useState } from "react";
 
 import { Shell } from "@/components/Shell";
 import { Badge, Button, Loading, Notice } from "@/components/ui";
-import { api, type Capacity } from "@/lib/api";
+import { api, type Capacity, type ResourceUsage } from "@/lib/api";
 import { useRequireAuth } from "@/lib/auth";
 
 export default function CapacityPage() {
@@ -38,9 +38,11 @@ export default function CapacityPage() {
 
   if (authLoading || !principal) return <div className="auth-screen"><Loading /></div>;
 
-  const used = data?.licensed_concurrent_calls
-    ? Math.min(1, data.active_calls / data.licensed_concurrent_calls)
-    : null;
+  const used = data?.total_capacity
+    ? Math.min(1, data.active_calls / data.total_capacity)
+    : data?.licensed_concurrent_calls
+      ? Math.min(1, data.active_calls / data.licensed_concurrent_calls)
+      : null;
 
   /**
    * LiveKit's room count and the database's in-flight call count should agree.
@@ -58,8 +60,8 @@ export default function CapacityPage() {
         <div>
           <h1>Capacity</h1>
           <p className="page-subtitle">
-            What this platform is carrying right now, and what it is configured
-            to allow.
+            Total and available concurrency, LiveKit / SIP / worker nodes, and
+            provider health — measured when this page loads.
           </p>
         </div>
         <Button size="sm" busy={busy} onClick={() => void load()}>Refresh</Button>
@@ -84,12 +86,12 @@ export default function CapacityPage() {
 
           <div className="card-grid">
             <div className="card">
-              <div className="stat-label">Calls in flight</div>
-              <div className="stat-value">{data.active_calls}</div>
+              <div className="stat-label">Total Capacity</div>
+              <div className="stat-value">{data.total_capacity ?? "—"}</div>
               <div className="stat-note">
                 {data.licensed_concurrent_calls === null
-                  ? "at least one tenant is uncapped"
-                  : `of ${data.licensed_concurrent_calls} licensed`}
+                  ? "worker /ready capacity (a tenant is uncapped)"
+                  : "sum of tenant licensed concurrent calls"}
               </div>
               {used !== null && (
                 <div className={used >= 0.9 ? "bar bar-err" : used >= 0.7 ? "bar bar-warn" : "bar"}
@@ -99,16 +101,43 @@ export default function CapacityPage() {
               )}
             </div>
             <div className="card">
+              <div className="stat-label">Available Capacity</div>
+              <div className="stat-value">{data.available_capacity ?? "—"}</div>
+              <div className="stat-note">{data.active_calls} calls in flight</div>
+            </div>
+            <div className="card">
+              <div className="stat-label">LiveKit Nodes</div>
+              <div className="stat-value">{data.livekit_nodes ?? "—"}</div>
+              <div className="stat-note">
+                {data.livekit_rooms === null ? "LiveKit did not answer" : `${data.livekit_rooms} rooms`}
+              </div>
+            </div>
+            <div className="card">
+              <div className="stat-label">SIP Nodes</div>
+              <div className="stat-value">{data.sip_nodes ?? "—"}</div>
+              <div className="stat-note">scraped metrics, or one configured SIP URI</div>
+            </div>
+            <div className="card">
+              <div className="stat-label">AI Workers</div>
+              <div className="stat-value">{data.ai_workers ?? "—"}</div>
+              <div className="stat-note">workers that answered /ready</div>
+            </div>
+            <div className="card">
+              <div className="stat-label">Worker Utilization</div>
+              <div className="stat-value">
+                {data.worker_utilization === null
+                  ? "—"
+                  : `${Math.round(data.worker_utilization * 100)}%`}
+              </div>
+              <div className="stat-note">active calls ÷ worker capacity</div>
+            </div>
+            <UsageCard label="CPU" sample={data.cpu} />
+            <UsageCard label="Memory" sample={data.memory} />
+            <UsageCard label="Network" sample={data.network} />
+            <div className="card">
               <div className="stat-label">Calls today</div>
               <div className="stat-value">{data.calls_last_24h}</div>
               <div className="stat-note">last 24 hours, every tenant</div>
-            </div>
-            <div className="card">
-              <div className="stat-label">LiveKit rooms</div>
-              <div className="stat-value">{data.livekit_rooms ?? "—"}</div>
-              <div className="stat-note">
-                {data.livekit_rooms === null ? "LiveKit did not answer" : "live, from LiveKit itself"}
-              </div>
             </div>
             <div className="card">
               <div className="stat-label">Tenants</div>
@@ -120,14 +149,32 @@ export default function CapacityPage() {
               <div className="stat-value">{data.agent_count}</div>
               <div className="stat-note">{data.published_agent_count} with a published version</div>
             </div>
-            <div className="card">
-              <div className="stat-label">Telephony</div>
-              <div className="stat-value">{data.phone_number_count}</div>
-              <div className="stat-note">
-                numbers across {data.sip_trunk_count} trunk
-                {data.sip_trunk_count === 1 ? "" : "s"}
-              </div>
-            </div>
+          </div>
+
+          <div className="card">
+            <h2 style={{ marginTop: 0, marginBottom: 12, fontSize: 15 }}>Provider Health</h2>
+            {data.providers.length === 0 ? (
+              <p className="subtle small" style={{ margin: 0 }}>No providers in the catalog.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Provider</th><th>Kind</th><th>State</th><th>Credentials</th><th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.providers.map((provider) => (
+                    <tr key={`${provider.kind}-${provider.slug}`}>
+                      <td>{provider.display_name}</td>
+                      <td className="mono small">{provider.kind}</td>
+                      <td><ProviderBadge status={provider.status} /></td>
+                      <td className="mono small">{provider.credentialed_tenants}</td>
+                      <td className="small subtle">{provider.detail ?? ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
 
           <div className="card">
@@ -155,20 +202,45 @@ export default function CapacityPage() {
             </table>
             <p className="subtle small" style={{ marginBottom: 0, marginTop: 10 }}>
               Each of these is probed when this page loads, not read from a
-              cache. LiveKit being down does not fail the API's readiness
+              cache. LiveKit being down does not fail the API&apos;s readiness
               probe — configuration still works during a media-layer incident,
               and failing readiness would take the Control Plane out of
               rotation for no reason.
             </p>
           </div>
-
-          <Notice tone="info">
-            There is no utilisation estimate here on purpose. Autoscaling
-            signals are Phase 5, and a percentage nobody can act on would be
-            worse than these counts.
-          </Notice>
         </div>
       )}
     </Shell>
   );
+}
+
+function UsageCard({ label, sample }: { label: string; sample: ResourceUsage | null }) {
+  return (
+    <div className="card">
+      <div className="stat-label">{label}</div>
+      <div className="stat-value">
+        {sample?.value == null ? "—" : formatUsage(sample)}
+      </div>
+      <div className="stat-note">{sample?.detail ?? "not scraped"}</div>
+    </div>
+  );
+}
+
+function formatUsage(sample: ResourceUsage): string {
+  if (sample.value == null) return "—";
+  if (sample.unit === "bytes") {
+    if (sample.value >= 1_073_741_824) return `${(sample.value / 1_073_741_824).toFixed(1)} GiB`;
+    if (sample.value >= 1_048_576) return `${(sample.value / 1_048_576).toFixed(0)} MiB`;
+    return `${Math.round(sample.value)} B`;
+  }
+  if (sample.unit === "ratio") return `${Math.round(sample.value * 100)}%`;
+  return `${sample.value} ${sample.unit}`;
+}
+
+function ProviderBadge({ status }: { status: string }) {
+  const tone =
+    status === "healthy" ? "ok" :
+    status === "circuit_open" || status === "missing_credential" ? "err" :
+    "neutral";
+  return <Badge tone={tone} dot>{status.replaceAll("_", " ")}</Badge>;
 }

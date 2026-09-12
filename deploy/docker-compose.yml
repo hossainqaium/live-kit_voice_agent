@@ -213,6 +213,9 @@ services:
       LIVEKIT_DRIFT_CHECK_ENABLED: ${LIVEKIT_DRIFT_CHECK_ENABLED:-true}
       LIVEKIT_DRIFT_CHECK_INTERVAL_SECONDS: ${LIVEKIT_DRIFT_CHECK_INTERVAL_SECONDS:-300}
       LIVEKIT_DRIFT_CHECK_JITTER_SECONDS: ${LIVEKIT_DRIFT_CHECK_JITTER_SECONDS:-30}
+      WORKER_HEALTH_URLS: ${WORKER_HEALTH_URLS:-http://ai-agent-worker:8090}
+      LIVEKIT_METRICS_URL: ${LIVEKIT_METRICS_URL:-http://livekit:6789/metrics}
+      SIP_METRICS_URL: ${SIP_METRICS_URL:-}
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET_RECORDINGS: ${S3_BUCKET_RECORDINGS:-recordings}
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
@@ -232,6 +235,8 @@ services:
       - ../pyproject.toml:/opt/tooling/pyproject.toml:ro
       # Whole project, not just the package, so `make test-shared` can see tests/.
       - ../services/shared:/opt/shared
+      # Frontend sources so API tests can assert on tenant/platform pages.
+      - ../services/frontend:/opt/frontend:ro
     command:
       - uvicorn
       - app.main:app
