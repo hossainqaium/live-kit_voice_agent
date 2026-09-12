@@ -107,6 +107,57 @@ def realtime_factor(audio_s: float, elapsed_s: float) -> float:
     return audio_s / elapsed_s
 
 
+# Plan 2b.9 — self-hosted STT is a hardware decision, not a code path.
+# Must match worker.endpointing.MIN_ENDPOINTING_DELAY_S (2b.7): a p95 slower
+# than the window lands after the turn is committed.
+STT_MAX_P95_S = 2.0
+# First concurrency that failed on the development host (Plan §12.1).
+STT_TARGET_CONCURRENCY = 2
+
+
+def stt_placement(summaries: Sequence[StageSummary]) -> tuple[str, str]:
+    """Recommend ``self_hosted`` or ``hosted`` from measured STT rows.
+
+    Self-hosted may serve live calls only when:
+
+    * realtime factor at ``STT_TARGET_CONCURRENCY`` is ≥ 1.0 (keeps up with
+      speech under the first real contention point), and
+    * sequential p95 is ≤ ``STT_MAX_P95_S`` (fits inside the 2b.7 window).
+
+    The development host fails both. Hosted ``gpt-4o-mini-transcribe`` is
+    the default until STT has a GPU or a dedicated box.
+    """
+    stt_rows = [row for row in summaries if row.stage == "stt" and row.p50_s is not None]
+    if not stt_rows:
+        return "hosted", "no STT measurements"
+
+    contended = [
+        row
+        for row in stt_rows
+        if row.concurrency >= STT_TARGET_CONCURRENCY and row.realtime_factor is not None
+    ]
+    if any(row.realtime_factor is not None and row.realtime_factor < 1.0 for row in contended):
+        worst = min(contended, key=lambda row: row.realtime_factor or 0.0)
+        return (
+            "hosted",
+            f"realtime factor {worst.realtime_factor:.1f} at ×{worst.concurrency} "
+            f"(need ≥ 1.0 at ×{STT_TARGET_CONCURRENCY})",
+        )
+
+    sequential = [row for row in stt_rows if row.concurrency == 1 and row.p95_s is not None]
+    if any(row.p95_s is not None and row.p95_s > STT_MAX_P95_S for row in sequential):
+        worst = max(sequential, key=lambda row: row.p95_s or 0.0)
+        return (
+            "hosted",
+            f"sequential p95 {worst.p95_s:.2f}s exceeds the {STT_MAX_P95_S:.1f}s "
+            "endpointing window",
+        )
+
+    if contended or sequential:
+        return "self_hosted", "realtime factor and sequential p95 are inside the gates"
+    return "hosted", "STT rows exist but none are usable (all failed)"
+
+
 def summarise(
     samples: Sequence[Sample],
     *,
@@ -630,6 +681,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     summaries = collect_summaries(args)
     table = format_table(summaries)
     print(table)
+    if any(row.stage == "stt" for row in summaries):
+        decision, reason = stt_placement(summaries)
+        print(f"STT placement: {decision}  ({reason})")
 
     payload = report_payload(
         summaries,

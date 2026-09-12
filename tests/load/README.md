@@ -17,6 +17,10 @@ python3 scripts/measure_latency.py --replay stt:3.6:0.773,2.655,3.024
 Implementation: `services/shared/shared/measure.py`.
 Tests: `services/shared/tests/test_measure.py`.
 
+The CLI ends with `STT placement: hosted|self_hosted` (Plan 2b.9). Self-hosted
+is allowed only when realtime factor at ×2 is ≥ 1.0 **and** sequential p95 is
+≤ 2 s. This development host does not pass.
+
 ## Progressive SIP load (Phase 8) — not built
 
 `make load-test` is still the placeholder. That harness drives real SIP calls

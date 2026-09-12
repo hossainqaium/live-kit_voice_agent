@@ -22,6 +22,7 @@ from shared.measure import (
     report_payload,
     run_probes,
     sine_wav_bytes,
+    stt_placement,
     summarise,
     wav_duration_s,
 )
@@ -142,7 +143,7 @@ class TestReplay:
         assert audio_s is None
         assert times == [0.4, 0.5]
 
-    def test_cli_replay_of_the_plan_table_exits_one(self, tmp_path: Path) -> None:
+    def test_cli_replay_of_the_plan_table_exits_one(self, tmp_path: Path, capsys) -> None:
         """Two-concurrent RTF < 1 is the signal the harness exists to print."""
         report = tmp_path / "report.json"
         code = main(
@@ -158,10 +159,51 @@ class TestReplay:
         run = payload["runs"][0]
         assert run["holds_conversation"] is False
         assert run["realtime_factor"] < 1.0
+        assert "STT placement: hosted" in capsys.readouterr().out
 
     def test_cli_replay_sequential_exits_zero(self) -> None:
         code = main(["--replay", "stt:3.6:0.773,0.780,0.790"])
         assert code == 0
+
+
+class TestSttPlacement:
+    """Plan 2b.9: self-hosted STT is a hardware gate, not a preference."""
+
+    def test_plan_two_concurrent_recommends_hosted(self) -> None:
+        samples = [
+            Sample(stage="stt", elapsed_s=_CONCURRENT_2_P50, ok=True, audio_s=_AUDIO_S)
+            for _ in range(15)
+        ]
+        row = summarise(samples, concurrency=2, audio_s=_AUDIO_S)
+        decision, reason = stt_placement([row])
+        assert decision == "hosted"
+        assert "realtime factor" in reason
+
+    def test_sequential_p95_outside_the_window_recommends_hosted(self) -> None:
+        # Plan §12.1 sequential p95 was 2655 ms — slower than the 2 s window.
+        samples = [
+            Sample(stage="stt", elapsed_s=2.655, ok=True, audio_s=_AUDIO_S) for _ in range(15)
+        ]
+        row = summarise(samples, concurrency=1, audio_s=_AUDIO_S)
+        decision, reason = stt_placement([row])
+        assert decision == "hosted"
+        assert "p95" in reason
+
+    def test_gpu_like_numbers_allow_self_hosted(self) -> None:
+        sequential = summarise(
+            [Sample(stage="stt", elapsed_s=0.35, ok=True, audio_s=_AUDIO_S) for _ in range(15)],
+            concurrency=1,
+            audio_s=_AUDIO_S,
+        )
+        contended = summarise(
+            [Sample(stage="stt", elapsed_s=0.80, ok=True, audio_s=_AUDIO_S) for _ in range(15)],
+            concurrency=2,
+            audio_s=_AUDIO_S,
+        )
+        decision, _reason = stt_placement([sequential, contended])
+        assert decision == "self_hosted"
+        assert sequential.p95_s is not None and sequential.p95_s <= 2.0
+        assert contended.realtime_factor is not None and contended.realtime_factor >= 1.0
 
 
 class TestReport:

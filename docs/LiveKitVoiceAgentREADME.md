@@ -1025,7 +1025,7 @@ misread as a fault:
 | Inbound call from a PBX extension, agent answers, speaks a greeting | Working |
 | Dedicated dialplan entry routing a chosen number to the agent | Working |
 | Call record, state machine, correlation ID across services | Working |
-| Speech to text | Working, **but `faster-whisper-tiny` is not accurate enough on 8 kHz telephony audio**: a real call transcribed "the future of telephony" as "The Future Up to Lathany". Latency is fine (1296 ms on that call); quality is not. Hosted STT or a larger local model — Plan 2b.9. |
+| Speech to text | **Working — Plan 2b.9 complete (2026-09-12).** Self-hosted Whisper on this host cannot hold a conversation (realtime factor 0.9 at two concurrent calls; sequential p95 2655 ms). Use hosted `gpt-4o-mini-transcribe` until STT has a GPU or a dedicated box. Gate: `make measure-latency` must report rtf ≥ 1.0 at ×2 **and** sequential p95 ≤ 2 s. `tiny` is also too inaccurate on 8 kHz telephony audio. |
 | Language model | Working — OpenAI `gpt-4o-mini`, or any OpenAI-compatible endpoint. Verified by exercising the adapter directly (§9c.5). |
 | Text to speech | Working — self-hosted Kokoro, or OpenAI |
 | Per-turn transcript persistence in `call_transcript_segments` | **Not yet — Phase 2.** The table stays empty. That is not an STT failure. |
@@ -1059,6 +1059,7 @@ misread as a fault:
 | Barge-in / endpointing window | **Working — Plan 2b.7 complete (2026-09-12).** Fixed `min_delay=2.0` / `max_delay=6.0` so a hosted-STT transcript (~1103 ms) lands inside the turn. Barge-in still follows the agent's interruption toggle. |
 | Event-loop block before the greeting | **Working — Plan 2b.11 complete (2026-09-12).** Silero VAD is prewarmed. The leftover 537 ms was LiveKit's local EOT model loading in `session.start`; turn detection is now VAD, which matches the 2 s window. Look for `session_built` / `session_started` elapsed_ms in the worker log. |
 | Repeated-measurement latency harness | **Working — Plan 2b.8 complete (2026-09-12).** `make measure-latency STT_URL=…` repeats STT/LLM/TTS probes at concurrency 1, 2 and 10 and reports p50/p95 **and** realtime factor (`audio / p50`). A factor below 1 means the stage cannot hold a conversation. Replay already-collected times with `--replay stt:3.6:0.773,2.655`. This is not the Phase 8 SIP load test. |
+| STT placement (hosted vs self-hosted) | **Decided — Plan 2b.9 complete (2026-09-12).** This host: hosted `gpt-4o-mini-transcribe`. Self-hosted only after `make measure-latency` says rtf ≥ 1.0 at ×2 and sequential p95 ≤ 2 s. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1234,15 +1235,15 @@ What this environment runs, and why:
 
 | | Provider | Model | Reasoning |
 |---|---|---|---|
-| STT | OpenAI | `gpt-4o-mini-transcribe` | Transcription quality dominates whether a conversation works at all. A tiny local Whisper mis-hears enough to make a correct agent look broken. |
+| STT | OpenAI | `gpt-4o-mini-transcribe` | **Plan 2b.9:** this host cannot self-host Whisper (rtf 0.9 at ×2). Hosted STT until a GPU or dedicated box passes `make measure-latency`. `tiny` also mis-hears 8 kHz telephony. |
 | LLM | OpenAI | `gpt-4o-mini` | Fast and cheap; latency matters more than raw capability for short spoken turns. |
 | TTS | Self-hosted | Kokoro via speaches | Audio is the highest-volume cost per minute, and local quality is good enough. Switch to `gpt-4o-mini-tts` if you prefer. |
 
-**Since Plan 2b.9 the seeded agent uses self-hosted STT as well.** A credential
-stored against the self-hosted provider with `base_url: https://api.openai.com/v1`
-was overriding its endpoint, so "self-hosted STT" was reaching OpenAI over the
-internet — worth checking in any environment seeded before that fix. Removing
-that credential is what makes the provider use its own endpoint.
+**Plan 2b.9 reversed the "move STT local" conclusion for this host.** The seed
+still *can* point at speaches (`faster-whisper-tiny`); do not use that path
+for a conversation here. A credential stored against the self-hosted provider
+with `base_url: https://api.openai.com/v1` was also overriding its endpoint —
+worth checking in any environment seeded before that fix.
 
 Mixing hosted and self-hosted like this is the point of the abstraction: the
 worker cannot tell the difference.
@@ -1852,6 +1853,8 @@ host cannot hold two concurrent transcriptions:
 ```bash
 make measure-latency STT_URL=http://127.0.0.1:8000/v1
 # optional: LLM_URL=… TTS_URL=… REPEATS=15 CONCURRENCY=1,2,10 MEASURE_JSON=report.json
+# prints "STT placement: hosted|self_hosted" — self-hosted only when rtf ≥ 1.0 at ×2
+# and sequential p95 ≤ 2 s (Plan 2b.9)
 ```
 
 The 1,000-concurrent-call target is a separate claim, and only once measured
