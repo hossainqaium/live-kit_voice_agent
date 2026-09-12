@@ -393,7 +393,7 @@ repository, and accounts are manageable through the API rather than the CLI.
 | ~~3b.3~~ | Password reset. **Done**: `POST /users/{id}/password` and the platform equivalent, both revoking sessions in the same change — a reset that leaves old tokens working is not a reset. Self-service change by the signed-in user is still open (**3b.3a**). | ~~feature~~ | §53 |
 | 3b.3a | Self-service password change, for a user rotating their own password without an administrator. | feature | §53 |
 | ~~3b.4~~ | Audit read endpoint. **Done**: `GET /platform/audit-logs`, filterable, with no write or delete route anywhere in the API. | ~~feature~~ | §69 |
-| 3b.5 | Audit coverage asserted across every mutating endpoint, rather than trusting that each one remembered. | verification | §69 |
+| ~~3b.5~~ | ~~Audit coverage asserted across every mutating endpoint, rather than trusting that each one remembered.~~ **Done (2026-09-12):** Fixed real gap: `POST /catalog/credentials/{id}/verify` updated `last_verified_at` with no audit row — added `credential.verified` action (catalog.py). Structural coverage test in `tests/test_audit_coverage.py`: walks every `POST/PUT/PATCH/DELETE` route, checks `audit.record` in handler source or private helper (handles the `_set_status` delegation pattern), or verifies route is in `_AUDIT_EXEMPT` with a documented reason. Exempt: `POST /auth/refresh` (token rotation, no config mutation) + `POST .../verify-draft` (key never stored, spec 54). Stale-entry check and exemption-reason check included. 6 new tests; 410 passing. | ~~verification~~ | §69 |
 
 **Why RLS is worth the work even with the repository in place:** the repository
 is the first layer and covers every path written through it. RLS covers the

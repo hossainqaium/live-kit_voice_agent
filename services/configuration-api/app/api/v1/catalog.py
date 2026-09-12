@@ -395,6 +395,8 @@ async def upsert_credential(
 async def verify_credential(
     credential_id: uuid.UUID,
     tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
 ) -> CredentialVerifyResponse:
     """Make one real request to the provider with the stored key.
 
@@ -467,6 +469,21 @@ async def verify_credential(
 
     if ok:
         row.last_verified_at = datetime.now(UTC)
+        # Record the successful verification so that an operator can see when
+        # a key was last proved to work (spec 69).  Failed verifications are
+        # not audited: the outcome is in the response body, no DB row changed,
+        # and the decrypted key is never written to any log.
+        await audit.record(
+            tenant.session,
+            principal=tenant.principal,
+            action="credential.verified",
+            resource_type="provider_credential",
+            resource_id=str(credential_id),
+            new_value={"ok": True, "checked_url": url, "latency_ms": latency_ms},
+            ip_address=client_ip,
+            request_id=getattr(request.state, "request_id", None),
+            user_agent=request.headers.get("user-agent"),
+        )
         await tenant.session.commit()
         detail = "the provider accepted this key"
     elif response.status_code in (401, 403):
