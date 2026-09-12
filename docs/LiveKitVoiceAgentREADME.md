@@ -385,6 +385,9 @@ see [§17](#17-security-notes).
 | `LIVEKIT_RTP_PORT_RANGE` | Infrastructure-controlled; not tenant-visible |
 | `ALLOW_BROWSER_TEST_SESSIONS` | Lets the console mint a join token for a test call (§9d.7). Development only |
 | `ALLOW_BROWSER_TEST_PARTICIPANT` | Lets the worker answer a browser caller. Development only |
+| `LIVEKIT_DRIFT_CHECK_ENABLED` | Scheduled PostgreSQL-vs-LiveKit compare (spec 46). Default on; tests turn it off |
+| `LIVEKIT_DRIFT_CHECK_INTERVAL_SECONDS` | Time between compares (default 300) |
+| `LIVEKIT_DRIFT_CHECK_JITTER_SECONDS` | Extra delay `[0, jitter]` so replicas do not hit the admin API together (default 30) |
 
 ### Object storage
 
@@ -469,6 +472,12 @@ Rows that back a LiveKit resource store its LiveKit ID plus a sync state:
 | `sync_error` | last failure detail |
 
 Reconciliation offers **Synchronize**, **Retry**, and **Repair** from the UI/API.
+
+A scheduled job (Plan 5.7) compares both directions every few minutes: PostgreSQL
+rows whose LiveKit ID is gone or differs become `DRIFTED`; LiveKit objects no row
+names are **orphans** on `/platform/livekit`. The job does not recreate or delete
+anything. Run `make detect-drift` (or **Check now** on that page) to compare
+immediately. `make` / `python -m app.cli sync-livekit` is Repair.
 
 ---
 
@@ -1060,6 +1069,7 @@ misread as a fault:
 | Event-loop block before the greeting | **Working — Plan 2b.11 complete (2026-09-12).** Silero VAD is prewarmed. The leftover 537 ms was LiveKit's local EOT model loading in `session.start`; turn detection is now VAD, which matches the 2 s window. Look for `session_built` / `session_started` elapsed_ms in the worker log. |
 | Repeated-measurement latency harness | **Working — Plan 2b.8 complete (2026-09-12).** `make measure-latency STT_URL=…` repeats STT/LLM/TTS probes at concurrency 1, 2 and 10 and reports p50/p95 **and** realtime factor (`audio / p50`). A factor below 1 means the stage cannot hold a conversation. Replay already-collected times with `--replay stt:3.6:0.773,2.655`. This is not the Phase 8 SIP load test. |
 | STT placement (hosted vs self-hosted) | **Decided — Plan 2b.9 complete (2026-09-12).** This host: hosted `gpt-4o-mini-transcribe`. Self-hosted only after `make measure-latency` says rtf ≥ 1.0 at ×2 and sequential p95 ≤ 2 s. |
+| LiveKit drift detection | **Working — Plan 5.7 complete (2026-09-12).** A scheduled job (300 s + jitter) lists LiveKit SIP trunks and dispatch rules and compares them to PostgreSQL. Missing or mismatched rows become `DRIFTED`. LiveKit-only leftovers are orphans on `/platform/livekit`. Banner: **Configuration Drift Detected**. On-demand: **Check now**, `POST /platform/livekit/drift-check`, or `make detect-drift`. Repair is still tenant Synchronize / `sync-livekit` — the job does not recreate resources. A LiveKit outage is not treated as drift. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1385,7 +1395,7 @@ navigation and a platform account has no tenant to act in.
 |---|---|---|
 | Dashboard | `/platform` | Tenant count, live calls, LiveKit state |
 | Tenants | `/platform/tenants` | Create a tenant with its first administrator, set limits, suspend |
-| LiveKit | `/platform/livekit` | Reachability, room count, and every row whose mirror disagrees (spec 46) |
+| LiveKit | `/platform/livekit` | Reachability, room count, last drift check, drifted rows, and LiveKit-only orphans (spec 46) |
 | Infrastructure | `/platform/infrastructure` | Live dependency probes and links into Grafana, Prometheus and MinIO |
 | Capacity | `/platform/capacity` | Inventory, live load, licensed concurrency (spec 48) |
 | Providers | `/platform/providers` | The STT/LLM/TTS catalog, including `requires_credential` |
@@ -1579,7 +1589,8 @@ first and LiveKit second. A second UI writing straight to LiveKit would be a
 second source of truth, and anything entered there is overwritten by the next
 re-sync — which is precisely the drift §46 asks the platform to detect. So
 `/platform/livekit` reports the mirror's *agreement* with the database — sync
-state counts and drifted rows — rather than an inventory of LiveKit objects.
+state counts, drifted rows, scheduled-check time, and LiveKit-only orphans —
+rather than an inventory of LiveKit objects.
 The useful question about LiveKit here is "does it still match the records",
 not "what does it contain".
 
@@ -1945,10 +1956,25 @@ kubectl scale deployment/ai-agent-worker --replicas=40
 
 ### Configuration drift
 
-The platform compares PostgreSQL against LiveKit and reports
-**"Configuration Drift Detected"** — e.g. database says `SIP trunk = Active`, LiveKit reports
-`SIP trunk = Missing`. Resolve from the LiveKit admin section with **Synchronize**, **Repair**,
-or **Retry**.
+The API process compares PostgreSQL against LiveKit on a timer (default 5 minutes
+plus jitter) and on demand.
+
+1. Open **Platform → LiveKit**. If the banner says **Configuration Drift Detected**,
+   the last compare found a missing/mismatched row or a LiveKit-only orphan.
+2. **Drifted row** (database has a LiveKit ID that is gone or differs) — from the
+   tenant's SIP Trunks screen run **Synchronize**, or
+   `python -m app.cli sync-livekit`. PostgreSQL is the source of truth; Repair
+   recreates the LiveKit object.
+3. **Orphan** (LiveKit holds a trunk or dispatch rule no row names) — leftovers
+   from an interrupted delete-and-recreate. The job does not delete them. Inspect
+   with `python -m app.cli show-config`, then delete the leftover in LiveKit or
+   decide it should have a row.
+4. **LiveKit unreachable** during a check — statuses are left unchanged. An
+   outage is not drift.
+
+On-demand: **Check now**, `POST /api/v1/platform/livekit/drift-check`, or
+`make detect-drift` (exit 1 when drift is present). Metric:
+`api_livekit_drift_detected{resource="sip_trunk|dispatch_rule|orphan"}`.
 
 ### Tenant call limits
 
@@ -2028,7 +2054,7 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Long silence before the first word | Voice-latency metrics: STT latency, LLM first-token, TTS first-audio. Streaming enabled on all three? Repeat the stage with `make measure-latency` — a single call's number is not usable on a contended host. A delay *before* the greeting is `session_started` elapsed_ms (2b.11), not a turn metric. |
 | Agent talks over the caller | Barge-in path: VAD → turn detection → TTS cancellation; check the agent's interruption toggle. |
 | Caller is transcribed but the agent never replies | Worker log `transcript arrives after turn has been committed` — the 2b.7 window should prevent this (look for `endpointing_window min_delay_s=2.0`). If it still fires, STT is slower than 2 s; that is 2b.9, not a tighter window. |
-| `SIP trunk = Missing` in LiveKit | Configuration drift — run Synchronize/Repair. |
+| `SIP trunk = Missing` in LiveKit | Configuration drift — **Check now** or wait for the scheduled compare (row becomes `DRIFTED`), then Synchronize / `sync-livekit`. |
 | SIP Setup Wizard created a trunk but calls still `486 flood` | Finish the Phone Number step — that is what re-syncs accepted numbers. A trunk created at Security still has an empty list. |
 | Calls rejected at peak | Tenant call limits, or platform capacity exhausted — check Available Capacity and worker utilization. |
 | Provider errors in bursts | Circuit breaker state and fallback provider configuration. |

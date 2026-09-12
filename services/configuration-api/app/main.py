@@ -20,6 +20,7 @@ from app.api.v1 import api_router
 from app.core.middleware import AccessLogMiddleware, CorrelationMiddleware
 from app.core.settings import get_settings
 from app.db.session import dispose_engine
+from app.livekit.scheduler import start_drift_checker, stop_drift_checker
 from shared.logging import configure_logging, get_logger
 from shared.telemetry import CONTENT_TYPE_LATEST, ControlPlaneMetrics, render_metrics
 
@@ -36,7 +37,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "service_starting",
         extra={"environment": settings.environment, "api_base_path": settings.api_base_path},
     )
+    app.state.metrics = metrics
+    drift_task = start_drift_checker(metrics)
     yield
+    await stop_drift_checker(drift_task)
     await dispose_engine()
     logger.info("service_stopped")
 
@@ -70,6 +74,7 @@ app.add_middleware(
 # Probes stay off the versioned path so orchestrators need no version knowledge.
 app.include_router(health_router)
 app.include_router(api_router, prefix=settings.api_base_path)
+app.state.metrics = metrics
 
 
 @app.get("/metrics", include_in_schema=False)

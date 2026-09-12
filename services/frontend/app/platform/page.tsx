@@ -43,6 +43,7 @@ export default function PlatformDashboard() {
 
   const down = (capacity?.components ?? []).filter((component) => !component.reachable);
   const drifted = livekit?.needs_attention.length ?? 0;
+  const configurationDrift = livekit?.configuration_drift_detected ?? drifted > 0;
 
   return (
     <Shell>
@@ -65,10 +66,12 @@ export default function PlatformDashboard() {
         </Notice>
       )}
 
-      {drifted > 0 && (
+      {configurationDrift && (
         <Notice tone="warn">
-          {drifted} mirrored resource{drifted === 1 ? "" : "s"} {drifted === 1 ? "does" : "do"}{" "}
-          not match the database.{" "}
+          Configuration Drift Detected
+          {drifted > 0
+            ? ` — ${drifted} mirrored resource${drifted === 1 ? "" : "s"} do not match the database.`
+            : " — LiveKit holds resources the database does not name."}{" "}
           <Link href="/platform/livekit">LiveKit</Link> lists which.
         </Notice>
       )}

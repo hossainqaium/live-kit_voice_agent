@@ -12,6 +12,8 @@ import pytest
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("POSTGRES_HOST", "localhost")
 os.environ.setdefault("JWT_SECRET", "test-secret")
+# The drift loop would call LiveKit from the in-process ASGI lifespan.
+os.environ.setdefault("LIVEKIT_DRIFT_CHECK_ENABLED", "false")
 
 
 @pytest.fixture(scope="session")

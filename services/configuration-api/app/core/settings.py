@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     livekit_api_secret: SecretStr = SecretStr("devsecret-at-least-32-characters-long")
     livekit_sip_uri: str = "sip:livekit-sip:5060"
 
+    #: Periodic compare of PostgreSQL against LiveKit (spec 46, Plan 5.7).
+    #: Off in the test process so an in-process ASGI client does not call
+    #: LiveKit. Compose leaves the default on.
+    livekit_drift_check_enabled: bool = True
+    livekit_drift_check_interval_seconds: float = 300.0
+    livekit_drift_check_jitter_seconds: float = 30.0
+
     # --- Object storage --------------------------------------------------- #
     s3_endpoint_url: str | None = "http://minio:9000"
     s3_bucket_recordings: str = "recordings"

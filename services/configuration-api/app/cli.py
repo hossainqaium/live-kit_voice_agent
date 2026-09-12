@@ -8,6 +8,7 @@ that UI is built.
     python -m app.cli seed-platform
     python -m app.cli seed-dev-tenant --did 1001 --pbx-host 192.168.0.113
     python -m app.cli sync-livekit
+    python -m app.cli detect-drift
     python -m app.cli show-config
 """
 
@@ -753,6 +754,40 @@ async def cmd_create_test_room(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_detect_drift() -> int:
+    """Compare PostgreSQL against LiveKit without repairing (spec 46).
+
+    Marks missing or mismatched rows ``DRIFTED``. Orphans — LiveKit objects
+    no row names — are printed and left alone. Repair is ``sync-livekit``.
+    """
+    from app.livekit.drift import detect_drift
+
+    manager = SipResourceManager()
+    factory = get_session_factory()
+    async with factory() as session:
+        report = await detect_drift(session, manager)
+        await session.commit()
+
+    if not report.livekit_reachable:
+        print(f"LiveKit unreachable: {report.error}", file=sys.stderr)
+        return 2
+
+    print(
+        f"compared {report.trunks_compared} trunk(s) and "
+        f"{report.rules_compared} dispatch rule(s)"
+    )
+    if not report.findings:
+        print("no configuration drift")
+        return 0
+
+    print("Configuration Drift Detected")
+    for item in report.findings:
+        location = item.livekit_resource_id or str(item.row_id or "")
+        print(f"  {item.kind.value:18} {item.resource:14} {item.name}  {location}")
+        print(f"    {item.reason}")
+    return 1
+
+
 async def cmd_show_config() -> int:
     """Print what LiveKit currently holds, next to what we recorded."""
     manager = SipResourceManager()
@@ -815,6 +850,10 @@ def main() -> int:
     )
 
     sub.add_parser("sync-livekit", help="create or verify LiveKit SIP resources")
+    sub.add_parser(
+        "detect-drift",
+        help="mark drifted rows without repairing; print orphans (spec 46)",
+    )
     sub.add_parser("show-config", help="compare LiveKit against our records")
 
     sub.add_parser("seed-rbac", help="create the spec-8 roles and permissions")
@@ -872,6 +911,8 @@ def main() -> int:
                 return await cmd_seed_dev_tenant(args)
             if args.command == "sync-livekit":
                 return await cmd_sync_livekit()
+            if args.command == "detect-drift":
+                return await cmd_detect_drift()
             if args.command == "show-config":
                 return await cmd_show_config()
             if args.command == "seed-rbac":

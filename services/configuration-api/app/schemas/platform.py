@@ -362,6 +362,15 @@ class DriftedResource(BaseModel):
     last_synced_at: datetime | None
 
 
+class OrphanedResource(BaseModel):
+    """A LiveKit object no PostgreSQL row names (the other drift direction)."""
+
+    kind: str
+    name: str
+    livekit_resource_id: str
+    reason: str
+
+
 class LiveKitOverview(BaseModel):
     """LiveKit's state as the Control Plane sees it.
 
@@ -383,6 +392,27 @@ class LiveKitOverview(BaseModel):
     #: Only the rows that need attention. A fully synced platform returns an
     #: empty list, which is the answer worth seeing at a glance.
     needs_attention: list[DriftedResource] = Field(default_factory=list)
+
+    #: Last scheduled or on-demand compare. Null until the first check in
+    #: this process; row-level ``DRIFTED`` still shows in ``needs_attention``.
+    last_drift_check_at: datetime | None = None
+    drift_check_reachable: bool | None = None
+    orphans: list[OrphanedResource] = Field(default_factory=list)
+    configuration_drift_detected: bool = False
+
+
+class DriftCheckResponse(BaseModel):
+    """One compare pass (spec 46). Detection only — nothing is repaired."""
+
+    checked_at: datetime
+    livekit_reachable: bool
+    trunks_compared: int
+    rules_compared: int
+    drifted: int
+    orphan_count: int
+    configuration_drift_detected: bool
+    error: str | None = None
+    orphans: list[OrphanedResource] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

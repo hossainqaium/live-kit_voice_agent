@@ -587,7 +587,7 @@ detected automatically.
 | 5.4 | Agent dispatch configuration per agent/DID | §21 |
 | 5.5 | Resource synchronization flow: `UI → API → validate → PostgreSQL → LiveKit API → store LiveKit resource ID` | §12 |
 | 5.6 | Sync status `SYNCED`/`PENDING`/`FAILED`/`DRIFTED` with Synchronize, Retry, Repair actions | §12 |
-| 5.7 | Drift detection job comparing PostgreSQL against LiveKit; surfaces "Configuration Drift Detected" | §46 |
+| ~~5.7~~ | ~~Drift detection job comparing PostgreSQL against LiveKit; surfaces "Configuration Drift Detected"~~ **Done (2026-09-12):** `app/livekit/drift.py` list-and-compares inbound trunks and dispatch rules in both directions. A LiveKit ID that is gone or differs is marked `DRIFTED`; a LiveKit object no row names is an **orphan** on the last report (no auto-delete). `app/livekit/scheduler.py` runs on the API lifespan at 300 s + jitter (`LIVEKIT_DRIFT_CHECK_*`). A LiveKit outage is not drift — statuses stay put. On-demand: `POST /platform/livekit/drift-check`, `python -m app.cli detect-drift`, `make detect-drift`. Does not Repair — tenant Synchronize or `sync-livekit` recreates from PostgreSQL. Console: **"Configuration Drift Detected"** on `/platform` and `/platform/livekit`. Tests: `tests/test_drift.py`. | §46 |
 | 5.8 | Infrastructure/tenant configuration split — Redis, ports, RTP ranges, external IP, TLS, LBs, Kubernetes, networking, firewall, topology hidden from tenant admins | §13 |
 | 5.9 | Asynchronous processing for all LiveKit operations | §80 |
 | 5.10 | Platform capacity dashboard — Total/Available Capacity, LiveKit Nodes, SIP Nodes, AI Workers, Worker Utilization, CPU, Memory, Network, Provider Health | §48 |
@@ -1419,9 +1419,11 @@ Two habits that would have caught it immediately:
 **Cause (defect, partially):** interrupted delete-and-recreate cycles leave
 resources behind. Detecting them needs a list-and-compare in the
 LiveKit-to-database direction; a per-row check only finds the opposite case.
-**Fix:** `SipResourceManager.list_dispatch_rules` and `list_inbound_trunks`
-support this; wiring it into a scheduled reconciliation is Phase 5 (item 5.7).
-Until then, orphans accumulate quietly and cost nothing except confusion.
+**Fix (Plan 5.7, 2026-09-12):** `detect_drift()` lists LiveKit trunks and
+rules and compares them to PostgreSQL. Orphans surface on `/platform/livekit`
+and in `make detect-drift`; they are not deleted automatically. A missing
+mirrored ID is marked `DRIFTED` so Repair (`sync-livekit` / tenant
+Synchronize) can recreate it.
 
 #### Caller and called numbers silently swapped
 
@@ -1793,7 +1795,7 @@ rediscover:
 | 2 | The greeting is spoken by `session.say()`, not the model. Any check that treats "the caller heard the greeting" as evidence the pipeline works will pass on a completely broken LLM. |
 | 2 | The duplicate-log fix covers the main worker process. Job subprocesses forward records to the parent, which can re-emit them; check log volume per call before load testing. |
 | 4 | `inbound_numbers` semantics (§12.1) must be encoded in the dispatch-rule UI, or every tenant will hit the same `486 flood`. |
-| 5 | Orphan detection needs the LiveKit-to-database direction, not just per-row checks. |
+| 5 | Orphan detection is the LiveKit-to-database direction (5.7). Per-row GETs still miss leftovers from a failed delete-and-recreate. |
 | 5 | `UpdateSIPInboundTrunk` may still be unimplemented; keep the delete-and-recreate path and the dependent-rule rebuild. |
 | 7 | IP allow-listing must be verified on real infrastructure. It cannot be validated on Docker Desktop at all. |
 | 8 | **RTC media is one muxed UDP port** in development, not a range — a range cost 15 s of ICE gathering per call through Docker Desktop (§12.1). Muxing is also LiveKit's production advice, so the Helm values should mux too rather than widening a range. SIP's RTP range is still 50 ports, roughly two per call, and does need widening before load testing or concurrency caps near 25 calls for reasons that look like LiveKit faults. |

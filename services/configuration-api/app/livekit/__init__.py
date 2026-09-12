@@ -5,6 +5,13 @@ LiveKit SDK or hold the LiveKit API secret.
 """
 
 from app.livekit.client import LiveKitAdminClient
+from app.livekit.drift import (
+    DriftFinding,
+    DriftKind,
+    DriftReport,
+    detect_drift,
+    last_report,
+)
 from app.livekit.errors import (
     LiveKitError,
     LiveKitRejectedError,
@@ -16,6 +23,9 @@ from app.livekit.sip import DispatchRuleSnapshot, SipResourceManager, TrunkSnaps
 
 __all__ = [
     "DispatchRuleSnapshot",
+    "DriftFinding",
+    "DriftKind",
+    "DriftReport",
     "LiveKitAdminClient",
     "LiveKitError",
     "LiveKitRejectedError",
@@ -24,4 +34,6 @@ __all__ = [
     "LiveKitUnsupportedError",
     "SipResourceManager",
     "TrunkSnapshot",
+    "detect_drift",
+    "last_report",
 ]

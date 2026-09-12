@@ -1080,6 +1080,13 @@ export interface DriftedResource {
   last_synced_at: string | null;
 }
 
+export interface OrphanedResource {
+  kind: string;
+  name: string;
+  livekit_resource_id: string;
+  reason: string;
+}
+
 export interface LiveKitOverview {
   url: string;
   sip_uri: string;
@@ -1090,6 +1097,22 @@ export interface LiveKitOverview {
   dispatch_rule_sync: Record<string, number>;
   /** Empty on a healthy platform, which is the point of the list. */
   needs_attention: DriftedResource[];
+  last_drift_check_at: string | null;
+  drift_check_reachable: boolean | null;
+  orphans: OrphanedResource[];
+  configuration_drift_detected: boolean;
+}
+
+export interface DriftCheckResult {
+  checked_at: string;
+  livekit_reachable: boolean;
+  trunks_compared: number;
+  rules_compared: number;
+  drifted: number;
+  orphan_count: number;
+  configuration_drift_detected: boolean;
+  error: string | null;
+  orphans: OrphanedResource[];
 }
 
 export type PlatformRole = "SUPER_ADMIN" | "PLATFORM_OPERATOR";
@@ -1611,6 +1634,9 @@ export const api = {
     },
     livekit(): Promise<LiveKitOverview> {
       return request<LiveKitOverview>("/platform/livekit");
+    },
+    checkLivekitDrift(): Promise<DriftCheckResult> {
+      return request<DriftCheckResult>("/platform/livekit/drift-check", { method: "POST" });
     },
     users: {
       list(): Promise<Page<PlatformUser>> {

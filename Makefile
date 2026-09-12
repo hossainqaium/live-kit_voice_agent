@@ -18,7 +18,7 @@ GRAFANA_PORT  ?= $(shell grep -E '^GRAFANA_PORT=' .env 2>/dev/null | cut -d= -f2
 .DEFAULT_GOAL := help
 .PHONY: help env preflight build up down restart logs ps urls health \
         migrate migration downgrade psql redis  \
-        test-room browser-test refresh-ip \
+        test-room browser-test refresh-ip detect-drift \
         typecheck-web build-web check-web \
         test test-unit test-api test-worker test-shared test-integration test-e2e \
         lint fmt fmt-check typecheck check load-test measure-latency clean nuke
@@ -230,6 +230,9 @@ nuke: ## Remove containers AND volumes — destroys local data
 # endpointing measurable in seconds instead of one phone call at a time. The
 # worker gate is off by default and refused outside development.
 # --------------------------------------------------------------------------- #
+detect-drift: ## Compare PostgreSQL against LiveKit without repairing (spec 46)
+	$(API) python -m app.cli detect-drift
+
 test-room: ## Create a room + agent dispatch for a DID, for a client of your own
 	@test -n "$(DID)" || (echo "usage: make test-room DID=1001" && exit 2)
 	$(API) python -m app.cli create-test-room --did "$(DID)" --room "$(or $(ROOM),browser-test)"

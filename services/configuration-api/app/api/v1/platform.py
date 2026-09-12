@@ -54,16 +54,20 @@ from app.db.models import (
 from app.db.session import get_session
 from app.db.util import as_lookup
 from app.livekit import LiveKitAdminClient
+from app.livekit.drift import DriftReport, detect_drift, last_report
+from app.livekit.sip import SipResourceManager
 from app.schemas.common import Page
 from app.schemas.platform import (
     AuditLogResponse,
     CapacityResponse,
     ComponentHealth,
+    DriftCheckResponse,
     DriftedResource,
     LiveKitOverview,
     ModelCreate,
     ModelResponse,
     ModelUpdate,
+    OrphanedResource,
     PlatformSettingsResponse,
     PlatformUserCreate,
     PlatformUserResponse,
@@ -1485,6 +1489,12 @@ async def livekit_overview(session: SessionDep) -> LiveKitOverview:
                 )
             )
 
+    report = last_report()
+    orphans = _orphans_from_report(report)
+    drifted = trunk_counts.get(SyncStatus.DRIFTED.value, 0) + rule_counts.get(
+        SyncStatus.DRIFTED.value, 0
+    )
+
     return LiveKitOverview(
         url=settings.livekit_url,
         sip_uri=settings.livekit_sip_uri,
@@ -1494,6 +1504,78 @@ async def livekit_overview(session: SessionDep) -> LiveKitOverview:
         trunk_sync=trunk_counts,
         dispatch_rule_sync=rule_counts,
         needs_attention=attention,
+        last_drift_check_at=report.checked_at if report else None,
+        drift_check_reachable=report.livekit_reachable if report else None,
+        orphans=orphans,
+        configuration_drift_detected=bool(orphans) or drifted > 0,
+    )
+
+
+@router.post(
+    "/livekit/drift-check",
+    response_model=DriftCheckResponse,
+    summary="Compare PostgreSQL against LiveKit now",
+    dependencies=[Depends(require_platform_user())],
+)
+async def run_drift_check(
+    session: SessionDep,
+    request: Request,
+    client_ip: ClientIp,
+    principal: CurrentPrincipal,
+) -> DriftCheckResponse:
+    """On-demand drift detection (spec 46).
+
+    Marks missing or mismatched rows ``DRIFTED``. Does not Repair — that is
+    still the tenant Synchronize action or ``sync-livekit``, because a
+    platform-wide recreate would act across tenants with no review.
+    """
+    report = await detect_drift(
+        session, SipResourceManager(), metrics=request.app.state.metrics
+    )
+    await audit.record(
+        session,
+        principal=principal,
+        action="livekit.drift_checked",
+        resource_type="livekit",
+        new_value={
+            "reachable": report.livekit_reachable,
+            "drifted": len(report.drifted_findings),
+            "orphans": len(report.orphans),
+            "error": report.error,
+        },
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await session.commit()
+    return _drift_check_response(report)
+
+
+def _orphans_from_report(report: DriftReport | None) -> list[OrphanedResource]:
+    if report is None:
+        return []
+    return [
+        OrphanedResource(
+            kind=item.resource,
+            name=item.name,
+            livekit_resource_id=item.livekit_resource_id or "",
+            reason=item.reason,
+        )
+        for item in report.orphans
+        if item.livekit_resource_id
+    ]
+
+
+def _drift_check_response(report: DriftReport) -> DriftCheckResponse:
+    return DriftCheckResponse(
+        checked_at=report.checked_at,
+        livekit_reachable=report.livekit_reachable,
+        trunks_compared=report.trunks_compared,
+        rules_compared=report.rules_compared,
+        drifted=len(report.drifted_findings),
+        orphan_count=len(report.orphans),
+        configuration_drift_detected=report.configuration_drift_detected,
+        error=report.error,
+        orphans=_orphans_from_report(report),
     )
 
 
@@ -1820,6 +1902,19 @@ async def platform_settings() -> PlatformSettingsResponse:
                 plain("LIVEKIT_SIP_URI", settings.livekit_sip_uri),
                 secret("LIVEKIT_API_KEY", settings.livekit_api_key),
                 secret("LIVEKIT_API_SECRET", settings.livekit_api_secret),
+                plain(
+                    "LIVEKIT_DRIFT_CHECK_ENABLED",
+                    settings.livekit_drift_check_enabled,
+                    note="Scheduled compare of PostgreSQL against LiveKit (spec 46).",
+                ),
+                plain(
+                    "LIVEKIT_DRIFT_CHECK_INTERVAL_SECONDS",
+                    settings.livekit_drift_check_interval_seconds,
+                ),
+                plain(
+                    "LIVEKIT_DRIFT_CHECK_JITTER_SECONDS",
+                    settings.livekit_drift_check_jitter_seconds,
+                ),
             ],
             "Object storage": [
                 plain("S3_ENDPOINT_URL", settings.s3_endpoint_url or "(AWS default)"),

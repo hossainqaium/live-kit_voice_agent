@@ -61,6 +61,7 @@ class DispatchRuleSnapshot:
     trunk_ids: tuple[str, ...]
     room_prefix: str | None
     agent_names: tuple[str, ...]
+    inbound_numbers: tuple[str, ...]
 
 
 class SipResourceManager:
@@ -289,6 +290,26 @@ class SipResourceManager:
         )
         return [_dispatch_snapshot(item) for item in rules.items]
 
+    def rule_matches(
+        self,
+        snapshot: DispatchRuleSnapshot,
+        rule: LiveKitDispatchRule,
+        livekit_trunk_ids: list[str],
+    ) -> bool:
+        """Whether LiveKit already reflects our dispatch-rule record.
+
+        Same rule as ``trunk_matches``: compare only what we set, because
+        LiveKit fills in defaults that would otherwise look like drift on
+        every check.
+        """
+        return (
+            snapshot.name == rule.name
+            and set(snapshot.trunk_ids) == set(livekit_trunk_ids)
+            and (snapshot.room_prefix or None) == (rule.room_prefix or None)
+            and set(snapshot.agent_names) == {rule.agent_dispatch_name}
+            and set(snapshot.inbound_numbers) == set(rule.matched_numbers or [])
+        )
+
     async def delete_dispatch_rule(self, livekit_rule_id: str) -> None:
         await self._client.call(
             "delete_sip_dispatch_rule",
@@ -325,4 +346,5 @@ def _dispatch_snapshot(info: SIPDispatchRuleInfo) -> DispatchRuleSnapshot:
         trunk_ids=tuple(info.trunk_ids),
         room_prefix=(individual.room_prefix or None) if individual else None,
         agent_names=tuple(agent.agent_name for agent in getattr(room_config, "agents", []) or []),
+        inbound_numbers=tuple(getattr(info, "inbound_numbers", None) or ()),
     )
