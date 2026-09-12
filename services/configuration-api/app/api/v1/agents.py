@@ -901,7 +901,36 @@ async def _validate_version(
     )
 
     if version.tts_provider_id is not None and version.voice_id is None:
-        issues.append(ValidationIssue(field="voice_id", message="choose a voice"))
+        # Only block publishing when voices exist for this provider in the
+        # catalog. If none are registered yet (common for cloud providers where
+        # the platform operator has not added them yet), downgrade to a warning
+        # so the agent is still publishable. The worker falls back to the
+        # provider's own default voice when voice_id is null.
+        available_voices = (
+            (
+                await tenant.session.execute(
+                    select(Voice).where(
+                        Voice.provider_id == version.tts_provider_id,
+                        Voice.status == ResourceStatus.ACTIVE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if available_voices:
+            issues.append(ValidationIssue(field="voice_id", message="choose a voice"))
+        else:
+            issues.append(
+                ValidationIssue(
+                    field="voice_id",
+                    message=(
+                        "no voices are registered for this TTS provider — add them "
+                        "in Platform → Voices, or the worker will use the provider default"
+                    ),
+                    severity="warning",
+                )
+            )
     elif version.voice_id is not None:
         voice = (
             await tenant.session.execute(select(Voice).where(Voice.id == version.voice_id))

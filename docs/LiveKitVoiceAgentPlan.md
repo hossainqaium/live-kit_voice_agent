@@ -362,9 +362,10 @@ from the agent builder, with all acceptance criteria in
 | ~~4c.6~~ | ~~Add `embedding_provider_id` / `embedding_model_id` to `agent_versions`.~~ **Done.** Migration `b7d4f1a02c58`; `EmbeddingPicker` in agent builder Capability tab (visible only when KB is selected). | feature | §33, CR-2 |
 | ~~4c.7~~ | ~~Extend pre-publish validation for embedding fields.~~ **Done.** `_validate_version()` emits `severity=warning` when `knowledge_base_id` is set but `embedding_provider_id` is null. | feature | §63, CR-2 |
 | ~~4c.8~~ | ~~Pre-populate the Endpoint URL field from the provider's canonical base URL.~~ **Done (2026-09-13).** `CatalogProvider` now exposes `default_base_url` for non-self-hosted providers; `AddProviderDialog` initialises `baseUrl` state from `provider.default_base_url` (cloud) or `PROVIDER_META.endpointPlaceholder` (self-hosted) on first render and on every provider change; the value is saved to `provider_credentials.base_url` on Add. Tests: `test_catalog_provider_exposes_default_base_url_for_cloud`, `test_catalog_provider_hides_default_base_url_for_self_hosted`. Files: `app/schemas/catalog.py`, `app/api/v1/catalog.py`, `lib/api.ts`, `app/ai-setup/page.tsx`. | fix | CR-2 |
+| ~~4c.9~~ | ~~Fix agent publish blocked by missing voice when provider has no catalog voices.~~ **Done (2026-09-13).** Validation now queries available voices for the TTS provider before deciding severity: `voice_id = null` is only a hard error when voices exist in the catalog; otherwise it's a warning (agent publishes, worker uses provider default). Seeded 43 standard voices across OpenAI TTS, ElevenLabs, Cartesia, Deepgram Aura, Google TTS, LMNT, PlayHT so selections are available out of the box. Voice picker hint updated to explain missing voices. Tests: `test_voice_validation_checks_catalog_before_blocking`, `test_publishable_flag_is_driven_by_error_severity_only`. Files: `app/api/v1/agents.py`, `app/services/seed.py`, `components/ProviderChain.tsx`. | fix | §63, CR-2 |
 
 **Implementation order:** 4c.1 → 4c.2 → 4c.3 (in parallel with 4c.1–4c.2) →
-4c.4 → 4c.5 (depends on 4c.4) → 4c.6 → 4c.7 (depends on 4c.6) → 4c.8.
+4c.4 → 4c.5 (depends on 4c.4) → 4c.6 → 4c.7 (depends on 4c.6) → 4c.8 → 4c.9.
 
 **Exit criteria — all met**
 

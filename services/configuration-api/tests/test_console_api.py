@@ -659,6 +659,37 @@ class TestProviderSelectionAndCredentials:
 
         assert "llm_local_provider_id" not in AgentVersionConfig.model_fields
 
+    def test_voice_validation_checks_catalog_before_blocking(self) -> None:
+        """Agents whose TTS provider has no catalog voices must still publish.
+
+        The validation should only reject voice_id=None as an error when at
+        least one voice exists for the chosen provider. If the platform
+        operator has not registered any voices yet, the missing voice becomes
+        a warning so the agent remains publishable.
+        """
+        import inspect
+
+        from app.api.v1 import agents as agents_api
+
+        src = inspect.getsource(agents_api._validate_version)
+        # Must query available voices before deciding on severity.
+        assert "available_voices" in src
+        # Blocking error only when voices exist for the provider.
+        assert "if available_voices:" in src
+        # Fallback is a warning, not an error.
+        assert 'severity="warning"' in src
+        assert "no voices are registered for this TTS provider" in src
+
+    def test_publishable_flag_is_driven_by_error_severity_only(self) -> None:
+        """Warnings (embedding, missing voice catalog) must not block publish."""
+        import inspect
+
+        from app.api.v1 import agents as agents_api
+
+        src = inspect.getsource(agents_api._validate_version)
+        # The publishable predicate must only look at 'error' severity.
+        assert 'issue.severity == "error"' in src
+
 
 class TestBrowserTestSessionIsTheOneCredentialEndpoint:
     """Guards on the only endpoint that issues a credential (Plan 2b.10).

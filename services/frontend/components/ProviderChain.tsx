@@ -352,7 +352,14 @@ function TierRow({
         </Field>
 
         {tier.voice && (
-          <Field label="Voice">
+          <Field
+            label="Voice"
+            hint={
+              providerId && voices.length === 0
+                ? "No voices registered for this provider. A platform operator can add them under Platform → Voices."
+                : undefined
+            }
+          >
             {(id) => (
               <select
                 id={id}
@@ -365,7 +372,13 @@ function TierRow({
                   )
                 }
               >
-                <option value="">{providerId ? "— provider default —" : "select a provider first"}</option>
+                <option value="">
+                  {!providerId
+                    ? "select a provider first"
+                    : voices.length === 0
+                    ? "— no voices registered (provider default) —"
+                    : "— provider default —"}
+                </option>
                 {voices.map((v) => (
                   <option key={v.id} value={v.id}>
                     {v.name}

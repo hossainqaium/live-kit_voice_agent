@@ -786,6 +786,133 @@ async def seed_provider_catalog(session: AsyncSession, spec: DevTenantSpec) -> N
         )
 
     await session.flush()
+
+    # Seed standard voices for cloud TTS providers so agents are publishable
+    # out of the box without a platform operator first visiting Platform →
+    # Voices. The voice_id values here are the provider's own identifiers — the
+    # same string the worker forwards in the TTS API call.
+    _CLOUD_TTS_VOICES: list[tuple[str, list[tuple[str, str, str | None, bool]]]] = [
+        # (provider_slug, [(voice_id, display_name, language, is_default)])
+        (
+            "openai_hosted",
+            [
+                ("alloy",   "Alloy",   "en", True),
+                ("ash",     "Ash",     "en", False),
+                ("coral",   "Coral",   "en", False),
+                ("echo",    "Echo",    "en", False),
+                ("fable",   "Fable",   "en", False),
+                ("nova",    "Nova",    "en", False),
+                ("onyx",    "Onyx",    "en", False),
+                ("sage",    "Sage",    "en", False),
+                ("shimmer", "Shimmer", "en", False),
+            ],
+        ),
+        (
+            "elevenlabs",
+            [
+                ("21m00Tcm4TlvDq8ikWAM", "Rachel",  "en", True),
+                ("AZnzlk1XvdvUeBnXmlld", "Domi",    "en", False),
+                ("EXAVITQu4vr4xnSDxMaL", "Bella",   "en", False),
+                ("ErXwobaYiN019PkySvjV", "Antoni",  "en", False),
+                ("MF3mGyEYCl7XYWbV9V6O", "Elli",    "en", False),
+                ("TxGEqnHWrfWFTfGW9XjX", "Josh",    "en", False),
+                ("VR6AewLTigWG4xSOukaG", "Arnold",  "en", False),
+                ("pNInz6obpgDQGcFmaJgB", "Adam",    "en", False),
+                ("yoZ06aMxZJJ28mfd3POQ", "Sam",     "en", False),
+            ],
+        ),
+        (
+            "cartesia",
+            [
+                ("a0e99841-438c-4a64-b679-ae501e7d6091", "Barbershop Man",  "en", True),
+                ("79a125e8-cd45-4c13-8a67-188112f4dd22", "British Reading Lady", "en", False),
+                ("c45bc1d1-0a48-4c67-b0d1-3555c9a4e4e3", "Calm French Woman", "fr", False),
+                ("95856005-0332-41b0-935f-352e296aa0df", "Classy British Man", "en", False),
+                ("41534e16-2966-4c6b-9670-111411def906", "Madame Mischief", "en", False),
+            ],
+        ),
+        (
+            "deepgram_tts",
+            [
+                # Deepgram Aura: voice is encoded in the model slug but the
+                # agent builder keeps model and voice separate. Map each Aura
+                # model to a voice entry so the picker has something to show.
+                ("aura-2-en-us",      "Aura 2 (US English)",  "en", True),
+                ("aura-asteria-en",   "Asteria",               "en", False),
+                ("aura-luna-en",      "Luna",                  "en", False),
+                ("aura-stella-en",    "Stella",                "en", False),
+                ("aura-orion-en",     "Orion",                 "en", False),
+                ("aura-arcas-en",     "Arcas",                 "en", False),
+            ],
+        ),
+        (
+            "google_tts",
+            [
+                ("en-US-Neural2-C", "Neural2-C (US Female)", "en", True),
+                ("en-US-Neural2-A", "Neural2-A (US Male)",   "en", False),
+                ("en-US-Studio-O",  "Studio O (US Female)",  "en", False),
+                ("en-US-Studio-M",  "Studio M (US Male)",    "en", False),
+                ("en-GB-Neural2-A", "Neural2-A (UK Female)", "en-GB", False),
+                ("en-GB-Neural2-B", "Neural2-B (UK Male)",   "en-GB", False),
+            ],
+        ),
+        (
+            "lmnt",
+            [
+                ("lily",   "Lily",   "en", True),
+                ("daniel", "Daniel", "en", False),
+                ("zoe",    "Zoe",    "en", False),
+                ("otto",   "Otto",   "en", False),
+            ],
+        ),
+        (
+            "playht",
+            [
+                ("s3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json",
+                 "Celeste", "en", True),
+                ("s3://peregrine-voices/mel locale=en-US gender=female/manifest.json",
+                 "Mel", "en", False),
+                ("s3://peregrine-voices/oliver/manifest.json",
+                 "Oliver", "en", False),
+            ],
+        ),
+    ]
+
+    voice_count = 0
+    for provider_slug, voice_defs in _CLOUD_TTS_VOICES:
+        cloud_provider = (
+            await session.execute(
+                select(Provider).where(
+                    Provider.kind == ProviderKind.TTS, Provider.slug == provider_slug
+                )
+            )
+        ).scalar_one_or_none()
+        if cloud_provider is None:
+            continue
+        for voice_id, name, language, is_default in voice_defs:
+            exists = (
+                await session.execute(
+                    select(Voice).where(
+                        Voice.provider_id == cloud_provider.id,
+                        Voice.voice_id == voice_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                session.add(
+                    Voice(
+                        provider_id=cloud_provider.id,
+                        voice_id=voice_id,
+                        name=name,
+                        language=language,
+                        is_default=is_default,
+                    )
+                )
+                voice_count += 1
+
+    if voice_count:
+        await session.flush()
+
     logger.info("seeded_provider_catalog", extra={"provider_count": len(definitions)})
 
 
