@@ -18,7 +18,7 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import (
@@ -272,6 +272,16 @@ async def get_tenant_scope(
                 "Platform administrators must use the platform endpoints."
             ),
         ) from exc
+
+    # Set the PostgreSQL RLS context GUC for this transaction (spec 7, 3b.1).
+    # `set_config(name, value, is_local=true)` is transaction-scoped: it
+    # resets when the transaction ends, so one request cannot bleed into
+    # another.  PostgreSQL's `tenant_isolation` policy on every tenant-owned
+    # table reads this GUC and excludes rows that do not match.
+    await session.execute(
+        text("SELECT set_config('app.tenant_id', :tid, true)"),
+        {"tid": str(tenant_id)},
+    )
 
     return TenantScope(tenant_id=tenant_id, session=session, principal=principal)
 

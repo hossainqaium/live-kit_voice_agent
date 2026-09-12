@@ -1040,13 +1040,15 @@ misread as a fault:
 | Routing rules evaluated at call setup | **Working — Plan 4b.3 complete (2026-09-12).** `worker/routing.py` evaluates all ACTIVE rules in priority/specificity order. Business hours (including holiday overrides) are checked in the schedule's own timezone. The closed-action and fallback-agent chains are traversed. A DID with no routing rules falls back to its direct `inbound_agent_id` for backward compatibility. |
 | Silence timeout (`silence_timeout_seconds`) | **Working — Plan 2b.1 complete (2026-09-12).** Forwarded to `AgentSession(user_away_timeout=...)`. |
 | Max call duration (`max_call_duration_seconds`) | **Working — Plan 2b.2 complete (2026-09-12).** `_max_duration_watchdog` task races against the hangup; fires `ctx.delete_room()` and records `HangupReason.MAX_DURATION`. |
-| Recording (`recording_enabled`) | **Partial — Plan 2b.3 (2026-09-12).** LiveKit room-composite egress to S3/MinIO starts before the greeting and stops in the finally block. DB row (`call_recordings`) not yet written — tracked as 2b.3b. |
+| Recording (`recording_enabled`) | **Working — Plan 2b.3 + 2b.3b complete (2026-09-12).** LiveKit room-composite egress to S3/MinIO starts before the greeting and stops in the finally block. `write_recording_row()` INSERTs into `call_recordings` (bucket, object_key, egress_id, started_at, ended_at, duration_seconds) and sets `calls.recording_id`. Non-fatal on both start and DB write. |
 | Interruption policy (`interruption_enabled`, `interruption_min_words`) | **Working — Plan 2b.4 complete (2026-09-12).** Forwarded to `AgentSession(allow_interruptions=..., min_interruption_words=...)`. |
 | Daily call limit (`max_daily_calls`) | **Working — Plan 1b.1 complete (2026-09-12).** Checked before accepting each call; counts today's calls in the tenant's IANA timezone. |
 | Monthly minutes limit (`max_monthly_minutes`) | **Working — Plan 1b.1 complete (2026-09-12).** Checked before accepting; sums completed + in-progress call seconds for the billing month. Usage rollup written to the `usage` table at call end. |
 | Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
 | Provider timeout, retry, backoff, circuit breaker | **Working — Plan 4b.10 complete (2026-09-12).** Per-stage `httpx.Timeout` (STT/TTS read=30s, LLM read=120s); per-provider circuit breaker (5-failure threshold, 60s recovery); `FallbackAdapter` latency trip-wire (`attempt_timeout` = 12s STT, 10s LLM/TTS); `async_retry()` with jittered exponential backoff for non-realtime callers. |
 | ElevenLabs TTS adapter | **Working — Plan 4b.6 complete (2026-09-12).** `worker/providers/tts/elevenlabs.py` — slug `elevenlabs`, registered in the registry. Streaming synthesis via WebSocket; `inactivity_timeout=30` prevents stuck connections. |
+| PostgreSQL Row Level Security (second isolation layer) | **Working — Plan 3b.1 complete (2026-09-12).** All 27 `TENANT_OWNED_TABLES` have `ENABLE/FORCE ROW LEVEL SECURITY` + a `tenant_isolation` policy. GUC `app.tenant_id` set transaction-locally in `get_tenant_scope`; platform routes bypass by leaving it unset. Migration: `20260912_1200_row_level_security.py`. 18 new tests. |
+| Post-call conversation summary | **Working — Plan 2b.5 complete (2026-09-12).** `worker/summariser.py` generates a 3-5 sentence summary from transcript segments after the call ends. Stored in `call_transcripts.summary` + `full_text`. Skips calls with fewer than 2 turns; uses tenant's `summary_template` when set (also what Phase 6 warm-transfer whisper reads). 25 new tests. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1976,8 +1978,13 @@ AWS Secrets Manager, Google Secret Manager, or Azure Key Vault**.
 
 ### Tenant isolation
 
-Enforced server-side. A tenant ID from the browser is never trusted; tenant identity always
-comes from the authenticated session/token.
+Enforced at **two independent layers** (spec §7, 3b.1):
+
+1. **Application layer — `TenantRepository`:** every query adds `WHERE tenant_id = :tid`; cross-tenant rows are 404, not 403. A tenant ID from the browser is never trusted; identity always comes from the authenticated JWT.
+
+2. **Database layer — PostgreSQL Row Level Security:** all 27 `TENANT_OWNED_TABLES` have `ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` enabled. A `tenant_isolation` policy allows a row only when `app.tenant_id` GUC matches the row's `tenant_id`, or when the GUC is absent (platform/admin routes). The GUC is set transaction-locally in `get_tenant_scope` via `SELECT set_config('app.tenant_id', :tid, true)` so a forgotten `WHERE` clause in a future endpoint still cannot leak cross-tenant data.
+
+Migration: `alembic/versions/20260912_1200_row_level_security.py`.
 
 ### Import / export
 

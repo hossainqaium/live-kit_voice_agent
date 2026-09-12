@@ -25,9 +25,19 @@ Add tests alongside the code — not as a separate task later:
 - Tests must pass before the task is reported complete (`make test-unit` or equivalent).
 - A feature the plan marks as done must have at least one test asserting the thing it does — a form that writes a row no test reads is the pattern we are explicitly avoiding.
 
+## 3. Commit and Push
+
+After docs and tests pass, commit **and push** every task:
+
+- Stage all changed and new files for the task.
+- Write a commit message: one-line subject (`feat:`, `fix:`, `test:`, `docs:`, `chore:` prefix), then a blank line, then a short bullet list of the key files changed.
+- `git push origin HEAD` — push immediately; do not accumulate unpushed commits across tasks.
+- If push requires a PR (protected branch), create one with `gh pr create`.
+
 ## Checklist (run mentally before saying "done")
 
 - [ ] Plan doc updated — item struck through with date
 - [ ] README feature status updated
 - [ ] New tests written and passing
 - [ ] No linter errors on modified files (ReadLints)
+- [ ] Committed and pushed to origin

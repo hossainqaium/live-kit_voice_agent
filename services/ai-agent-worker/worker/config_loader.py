@@ -409,6 +409,42 @@ _USAGE_UPSERT_SQL = text(
 )
 
 
+# Recording row — written once after the egress stops (spec 39, 2b.3b).
+# ON CONFLICT DO NOTHING guards against a double-write if the finally block
+# runs twice during abnormal shutdown.
+_RECORDING_INSERT_SQL = text(
+    """
+    INSERT INTO call_recordings (
+        id, tenant_id, call_id,
+        bucket, object_key, content_type,
+        livekit_egress_id,
+        started_at, ended_at, duration_seconds,
+        created_at, updated_at
+    )
+    VALUES (
+        :id, :tenant_id, :call_id,
+        :bucket, :object_key, :content_type,
+        :livekit_egress_id,
+        :started_at, :ended_at, :duration_seconds,
+        :now, :now
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id
+    """
+)
+
+# Back-pointer on the calls row so the console can surface the recording
+# without a separate query.  UPDATE is a no-op when recording was skipped.
+_CALLS_SET_RECORDING_SQL = text(
+    """
+    UPDATE calls
+    SET    recording_id = :recording_id,
+           updated_at   = :now
+    WHERE  id = :call_row_id
+    """
+)
+
+
 class CallConfigLoader:
     """Resolves a call's configuration and records the call."""
 
@@ -950,6 +986,115 @@ async def update_usage(
             "answered": 1 if succeeded else 0,
             "failed": 0 if succeeded else 1,
             "duration_seconds": secs,
+            "now": datetime.now(UTC),
+        },
+    )
+
+
+async def write_recording_row(
+    session: AsyncSession,
+    *,
+    context: "CallContext",
+    egress_id: str,
+    bucket: str,
+    object_key: str,
+    started_at: datetime,
+    duration_seconds: int | None,
+) -> uuid.UUID:
+    """Insert a ``call_recordings`` row and set the back-pointer on ``calls``.
+
+    The caller is responsible for committing the session.  Both statements run
+    inside one transaction so the back-pointer is never set without a matching
+    recording row.
+
+    Args:
+        session:          Open async session (caller commits).
+        context:          Completed call's context.
+        egress_id:        LiveKit egress job ID, for chasing a missing file.
+        bucket:           S3/MinIO bucket the file landed in.
+        object_key:       Object key (path) within the bucket.
+        started_at:       When the egress was successfully started.
+        duration_seconds: Call duration; None when the call ended abnormally
+                          before a duration was measured.
+
+    Returns:
+        The UUID of the newly created ``call_recordings`` row.
+    """
+    recording_id = uuid.uuid4()
+    now = datetime.now(UTC)
+
+    result = await session.execute(
+        _RECORDING_INSERT_SQL,
+        {
+            "id": recording_id,
+            "tenant_id": context.tenant_id,
+            "call_id": context.call_row_id,
+            "bucket": bucket,
+            "object_key": object_key,
+            "content_type": "video/mp4",
+            "livekit_egress_id": egress_id,
+            "started_at": started_at,
+            "ended_at": now,
+            "duration_seconds": duration_seconds,
+            "now": now,
+        },
+    )
+
+    # RETURNING id is None on conflict (row already exists); skip back-pointer
+    # in that case to avoid overwriting a valid reference with a ghost UUID.
+    returned = result.fetchone()
+    if returned is not None:
+        await session.execute(
+            _CALLS_SET_RECORDING_SQL,
+            {
+                "recording_id": recording_id,
+                "call_row_id": context.call_row_id,
+                "now": now,
+            },
+        )
+
+    return recording_id
+
+
+# ---------------------------------------------------------------------------
+# Transcript summary (spec 34, 2b.5)
+# ---------------------------------------------------------------------------
+
+_WRITE_SUMMARY_SQL = text(
+    """
+    UPDATE call_transcripts
+    SET    summary    = :summary,
+           full_text  = :full_text,
+           updated_at = :now
+    WHERE  id        = :transcript_id
+      AND  tenant_id = :tenant_id
+    """
+)
+
+
+async def write_transcript_summary(
+    session: AsyncSession,
+    *,
+    transcript_row_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    summary: str | None,
+    full_text: str,
+) -> None:
+    """Persist the post-call summary and full dialogue text.
+
+    Both columns are written together so a reader can rely on full_text being
+    present whenever summary is.  If the LLM returned NO_SUMMARY the summary
+    column is set to NULL but full_text is still stored (useful for search).
+
+    The caller is responsible for committing the session.
+    """
+    await session.execute(
+        _WRITE_SUMMARY_SQL,
+        {
+            "transcript_id": transcript_row_id,
+            "tenant_id": tenant_id,
+            "summary": summary,
+            "full_text": full_text,
             "now": datetime.now(UTC),
         },
     )

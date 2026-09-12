@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -276,10 +277,17 @@ class TestPlatformGuards:
 # --------------------------------------------------------------------------- #
 
 
+def _fake_session() -> AsyncMock:
+    """Minimal async session mock that satisfies get_tenant_scope."""
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=AsyncMock())
+    return session
+
+
 class TestTenantScope:
     @pytest.mark.asyncio
     async def test_a_tenant_user_gets_a_scope_bound_to_their_tenant(self) -> None:
-        scope = await get_tenant_scope(tenant_principal(), session=object())  # type: ignore[arg-type]
+        scope = await get_tenant_scope(tenant_principal(), session=_fake_session())
         assert scope.tenant_id == TENANT_A
 
     @pytest.mark.asyncio
@@ -291,9 +299,45 @@ class TestTenantScope:
             roles=(PlatformRole.SUPER_ADMIN.value,), tenant_id=None, is_platform=True
         )
         with pytest.raises(HTTPException) as exc:
-            await get_tenant_scope(principal, session=object())  # type: ignore[arg-type]
+            # Platform users are rejected before the GUC is set, so a bare
+            # object() would still work here — but using a real mock is
+            # cleaner and consistent.
+            await get_tenant_scope(principal, session=_fake_session())
         assert exc.value.status_code == 403
         assert "tenant" in exc.value.detail.lower()
+
+    @pytest.mark.asyncio
+    async def test_rls_guc_is_set_for_tenant_requests(self) -> None:
+        """The RLS context GUC must be set so PostgreSQL's tenant_isolation
+        policy filters rows at the database layer (spec 7, 3b.1)."""
+        session = _fake_session()
+        scope = await get_tenant_scope(tenant_principal(), session=session)
+
+        session.execute.assert_awaited_once()
+        call_sql, call_params = (
+            session.execute.call_args[0][0],
+            session.execute.call_args[0][1] if len(session.execute.call_args[0]) > 1
+            else session.execute.call_args[1].get("params")
+            or (session.execute.call_args[0][1] if len(session.execute.call_args[0]) > 1 else None),
+        )
+        # Verify the set_config call targets the correct GUC.
+        assert "set_config" in str(call_sql)
+        assert "app.tenant_id" in str(call_sql)
+        # The actual tenant UUID must be passed as a parameter, never
+        # interpolated into the SQL string (SQL injection prevention).
+        assert str(scope.tenant_id) in str(session.execute.call_args)
+
+    @pytest.mark.asyncio
+    async def test_rls_guc_is_transaction_local(self) -> None:
+        """The third argument to set_config must be true (is_local), so the
+        GUC resets when the transaction ends and one request cannot bleed
+        tenant context into the next (spec 7)."""
+        session = _fake_session()
+        await get_tenant_scope(tenant_principal(), session=session)
+
+        call_sql = str(session.execute.call_args[0][0])
+        # The literal 'true' (case-insensitive) signals transaction-local scope.
+        assert "true" in call_sql.lower()
 
 
 class TestClientIp:

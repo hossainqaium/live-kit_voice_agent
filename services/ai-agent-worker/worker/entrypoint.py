@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,7 +38,10 @@ from worker.config_loader import (
     SipCallInfo,
     TenantLimitExceededError,
     update_usage,
+    write_recording_row,
+    write_transcript_summary,
 )
+from worker.summariser import generate_summary
 from worker.db import get_session_factory
 from worker.health import state as worker_state
 from worker.pipeline.observer import CallObserver
@@ -410,11 +414,28 @@ async def _wait_for_call_end(
     return HangupReason.CALLER_HANGUP
 
 
-async def _start_recording(ctx: JobContext, context: CallContext) -> str | None:
+@dataclass(frozen=True)
+class _RecordingInfo:
+    """Everything needed to write the ``call_recordings`` DB row later.
+
+    Captured at egress-start time so the finally block does not have to
+    reconstruct path components from settings a second time.
+    """
+
+    egress_id: str
+    bucket: str
+    object_key: str
+    started_at: datetime
+
+
+async def _start_recording(
+    ctx: JobContext, context: CallContext
+) -> _RecordingInfo | None:
     """Start a LiveKit room-composite egress to S3/MinIO (spec 39, 2b.3).
 
-    Non-fatal: a recording failure must never silence the caller. The egress ID
-    is logged so it can be retrieved from LiveKit's own records if needed.
+    Non-fatal: a recording failure must never silence the caller. Returns
+    a :class:`_RecordingInfo` on success so the caller can write the DB row
+    after the egress stops.
     """
     settings = get_settings()
     if not settings.s3_bucket_recordings:
@@ -427,18 +448,19 @@ async def _start_recording(ctx: JobContext, context: CallContext) -> str | None:
             S3Upload,
         )
 
+        bucket = settings.s3_bucket_recordings
+        object_key = f"calls/{context.tenant_id}/{context.call_id}.mp4"
         s3 = S3Upload(
             access_key=settings.s3_access_key_id.get_secret_value(),
             secret=settings.s3_secret_access_key.get_secret_value(),
-            bucket=settings.s3_bucket_recordings,
+            bucket=bucket,
             region=settings.s3_region,
             endpoint=settings.s3_endpoint_url or "",
             force_path_style=bool(settings.s3_endpoint_url),
         )
-        egress_path = f"calls/{context.tenant_id}/{context.call_id}.mp4"
         req = RoomCompositeEgressRequest(
             room_name=context.room_name,
-            file_outputs=[EncodedFileOutput(filepath=egress_path, s3=s3)],
+            file_outputs=[EncodedFileOutput(filepath=object_key, s3=s3)],
         )
         lk_url = (
             settings.livekit_url.replace("ws://", "http://").replace("wss://", "https://")
@@ -449,12 +471,17 @@ async def _start_recording(ctx: JobContext, context: CallContext) -> str | None:
             api_secret=settings.livekit_api_secret.get_secret_value(),
         ) as lk:
             info = await lk.egress.start_room_composite_egress(req)
-        egress_id: str = info.egress_id
+        started_at = datetime.now(UTC)
         logger.info(
             "recording_started",
-            extra={"egress_id": egress_id, "s3_path": egress_path},
+            extra={"egress_id": info.egress_id, "s3_path": object_key},
         )
-        return egress_id
+        return _RecordingInfo(
+            egress_id=info.egress_id,
+            bucket=bucket,
+            object_key=object_key,
+            started_at=started_at,
+        )
     except Exception:
         logger.exception("recording_start_failed_call_continues")
         return None
@@ -505,7 +532,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
     )
 
     with log_context(**context.log_fields()):
-        egress_id: str | None = None
+        recording_info: _RecordingInfo | None = None
         try:
             session = _build_session(context, ctx.proc.userdata["vad"])
 
@@ -539,7 +566,7 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
             # Start recording before any audio so the greeting is captured
             # (spec 39, 2b.3). Non-fatal: failure is logged, call continues.
             if context.call_policy.recording_enabled:
-                egress_id = await _start_recording(ctx, context)
+                recording_info = await _start_recording(ctx, context)
 
             if context.greeting:
                 # Spoken first so the caller is not met with silence while the
@@ -567,17 +594,67 @@ async def _run_call(ctx: JobContext, context: CallContext, factory) -> None:
         finally:
             # Stop recording before closing the observer so the egress
             # has a chance to flush its last segment.
-            if egress_id:
-                await _stop_recording(egress_id)
+            if recording_info:
+                await _stop_recording(recording_info.egress_id)
 
             # Flushed before the counters drop, so a transcript is complete
             # even when the call ended badly.
             await observer.aclose()
 
+            duration = tracker.duration_seconds or 0
+
+            # Generate and persist the post-call summary from the completed
+            # transcript segments (spec 34, 2b.5).  Runs after aclose() so
+            # all segments are in the DB before we read them.  Non-fatal: a
+            # summarisation failure must not suppress the recording or usage
+            # writes below.
+            if (
+                context.call_policy.transcription_enabled
+                and observer.transcript_row_id is not None
+            ):
+                try:
+                    summary_result = await generate_summary(
+                        context=context,
+                        transcript_row_id=observer.transcript_row_id,
+                        factory=factory,
+                    )
+                    if summary_result is not None:
+                        summary_text, full_text = summary_result
+                        async with factory() as sum_session:
+                            await write_transcript_summary(
+                                sum_session,
+                                transcript_row_id=observer.transcript_row_id,
+                                tenant_id=context.tenant_id,
+                                summary=summary_text,
+                                full_text=full_text,
+                            )
+                            await sum_session.commit()
+                except Exception:
+                    logger.exception("transcript_summary_failed")
+
+            # Write the call_recordings metadata row now that the egress has
+            # stopped and we know the final duration (spec 39, 2b.3b).
+            # Non-fatal: a DB failure here must never suppress the usage write.
+            if recording_info:
+                try:
+                    duration_secs = int(duration) if duration else None
+                    async with factory() as rec_session:
+                        await write_recording_row(
+                            rec_session,
+                            context=context,
+                            egress_id=recording_info.egress_id,
+                            bucket=recording_info.bucket,
+                            object_key=recording_info.object_key,
+                            started_at=recording_info.started_at,
+                            duration_seconds=duration_secs,
+                        )
+                        await rec_session.commit()
+                except Exception:
+                    logger.exception("recording_row_write_failed")
+
             # Upsert the daily usage row so the monthly-minutes limit check
             # stays accurate (spec 47, 61).  Non-fatal.
             try:
-                duration = tracker.duration_seconds or 0
                 succeeded = tracker.state == CallState.COMPLETED
                 async with factory() as usage_session:
                     await update_usage(

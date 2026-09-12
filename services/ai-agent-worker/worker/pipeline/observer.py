@@ -186,6 +186,25 @@ class CallObserver:
         self._segments_written = 0
 
     # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+
+    @property
+    def transcript_row_id(self) -> uuid.UUID | None:
+        """UUID of the ``call_transcripts`` header row.
+
+        ``None`` when transcription was disabled at construction time or when
+        ``start()`` has not been called.  Used by the post-call summariser to
+        read completed segments.
+        """
+        return self._transcript_row_id
+
+    @property
+    def segments_written(self) -> int:
+        """Total number of transcript segments flushed to the database."""
+        return self._segments_written
+
+    # ------------------------------------------------------------------ #
     # Lifecycle
     # ------------------------------------------------------------------ #
 
