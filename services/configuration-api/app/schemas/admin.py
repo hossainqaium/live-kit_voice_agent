@@ -65,6 +65,15 @@ class TenantSettingsResponse(BaseModel):
     notes: str | None
 
 
+class TenantImportSummary(BaseModel):
+    """What an import created, updated, skipped, or refused (spec 65)."""
+
+    created: list[str] = Field(default_factory=list)
+    updated: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class TenantSettingsUpdate(BaseModel):
     """What a tenant administrator may change about their own tenant.
 

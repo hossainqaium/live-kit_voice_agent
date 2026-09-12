@@ -9,7 +9,7 @@
  * form does not offer fields that would fail.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Shell } from "@/components/Shell";
 import {
@@ -49,6 +49,8 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false);
 
   const canWrite = can("users.manage");
+  const canImport = can("agents.write");
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -94,6 +96,49 @@ export default function SettingsPage() {
       toasts.ok("settings saved");
     } catch (err) {
       toasts.err(err instanceof ApiError ? err.message : "could not save settings");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onExport() {
+    setBusy(true);
+    try {
+      const bundle = await api.settings.export();
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${settings?.slug ?? "tenant"}-config.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      toasts.ok("export downloaded — secrets are not included");
+    } catch (err) {
+      toasts.err(err instanceof ApiError ? err.message : "could not export");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onImportFile(file: File) {
+    let bundle: unknown;
+    try {
+      bundle = JSON.parse(await file.text());
+    } catch {
+      toasts.err("that file is not valid JSON");
+      return;
+    }
+    setBusy(true);
+    try {
+      const summary = await api.settings.importBundle(bundle);
+      const created = summary.created.length;
+      const updated = summary.updated.length;
+      const skipped = summary.skipped.length;
+      toasts.ok(`imported — ${created} created, ${updated} updated, ${skipped} skipped`);
+    } catch (err) {
+      toasts.err(err instanceof ApiError ? err.message : "could not import");
     } finally {
       setBusy(false);
     }
@@ -197,6 +242,50 @@ export default function SettingsPage() {
               meaningless, so the API refuses those fields from this endpoint
               regardless of role.
             </p>
+          </div>
+
+          <div className="card">
+            <h2 style={{ margin: 0, fontSize: 15, marginBottom: 8 }}>
+              Configuration export
+            </h2>
+            <p className="subtle small">
+              Download agents, versions, tools, routing, knowledge-base
+              configuration and business rules. Provider keys, tool auth
+              secrets and SIP credentials are never written to the file.
+              Importing creates draft agent versions and never stores a
+              secret from the file — even if someone stuffed one in.
+            </p>
+            <div className="row" style={{ marginTop: 8 }}>
+              <Button variant="primary" busy={busy} type="button" onClick={() => void onExport()}>
+                Download export
+              </Button>
+              {canImport ? (
+                <>
+                  <input
+                    ref={fileInput}
+                    type="file"
+                    accept="application/json,.json"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) void onImportFile(file);
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    busy={busy}
+                    onClick={() => fileInput.current?.click()}
+                  >
+                    Import file
+                  </Button>
+                </>
+              ) : (
+                <Notice tone="info">
+                  Your role can download a bundle but not import one.
+                </Notice>
+              )}
+            </div>
           </div>
 
           <Notice tone="info">

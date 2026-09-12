@@ -47,6 +47,12 @@ class CatalogProvider(BaseModel):
     #: of an internal endpoint is platform infrastructure (spec 13).
     self_hosted: bool = False
 
+    #: The provider's canonical API base URL, exposed only for cloud providers
+    #: so the AI Setup form can pre-populate the endpoint field on selection.
+    #: Null for self-hosted providers (the URL is internal platform infra and
+    #: the tenant supplies their own) and for providers with no fixed endpoint.
+    default_base_url: str | None = None
+
 
 class CatalogModel(BaseModel):
     id: uuid.UUID

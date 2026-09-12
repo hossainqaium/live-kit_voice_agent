@@ -152,7 +152,7 @@ class ProviderKind(StrEnum):
 
 Embedding models are used by the RAG retrieval pipeline (Phase 6 — `worker/rag/`). They are distinct from LLMs: the same credential may cover both (e.g. an OpenAI key works for both `gpt-4o` and `text-embedding-3-small`), but the agent builder selects an embedding model separately from the language model.
 
-### 4.2 Seeded providers — full catalog (29 rows)
+### 4.2 Seeded providers — full catalog (33 rows)
 
 The development seed registers the following providers. All are seeded by `python -m app.cli seed-platform` (or `make migrate && docker compose exec configuration-api python -m app.cli seed-platform` after applying migrations).
 
@@ -166,12 +166,12 @@ The development seed registers the following providers. All are seeded by `pytho
 | `anthropic` | `anthropic` | Anthropic | true |
 | `groq` | `openai_compatible` | Groq | true |
 | `mistral` | `openai_compatible` | Mistral AI | true |
-| `google_gemini` | `google_gemini` | Google Gemini | true |
+| `google_gemini` | `openai_compatible` | Google Gemini | true |
 | `together` | `openai_compatible` | Together AI | true |
 | `deepseek` | `openai_compatible` | DeepSeek | true |
 | `ollama` | `openai_compatible` | Ollama (local) | false |
 
-**STT (7)**
+**STT (9)**
 
 | slug | adapter | display_name | `requires_credential` |
 |---|---|---|---|
@@ -182,8 +182,10 @@ The development seed registers the following providers. All are seeded by `pytho
 | `google_stt` | `google_stt` | Google Speech-to-Text | true |
 | `speechmatics` | `speechmatics` | Speechmatics | true |
 | `gladia` | `gladia` | Gladia | true |
+| `elevenlabs_stt` | `elevenlabs` | ElevenLabs STT | true |
+| `azure_stt` | `azure` | Azure Speech-to-Text | true |
 
-**TTS (7)**
+**TTS (9)**
 
 | slug | adapter | display_name | `requires_credential` |
 |---|---|---|---|
@@ -194,6 +196,8 @@ The development seed registers the following providers. All are seeded by `pytho
 | `playht` | `playht` | PlayHT | true |
 | `lmnt` | `lmnt` | LMNT | true |
 | `deepgram_tts` | `deepgram` | Deepgram TTS | true |
+| `google_tts` | `google` | Google Cloud TTS | true |
+| `azure_tts` | `azure` | Azure TTS | true |
 
 **Embedding (5)**
 

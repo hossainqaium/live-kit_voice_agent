@@ -470,9 +470,17 @@ function AddProviderDialog({
 
   const firstProvider = cloudProviders[0] ?? selfHostedProviders[0] ?? null;
 
+  function initialBaseUrl(p: CatalogProvider | null): string {
+    if (!p) return "";
+    const m = getProviderMeta(p.slug);
+    if (p.default_base_url) return p.default_base_url;
+    if (m.endpointPlaceholder) return m.endpointPlaceholder;
+    return "";
+  }
+
   const [selectedProvider, setSelectedProvider] = useState<CatalogProvider | null>(firstProvider);
   const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState(() => initialBaseUrl(firstProvider));
   const [label, setLabel] = useState("primary");
   const [testResult, setTestResult] = useState<CredentialVerifyResult | null>(null);
   const [testing, setTesting] = useState(false);
@@ -529,10 +537,18 @@ function AddProviderDialog({
     const p = allProviders.find((pr) => pr.id === id) ?? null;
     setSelectedProvider(p);
     setApiKey("");
-    // Pre-fill endpoint for self-hosted providers where we know a typical URL.
     if (p) {
       const m = getProviderMeta(p.slug);
-      setBaseUrl(p.self_hosted && m.endpointPlaceholder ? m.endpointPlaceholder : "");
+      // Cloud providers: use the canonical endpoint the backend already knows.
+      // Self-hosted providers: use the typical URL from PROVIDER_META.
+      // Everything else: blank (user must supply their own).
+      if (p.default_base_url) {
+        setBaseUrl(p.default_base_url);
+      } else if (m.endpointPlaceholder) {
+        setBaseUrl(m.endpointPlaceholder);
+      } else {
+        setBaseUrl("");
+      }
     }
     setTestResult(null);
   }
@@ -633,13 +649,13 @@ function AddProviderDialog({
                 </Notice>
               )}
 
-              {/* For self-hosted providers the endpoint field is required; for cloud it is optional override. */}
+              {/* Endpoint field: required for self-hosted, pre-filled for cloud, editable always. */}
               <Field
-                label={selectedProvider.self_hosted ? "Endpoint URL" : "Endpoint override"}
+                label={selectedProvider.self_hosted ? "Endpoint URL" : "Endpoint URL"}
                 hint={
                   selectedProvider.self_hosted
                     ? "Base URL of your self-hosted server."
-                    : "Optional. Leave blank to use the provider's default endpoint."
+                    : "The provider's API base URL. Pre-filled with the standard endpoint — change only if you use a custom/regional deployment."
                 }
               >
                 {(id) => (
@@ -647,7 +663,11 @@ function AddProviderDialog({
                     id={id}
                     value={baseUrl}
                     onChange={(e) => { setBaseUrl(e.target.value); setTestResult(null); }}
-                    placeholder={meta?.endpointPlaceholder ?? "https://api.example.com/v1"}
+                    placeholder={
+                      selectedProvider.default_base_url
+                        ?? meta?.endpointPlaceholder
+                        ?? "https://api.example.com/v1"
+                    }
                   />
                 )}
               </Field>

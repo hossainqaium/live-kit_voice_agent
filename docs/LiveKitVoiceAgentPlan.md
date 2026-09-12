@@ -646,16 +646,16 @@ and survive provider failure.
 | ~~6.10a~~ | ~~Transfer summary content — seven fields, spoken template, optional structured PBX delivery~~ **Done (2026-09-13):** JSON briefing (`customer`, `reason`, `summary`, `actions_taken`, `order_information`, `sentiment`, `required_next_action`) rendered with `{{field}}` template. SIP `X-Transfer-*` headers + participant metadata are best-effort (TS-5). Generation is a background task so the announcement is not delayed (TS-3); failure uses the fallback whisper (TS-4). Builder fields on `/agents`. | §36, CR-1 |
 | ~~6.10b~~ | ~~`transfer_status` lifecycle + fallbacks + timings~~ **Done (2026-09-13):** `TRANSFER_STATUS_TRANSITIONS` enforced on write. Timings and `transfer_summary` JSON persist on `calls`. No-answer / busy / reject / fail take the Phase 4 chain (`transfer_fallback_taken`); a unused queue/voicemail destination is retried while still `DIALING_AGENT`. Caller always hears a spoken line — never silence. | §38, §41, CR-1 |
 | ~~6.10c~~ | ~~AI leaves on bridge; human-to-human continues with recording and `HUMAN_AGENT` speech~~ **Done (2026-09-13):** On bridge the session is closed, state becomes `HUMAN_AGENT`, room-composite egress stays up, and later transcription from `human-agent-*` is stored as `SpeakerType.HUMAN_AGENT`. Whisper segments are `is_private_to_agent`. `_wait_for_disconnect` ignores the human leaving before bridge so fallback can run. | §39, §40, CR-1 |
-| 6.11 | Remaining provider adapters — all STT, LLM, TTS providers in §25 | §25 |
-| 6.12 | Provider resilience — timeout, retry, exponential backoff, circuit breaker, fallback provider | §55 |
-| 6.13 | Tenant configuration import/export, with secrets never exported in plaintext | §65 |
+| ~~6.11~~ | ~~Remaining provider adapters — all STT, LLM, TTS providers in §25~~ **Done (2026-09-13):** Registry now drives Deepgram / ElevenLabs / Google / Azure STT, Anthropic LLM, and Cartesia / Deepgram / Google / Azure TTS. OpenAI Whisper, Gemini, and local/self-hosted stay on `openai_compatible`. Seed added `elevenlabs_stt`, `azure_stt`, `google_tts`, `azure_tts` (catalog 33). Plugins are lazy-imported. Files: `worker/providers/stt/{deepgram,elevenlabs,google,azure}.py`, `worker/providers/llm/anthropic.py`, `worker/providers/tts/{cartesia,deepgram,google,azure}.py`, `worker/providers/_livekit.py`, `worker/providers/registry.py`, `app/services/seed.py`. Tests: `tests/test_phase6_adapters.py`. | §25 |
+| ~~6.12~~ | ~~Provider resilience — timeout, retry, exponential backoff, circuit breaker, fallback provider~~ **Done (2026-09-12 as Plan 4b.10; documented 2026-09-13):** `worker/resilience/` already has per-stage timeouts, circuit breaker, `async_retry()`, and LiveKit `FallbackAdapter`. Phase 6 deliverable is the failover matrix in README §9c.8. Tests: `tests/test_resilience.py`, `tests/test_provider_chain.py`. | §55 |
+| ~~6.13~~ | ~~Tenant configuration import/export, with secrets never exported in plaintext~~ **Done (2026-09-13):** `GET /api/v1/settings/export` (`agents.read`) and `POST /api/v1/settings/import` (`agents.write`). Bundle format `livekit-voice-agent.tenant.v1` covers agents, versions (imported as drafts), tools, routing, business hours, knowledge-base config, transfer destinations. Secrets are stripped on the way out and refused on the way in. Credentials export as metadata only. Settings UI download + file picker. Files: `app/services/tenant_impex.py`, `app/api/v1/admin.py`, `app/settings/page.tsx`. Tests: `tests/test_phase6_impex.py`. | §65 |
 
 ### Deliverables
 
 - Troubleshooting entries in §12.
 - Tool execution design doc: sandboxing, timeouts, retry semantics, variable resolution.
 - RAG design doc: chunking, embedding model, retrieval strategy, per-tenant partitioning.
-- Provider failover matrix — which provider falls back to which, per kind.
+- ~~Provider failover matrix — which provider falls back to which, per kind.~~ **Done (2026-09-13):** README §9c.8. Tiers are per agent version (primary → fallback → local), not a hardcoded vendor chain.
 
 ### Exit criteria
 
@@ -1807,6 +1807,12 @@ Because the catalog seeder runs separately and is idempotent, the new popular pr
 **Symptom:** On a published agent that already has tools (Service Agent, Development Agent), changing the language model leaves **Publish** disabled. **Save as new draft** returns Internal Server Error.
 **Cause (defect):** Two stacked bugs. (1) `_replace_tool_grants` deleted every `agent_tools` row and inserted the same `(agent_version_id, tool_id)` pairs in one flush, tripping `uq_agent_tools_version_tool`. That is the save the builder always does: `_editable_draft` copies grants onto vN+1, then the form sends the same `tool_ids` back. (2) Publish was gated on the *saved* validation report. A live version with no draft is not publishable, so a local model change never enabled the button; Publish also did not persist first, so even a forced click would 409 (`there is no draft to publish`).
 **Fix (defect):** Sync grants — delete only removed IDs, insert only new ones, leave existing rows. The builder tracks `dirty`; any field change enables Publish; Publish calls `saveDraft` then `publish`. Only `severity === "error"` issues block the button after a clean load.
+
+#### Import refused, or a key appeared in an export
+
+**Symptom:** Settings → Import file returns 400 "bundle contains a plaintext secret", or an export JSON contains an API key / tool auth secret.
+**Cause:** The importer refuses any string on a secret-bearing key (`api_key`, `password`, `token`, `secret`, `ciphertext`, …) so a hand-edited file cannot sneak a credential in. A real export never writes those strings — only `configured` / `auth_configured` flags and a `key_hint`.
+**Fix:** Re-export from Settings. Paste keys in **AI Setup** and tool auth on **Tools** after import. Agent versions land as drafts; Publish after credentials exist. Missing catalog slugs are skipped, not invented. Re-run `seed-platform` if Google/Azure/ElevenLabs STT rows are absent.
 
 #### Human decline ended the caller instead of running fallback
 

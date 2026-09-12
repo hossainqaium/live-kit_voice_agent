@@ -640,7 +640,7 @@ make migrate
 ```
 
 ```bash
-# Seed the platform catalog — 29 AI providers across LLM / STT / TTS / Embedding
+# Seed the platform catalog — 33 AI providers across LLM / STT / TTS / Embedding
 docker compose -f deploy/docker-compose.yml --env-file .env exec -T configuration-api python -m app.cli seed-platform
 ```
 
@@ -1052,7 +1052,7 @@ misread as a fault:
 | Ticketing | **Working — Plan 6.0 + 6.1 complete (2026-09-12).** Console **Tickets**. Service Agent files rows via `create_ticket()` with `source=AGENT`. Seed: **Service Agent**, `TCK-0001`, and the builtin tool library. |
 | Configuration through the UI instead of the CLI | Yes — both consoles cover every section (§9d.1) |
 | Selecting STT, LLM, TTS and voice per agent in the UI | Working — with a fallback and a local tier (§9c.3, §9c.7) |
-| Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 29 providers across LLM/STT/TTS/Embedding. See [`AIProviders.md`](./AIProviders.md). |
+| Entering a provider API key and testing it in the UI | **Working — AI Setup (Plan 4c complete).** Dedicated `/ai-setup` page with four tabs; test-before-save enforced; 33 providers across LLM/STT/TTS/Embedding after Plan 6.11. See [`AIProviders.md`](./AIProviders.md). |
 | Routing rules evaluated at call setup | **Working — Plan 4b.3 complete (2026-09-12).** `worker/routing.py` evaluates all ACTIVE rules in priority/specificity order. Business hours (including holiday overrides) are checked in the schedule's own timezone. The closed-action and fallback-agent chains are traversed. A DID with no routing rules falls back to its direct `inbound_agent_id` for backward compatibility. |
 | Silence timeout (`silence_timeout_seconds`) | **Working — Plan 2b.1 complete (2026-09-12).** Forwarded to `AgentSession(user_away_timeout=...)`. |
 | Max call duration (`max_call_duration_seconds`) | **Working — Plan 2b.2 complete (2026-09-12).** `_max_duration_watchdog` task races against the hangup; fires `ctx.delete_room()` and records `HangupReason.MAX_DURATION`. |
@@ -1060,9 +1060,11 @@ misread as a fault:
 | Interruption policy (`interruption_enabled`, `interruption_min_words`) | **Working — Plan 2b.4 complete (2026-09-12).** Forwarded to `AgentSession(allow_interruptions=..., min_interruption_words=...)`. |
 | Daily call limit (`max_daily_calls`) | **Working — Plan 1b.1 complete (2026-09-12).** Checked before accepting each call; counts today's calls in the tenant's IANA timezone. |
 | Monthly minutes limit (`max_monthly_minutes`) | **Working — Plan 1b.1 complete (2026-09-12).** Checked before accepting; sums completed + in-progress call seconds for the billing month. Usage rollup written to the `usage` table at call end. |
-| Provider fallback when one errors | Working — via LiveKit's `FallbackAdapter` |
-| Provider timeout, retry, backoff, circuit breaker | **Working — Plan 4b.10 complete (2026-09-12).** Per-stage `httpx.Timeout` (STT/TTS read=30s, LLM read=120s); per-provider circuit breaker (5-failure threshold, 60s recovery); `FallbackAdapter` latency trip-wire (`attempt_timeout` = 12s STT, 10s LLM/TTS); `async_retry()` with jittered exponential backoff for non-realtime callers. |
+| Provider fallback when one errors | **Working — Plan 4b.10 + 6.12.** LiveKit `FallbackAdapter` over the version's primary → fallback → local chain. Matrix: §9c.8. |
+| Provider timeout, retry, backoff, circuit breaker | **Working — Plan 4b.10 complete (2026-09-12); Phase 6.12 closed 2026-09-13.** Per-stage `httpx.Timeout` (STT/TTS read=30s, LLM read=120s); per-provider circuit breaker (5-failure threshold, 60s recovery); `FallbackAdapter` latency trip-wire (`attempt_timeout` = 12s STT, 10s LLM/TTS); `async_retry()` with jittered exponential backoff for non-realtime callers. |
 | ElevenLabs TTS adapter | **Working — Plan 4b.6 complete (2026-09-12).** `worker/providers/tts/elevenlabs.py` — slug `elevenlabs`, registered in the registry. Streaming synthesis via WebSocket; `inactivity_timeout=30` prevents stuck connections. |
+| Remaining §25 STT / LLM / TTS adapters | **Working — Plan 6.11 complete (2026-09-13).** Deepgram, ElevenLabs, Google, Azure STT; Anthropic LLM; Cartesia, Deepgram, Google, Azure TTS. Whisper, Gemini, and local/self-hosted use `openai_compatible`. Rebuild `ai-agent-worker` after pull so Google/Azure plugins are in the image. |
+| Tenant configuration import/export | **Working — Plan 6.13 complete (2026-09-13).** Settings → Download export / Import file. Bundle has no plaintext secrets; import refuses stuffed keys and creates draft agent versions. |
 | PostgreSQL Row Level Security (second isolation layer) | **Working — Plan 3b.1 complete (2026-09-12).** All tenant-owned tables have `ENABLE/FORCE ROW LEVEL SECURITY` + a `tenant_isolation` policy (27 originally; `tickets` added in Plan 6.0). GUC `app.tenant_id` set transaction-locally in `get_tenant_scope`; platform routes bypass by leaving it unset. |
 | Post-call conversation summary | **Working — Plan 2b.5 complete (2026-09-12).** `worker/summariser.py` generates a 3-5 sentence summary from transcript segments after the call ends. Stored in `call_transcripts.summary` + `full_text`. Skips calls with fewer than 2 turns. The agent's `transfer_summary_template` is the spoken whisper string (`{{customer}}` …), not this prompt. |
 | Audit trail coverage — every mutating endpoint | **Complete — Plan 3b.5 done (2026-09-12).** Fixed gap: `POST /catalog/credentials/{id}/verify` now writes a `credential.verified` audit row. `tests/test_audit_coverage.py` statically walks all `POST/PUT/PATCH/DELETE` routes and asserts `audit.record` is present (direct or via private helper); two intentional exemptions documented. New endpoints without audit fail the test immediately. |
@@ -1134,7 +1136,7 @@ fallback tier (§9c.7) had nothing distinct to point at. `adapter` is nullable
 and falls back to the slug, so a row registered before the split resolves
 exactly as it always did.
 
-The development seed now registers 29 providers across all four kinds (run `python -m app.cli seed-platform` to populate them):
+The development seed now registers 33 providers across all four kinds (run `python -m app.cli seed-platform` to populate them):
 
 | Kind | Slug | Display name | Key required |
 |---|---|---|---|
@@ -1155,6 +1157,8 @@ The development seed now registers 29 providers across all four kinds (run `pyth
 | STT | `google_stt` | Google STT | ✓ |
 | STT | `speechmatics` | Speechmatics | ✓ |
 | STT | `gladia` | Gladia | ✓ |
+| STT | `elevenlabs_stt` | ElevenLabs STT | ✓ |
+| STT | `azure_stt` | Azure Speech-to-Text | ✓ |
 | **TTS** | `openai_compatible` | Self-Hosted TTS (Kokoro) | — |
 | TTS | `openai_hosted` | OpenAI TTS | ✓ |
 | TTS | `elevenlabs` | ElevenLabs | ✓ |
@@ -1162,6 +1166,8 @@ The development seed now registers 29 providers across all four kinds (run `pyth
 | TTS | `playht` | PlayHT | ✓ |
 | TTS | `lmnt` | LMNT | ✓ |
 | TTS | `deepgram_tts` | Deepgram TTS | ✓ |
+| TTS | `google_tts` | Google Cloud TTS | ✓ |
+| TTS | `azure_tts` | Azure TTS | ✓ |
 | **Embedding** | `openai_compatible` | Self-Hosted Embedding | — |
 | Embedding | `openai_hosted` | OpenAI Embeddings | ✓ |
 | Embedding | `cohere` | Cohere | ✓ |
@@ -1354,6 +1360,32 @@ breaker are implemented in `worker/resilience/`. A provider that *errors* fails
 over via `FallbackAdapter`; one that is *slow* fails over via `attempt_timeout`;
 one that is repeatedly failing is blocked instantly by the circuit breaker.
 
+### 9c.8 Provider failover matrix
+
+There is no hardcoded "if ElevenLabs fails, use Cartesia" table. Failover is
+the chain on the **agent version**: primary → fallback → local (STT/TTS) or
+primary → fallback (LLM). The worker builds LiveKit's `FallbackAdapter` from
+that chain. Typical pairings that survive a vendor outage:
+
+| Kind | Primary (typical) | Fallback (typical) | Local last resort |
+|---|---|---|---|
+| STT | Hosted Whisper (`openai_hosted`) or Deepgram | The other hosted vendor | Self-hosted Whisper (`openai_compatible` / speaches) |
+| LLM | OpenAI, Anthropic, or Gemini | A second cloud vendor on a different key | Not a tenant toggle — deploy Ollama / vLLM as `openai_compatible` if you need it |
+| TTS | ElevenLabs, Cartesia, or OpenAI | Another hosted TTS on its own key | Self-hosted Kokoro (`openai_compatible`) |
+
+Resilience around that chain (Plan 4b.10 / 6.12):
+
+| Layer | What trips it | What happens |
+|---|---|---|
+| Per-request timeout | STT/TTS read 30 s, LLM read 120 s | The attempt fails; the breaker records it |
+| `FallbackAdapter` `attempt_timeout` | 12 s STT, 10 s LLM/TTS of silence | The next tier is tried without waiting for a hang |
+| Circuit breaker | 5 failures, 60 s recovery | Later calls skip the open provider immediately |
+| `async_retry()` | Transient HTTP errors for non-realtime callers (verify, ingest) | Jittered exponential backoff, then give up |
+
+A tier without its own credential is omitted from the chain — it is not a
+fallback. PlayHT, LMNT, AssemblyAI, Speechmatics and Gladia can store keys
+in AI Setup; they have no worker adapter yet and cannot be published.
+
 ---
 
 ---
@@ -1402,7 +1434,7 @@ navigation and a platform account has no tenant to act in.
 | Analytics | `/analytics` | Volume and outcomes over a window (spec 57) |
 | Users | `/users` | Tenant users and roles (spec 8). **Change your own password** is in the top bar (every role), not this admin page. |
 | Usage | `/usage` | Standing against each limit, and which are enforced (spec 47) |
-| Settings | `/settings` | Name, timezone, default language. Cluster infrastructure is platform-only. |
+| Settings | `/settings` | Name, timezone, default language, plus configuration **export / import** (Plan 6.13). Cluster infrastructure is platform-only. |
 
 #### Platform console sections
 
@@ -2091,6 +2123,9 @@ configuration, and business rules. **Secrets are never exported in plaintext.**
 | Publish stays disabled after changing the model | Change any field — that dirties the form and enables Publish. Publish now saves first, then goes live. Warnings (yellow) do not block; only validation **errors** do. |
 | The model asked for a tool the agent must not use | Check the agent's tool allow-list. Absence is a denial. Seeded `refund_order` is in the library and granted to nobody. |
 | AI Setup provider dropdown is empty (no providers listed in any tab) | The platform catalog has not been seeded yet, or a new migration was added and the seed was not re-run. Run `make migrate` then `docker compose ... exec configuration-api python -m app.cli seed-platform`. |
+| Import file is refused as a plaintext secret | The JSON still has an `api_key`, `auth_secret`, password or similar string. Re-export from Settings — a real export only has `configured` / `auth_configured` flags. Paste keys in AI Setup and on each tool after import. |
+| Imported agents do not answer calls | Versions import as **drafts**. Open the agent, confirm providers resolve, then Publish. Missing catalog slugs are skipped; run `seed-platform` if Azure/Google/ElevenLabs STT rows are absent. |
+| Google or Azure adapter errors after pull | Rebuild `ai-agent-worker` so `livekit-plugins-google` / `livekit-plugins-azure` are installed. The worker lazy-imports those plugins and will still start without them. |
 | `TypeError: Failed to fetch` when opening the agent Configure dialog | The `agent_versions` table is missing the `embedding_provider_id` / `embedding_model_id` columns — run `make migrate`. If the columns exist, check API health with `make health`. |
 | `alembic upgrade head` fails with `type "providerkind" does not exist` | A migration written for a native PostgreSQL enum was applied to a VARCHAR column. Replace the migration body with a no-op (`pass` in `upgrade()`). See Plan §12.4. |
 

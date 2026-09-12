@@ -498,6 +498,11 @@ export interface CatalogProvider {
   credential_set: boolean;
   /** Runs on the platform's own network rather than a public API. */
   self_hosted: boolean;
+  /**
+   * The provider's canonical API base URL, pre-populated in the Add modal.
+   * Null for self-hosted providers and those with no fixed endpoint.
+   */
+  default_base_url: string | null;
 }
 
 export interface CatalogModelEntry {
@@ -912,6 +917,13 @@ export interface TenantSettingsInput {
   timezone?: string;
   default_language?: string;
   notes?: string | null;
+}
+
+export interface TenantImportSummary {
+  created: string[];
+  updated: string[];
+  skipped: string[];
+  errors: string[];
 }
 
 // --- Analytics, usage, recordings (spec 39, 47, 57) ----------------------- //
@@ -1703,6 +1715,15 @@ export const api = {
     },
     update(input: TenantSettingsInput): Promise<TenantSettings> {
       return request<TenantSettings>("/settings", { method: "PUT", body: input });
+    },
+    export(): Promise<Record<string, unknown>> {
+      return request<Record<string, unknown>>("/settings/export");
+    },
+    importBundle(bundle: unknown): Promise<TenantImportSummary> {
+      return request<TenantImportSummary>("/settings/import", {
+        method: "POST",
+        body: bundle,
+      });
     },
   },
 

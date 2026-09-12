@@ -75,11 +75,11 @@ class TestRegistry:
         with pytest.raises(ProviderUnavailableError):
             build_tts(config)
 
-    def test_elevenlabs_not_in_stt_registry(self):
-        """ElevenLabs is TTS-only; registering it under STT would be wrong."""
+    def test_elevenlabs_is_also_registered_for_stt(self):
+        """§25 lists ElevenLabs as an STT provider as well as TTS."""
         from worker.providers.registry import available_slugs
 
-        assert "elevenlabs" not in available_slugs(ProviderKind.STT)
+        assert "elevenlabs" in available_slugs(ProviderKind.STT)
 
 
 # --------------------------------------------------------------------------- #

@@ -199,6 +199,15 @@ async def get_catalog(tenant: CurrentTenant) -> CatalogResponse:
                 requires_credential=p.requires_credential,
                 credential_set=p.id in credentialed,
                 self_hosted=_is_self_hosted(p.default_base_url),
+                # Expose the canonical endpoint for cloud providers so the
+                # AI Setup form can pre-populate the endpoint field.
+                # Self-hosted URLs are internal platform infrastructure and
+                # are not surfaced to tenants (spec 13).
+                default_base_url=(
+                    p.default_base_url
+                    if not _is_self_hosted(p.default_base_url)
+                    else None
+                ),
             )
             for p in providers
         ],

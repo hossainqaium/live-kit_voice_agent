@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import delete as sql_delete
@@ -32,6 +32,7 @@ from app.schemas.admin import (
     AnalyticsResponse,
     PasswordReset,
     RecordingResponse,
+    TenantImportSummary,
     TenantSettingsResponse,
     TenantSettingsUpdate,
     UsageResponse,
@@ -42,6 +43,7 @@ from app.schemas.admin import (
 )
 from app.schemas.common import Page
 from app.services import audit
+from app.services.tenant_impex import export_tenant, import_tenant
 from shared.logging import get_logger
 from shared.models import CallState, Permission, RoleScope, TransferStatus
 
@@ -481,6 +483,54 @@ async def update_settings(
     )
     await tenant.session.commit()
     return TenantSettingsResponse.model_validate(row, from_attributes=True)
+
+
+@router.get(
+    "/settings/export",
+    summary="Export this tenant's configuration without secrets",
+    dependencies=[Depends(require_permission(Permission.AGENTS_READ))],
+)
+async def export_settings(tenant: CurrentTenant) -> dict[str, Any]:
+    """Portable bundle of agents, tools, routing, knowledge-base config and rules.
+
+    Secrets are stripped (spec 54, 65). Provider keys, tool auth secrets and
+    SIP credentials never appear in the file.
+    """
+    return await export_tenant(tenant.session, tenant_id=tenant.tenant_id)
+
+
+@router.post(
+    "/settings/import",
+    response_model=TenantImportSummary,
+    summary="Import tenant configuration; secrets in the file are refused",
+    dependencies=[Depends(require_permission(Permission.AGENTS_WRITE))],
+)
+async def import_settings(
+    payload: dict[str, Any],
+    tenant: CurrentTenant,
+    request: Request,
+    client_ip: ClientIp,
+) -> TenantImportSummary:
+    """Upsert from an export. Agent versions land as drafts. Secrets are never written."""
+    try:
+        summary = await import_tenant(
+            tenant.session, tenant_id=tenant.tenant_id, bundle=payload
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await audit.record(
+        tenant.session,
+        principal=tenant.principal,
+        action="tenant.imported",
+        resource_type="tenant",
+        resource_id=tenant.tenant_id,
+        new_value=summary,
+        ip_address=client_ip,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    await tenant.session.commit()
+    return TenantImportSummary.model_validate(summary)
 
 
 # --------------------------------------------------------------------------- #

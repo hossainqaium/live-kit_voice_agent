@@ -10,6 +10,8 @@ livekit-plugins-openai==1.8.1
 livekit-plugins-anthropic==1.8.1
 livekit-plugins-elevenlabs==1.8.1
 livekit-plugins-cartesia==1.8.1
+livekit-plugins-google==1.8.1
+livekit-plugins-azure==1.8.1
 
 # --- Configuration loading ------------------------------------------------ #
 # The worker reads agent configuration from PostgreSQL at call start (spec 23)

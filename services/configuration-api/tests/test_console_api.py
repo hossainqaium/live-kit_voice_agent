@@ -221,6 +221,8 @@ class TestEveryConsoleSectionIsReachable:
         "/api/v1/knowledge-bases",
         "/api/v1/users",
         "/api/v1/settings",
+        "/api/v1/settings/export",
+        "/api/v1/settings/import",
         "/api/v1/analytics",
         "/api/v1/usage",
         "/api/v1/recordings",
