@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,8 +109,8 @@ async def record(
             action=action,
             resource_type=resource_type,
             resource_id=str(resource_id) if resource_id is not None else None,
-            old_value=redact(old_value) if old_value is not None else None,
-            new_value=redact(new_value) if new_value is not None else None,
+            old_value=_json_safe(redact(old_value)) if old_value is not None else None,
+            new_value=_json_safe(redact(new_value)) if new_value is not None else None,
             ip_address=ip_address,
             user_agent=user_agent[:1024] if user_agent else None,
             request_id=request_id,
@@ -134,5 +135,26 @@ def snapshot(instance: Any, *fields: str) -> dict[str, Any]:
     trail by default.
     """
     captured: dict[str, Any] = {field: getattr(instance, field, None) for field in fields}
-    redacted: dict[str, Any] = redact(captured)
-    return redacted
+    return _json_safe(redact(captured))
+
+
+def _json_safe(value: Any) -> Any:
+    """Make a snapshot safe for JSONB.
+
+    ``audit_logs.old_value`` / ``new_value`` are JSONB. SQLAlchemy uses the
+    stdlib encoder, which cannot dump ``uuid.UUID`` or ``Enum``. Adding a
+    phone number with an agent assigned was a 500 for that reason: the
+    snapshot carried ``inbound_agent_id`` as a UUID and the INSERT rolled
+    back, so the DID never landed.
+    """
+    if isinstance(value, dict):
+        return {key: _json_safe(inner) for key, inner in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value

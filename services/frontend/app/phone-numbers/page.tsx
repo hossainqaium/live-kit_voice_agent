@@ -4,8 +4,8 @@
  * Phone number (DID) management (spec 17).
  *
  * Assigning a number to a trunk is what changes which calls that trunk
- * accepts, so saving here re-syncs nothing directly — the trunk derives its
- * accepted list from these rows.
+ * accepts. Saving writes the row and queues a trunk sync so LiveKit's
+ * accepted list matches.
  */
 
 import { useCallback, useEffect, useState } from "react";

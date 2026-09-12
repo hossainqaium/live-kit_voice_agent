@@ -71,6 +71,23 @@ class TestResponseDecoration:
         assert "business_hours_name" in src
 
 
+class TestCreateDoesNotBreakOnAssignedAgent:
+    def test_audit_snapshot_is_json_safe(self) -> None:
+        src = inspect.getsource(phone_numbers_api)
+        assert "audit.snapshot(row, *_AUDITED)" in src
+        assert "inbound_agent_id" in phone_numbers_api._AUDITED
+
+    def test_create_resyncs_the_trunk_after_commit(self) -> None:
+        src = inspect.getsource(phone_numbers_api.create_number)
+        assert "enqueue_trunk_sync" in src
+        assert src.index("commit") < src.index("enqueue_trunk_sync")
+
+    def test_delete_resyncs_the_previous_trunk(self) -> None:
+        src = inspect.getsource(phone_numbers_api.delete_number)
+        assert "previous_trunk_id" in src
+        assert "enqueue_trunk_sync" in src
+
+
 class TestDidFormOffersTheFields:
     def test_form_file_exists_or_skip(self) -> None:
         if not _FRONTEND_FORM.exists():

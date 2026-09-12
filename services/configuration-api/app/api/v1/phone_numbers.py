@@ -12,6 +12,7 @@ from app.core.dependencies import ClientIp, CurrentTenant, require_permission
 from app.db.models import Agent, BusinessHours, Pbx, PhoneNumber, RoutingRule, SipTrunk
 from app.db.repository import TenantRepository
 from app.db.util import as_lookup
+from app.livekit import enqueue_trunk_sync
 from app.schemas.common import Page
 from app.schemas.telephony import (
     PhoneNumberCreate,
@@ -20,7 +21,7 @@ from app.schemas.telephony import (
 )
 from app.services import audit
 from shared.logging import get_logger
-from shared.models import Permission, ResourceStatus
+from shared.models import Permission, ResourceStatus, SyncStatus
 
 logger = get_logger(__name__)
 
@@ -135,6 +136,31 @@ async def _validate_references(
             )
 
 
+async def _pending_trunks(
+    tenant: CurrentTenant, *trunk_ids: uuid.UUID | None
+) -> list[uuid.UUID]:
+    """Mark assigned trunks PENDING so LiveKit picks up the new DID list.
+
+    The phone-numbers page used to write the row and leave the trunk alone.
+    LiveKit then kept accepting only the old numbers — 1801 stayed live,
+    1802 never rang. The wizard already synced; this does the same after
+    every DID mutation.
+    """
+    queued: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for trunk_id in trunk_ids:
+        if trunk_id is None or trunk_id in seen:
+            continue
+        seen.add(trunk_id)
+        trunk = await tenant.session.get(SipTrunk, trunk_id)
+        if trunk is None:
+            continue
+        trunk.sync_status = SyncStatus.PENDING
+        trunk.sync_error = None
+        queued.append(trunk_id)
+    return queued
+
+
 @router.post(
     "",
     response_model=PhoneNumberResponse,
@@ -184,7 +210,10 @@ async def create_number(
         ip_address=client_ip,
         request_id=getattr(request.state, "request_id", None),
     )
+    queued = await _pending_trunks(tenant, row.sip_trunk_id)
     await tenant.session.commit()
+    for trunk_id in queued:
+        enqueue_trunk_sync(trunk_id)
 
     return (await _decorate(tenant, [row]))[0]
 
@@ -208,6 +237,7 @@ async def update_number(
         raise _not_found(number_id)
 
     before = audit.snapshot(row, *_AUDITED)
+    previous_trunk_id = row.sip_trunk_id
     changes = payload.model_dump(exclude_unset=True)
     await _validate_references(tenant, repository, changes)
 
@@ -225,7 +255,10 @@ async def update_number(
         ip_address=client_ip,
         request_id=getattr(request.state, "request_id", None),
     )
+    queued = await _pending_trunks(tenant, previous_trunk_id, row.sip_trunk_id)
     await tenant.session.commit()
+    for trunk_id in queued:
+        enqueue_trunk_sync(trunk_id)
     return (await _decorate(tenant, [row]))[0]
 
 
@@ -280,7 +313,10 @@ async def _set_status(
         ip_address=client_ip,
         request_id=getattr(request.state, "request_id", None),
     )
+    queued = await _pending_trunks(tenant, row.sip_trunk_id)
     await tenant.session.commit()
+    for trunk_id in queued:
+        enqueue_trunk_sync(trunk_id)
     return (await _decorate(tenant, [row]))[0]
 
 
@@ -303,6 +339,7 @@ async def delete_number(
         raise _not_found(number_id)
 
     before = audit.snapshot(row, *_AUDITED)
+    previous_trunk_id = row.sip_trunk_id
     await repository.delete(PhoneNumber, number_id)
 
     await audit.record(
@@ -315,5 +352,8 @@ async def delete_number(
         ip_address=client_ip,
         request_id=getattr(request.state, "request_id", None),
     )
+    queued = await _pending_trunks(tenant, previous_trunk_id)
     await tenant.session.commit()
+    for trunk_id in queued:
+        enqueue_trunk_sync(trunk_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -117,3 +117,19 @@ class TestSnapshot:
         """Belt and braces: even if a secret field is named explicitly."""
         row = FakeRow(name="PBX", password="hunter2")
         assert snapshot(row, "name", "password")["password"] == "***redacted***"
+
+    def test_uuids_and_enums_are_json_safe(self) -> None:
+        """JSONB cannot store a raw UUID. Assigning an agent on a DID 500'd."""
+        import json
+        import uuid
+        from enum import Enum
+
+        class Status(Enum):
+            ACTIVE = "ACTIVE"
+
+        agent_id = uuid.uuid4()
+        row = FakeRow(number="1802", inbound_agent_id=agent_id, status=Status.ACTIVE)
+        captured = snapshot(row, "number", "inbound_agent_id", "status")
+        assert captured["inbound_agent_id"] == str(agent_id)
+        assert captured["status"] == "ACTIVE"
+        json.dumps(captured)
