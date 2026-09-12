@@ -496,7 +496,8 @@ Use Telephony → **SIP Setup Wizard** (`/sip-wizard`) in the tenant console —
 The wizard is the same PBX, trunk and DID APIs in order. Security creates the trunk (and
 syncs it to LiveKit with an empty accepted-number list). Phone Number writes the DID and
 calls `POST /sip-trunks/{id}/sync` again so LiveKit accepts that number. Dispatch rules
-are long-lived and created separately (seed / LiveKit), not per wizard run.
+are long-lived and managed at Telephony → **Dispatch Rules** (`/dispatch-rules`), not
+per wizard run and never per call.
 
 On the PBX side, point an outbound trunk/route for the DID at `LIVEKIT_SIP_URI`, and allow the
 LiveKit SIP signalling and RTP ranges through your firewall.
@@ -1070,6 +1071,9 @@ misread as a fault:
 | Repeated-measurement latency harness | **Working — Plan 2b.8 complete (2026-09-12).** `make measure-latency STT_URL=…` repeats STT/LLM/TTS probes at concurrency 1, 2 and 10 and reports p50/p95 **and** realtime factor (`audio / p50`). A factor below 1 means the stage cannot hold a conversation. Replay already-collected times with `--replay stt:3.6:0.773,2.655`. This is not the Phase 8 SIP load test. |
 | STT placement (hosted vs self-hosted) | **Decided — Plan 2b.9 complete (2026-09-12).** This host: hosted `gpt-4o-mini-transcribe`. Self-hosted only after `make measure-latency` says rtf ≥ 1.0 at ×2 and sequential p95 ≤ 2 s. |
 | LiveKit drift detection | **Working — Plan 5.7 complete (2026-09-12).** A scheduled job (300 s + jitter) lists LiveKit SIP trunks and dispatch rules and compares them to PostgreSQL. Missing or mismatched rows become `DRIFTED`. LiveKit-only leftovers are orphans on `/platform/livekit`. Banner: **Configuration Drift Detected**. On-demand: **Check now**, `POST /platform/livekit/drift-check`, or `make detect-drift`. Repair is still tenant Synchronize / `sync-livekit` — the job does not recreate resources. A LiveKit outage is not treated as drift. |
+| LiveKit administration section | **Working — Plan 5.1 complete (2026-09-12).** Platform → LiveKit lists all 13 spec-11 topics. Rooms/participants are a live read. Cluster / TURN / media stay infrastructure. |
+| SIP trunk fields from the standalone form | **Working — Plan 5.2 complete (2026-09-12).** Direction, codecs, DTMF and SRTP are on SIP Trunks → Create/Edit, not only in the wizard. |
+| Dispatch rules in the console | **Working — Plan 5.3–5.5 complete (2026-09-12).** Telephony → Dispatch Rules. Long-lived only; PostgreSQL first, then LiveKit. SHARED rooms refused. Phone Numbers shows which worker the trunk's rule will invite. |
 | Testing the agent from a browser instead of a phone | **Working** — Phone Numbers → **Call Test** (§9d.7). Development only, and no substitute for a real call: a browser sends wideband audio and a phone does not. |
 
 Two honest caveats about interpreting a test call:
@@ -1373,7 +1377,8 @@ navigation and a platform account has no tenant to act in.
 | Dashboard | `/` | Counts, connection-test state, API reachability |
 | **SIP Setup Wizard** | `/sip-wizard` | Ten-step PBX → trunk → DID onboarding (Plan 4b.1). Needs `sip_trunks.write`. |
 | PBXs | `/pbxs` | Register, edit, enable/disable, connection-test |
-| SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync |
+| SIP Trunks | `/sip-trunks` | Trunks with their LiveKit sync state and a re-sync. Direction, codecs, DTMF, SRTP (Plan 5.2) |
+| Dispatch Rules | `/dispatch-rules` | Long-lived LiveKit rules: trunk, agent dispatch name, room prefix (Plan 5.3–5.5) |
 | Phone Numbers | `/phone-numbers` | DIDs, trunk, answering agent, **routing rule**, **business hours**, plus **Call Test** — a browser call to that number (§9d.7) |
 | Agents | `/agents` | The builder: provider and model selection per tier, versions, validation, publish, rollback. Provider dropdowns show only what is configured in AI Setup. |
 | **AI Setup** | `/ai-setup` | Four tabs — **LLM**, **Embedding**, **STT**, **TTS**. Each tab lists stored provider credentials with Test / Rotate / Delete actions; the Add modal verifies a key before saving it. Providers configured here populate the agent builder dropdowns. See [`AIProviders.md`](./AIProviders.md). |
@@ -1395,7 +1400,7 @@ navigation and a platform account has no tenant to act in.
 |---|---|---|
 | Dashboard | `/platform` | Tenant count, live calls, LiveKit state |
 | Tenants | `/platform/tenants` | Create a tenant with its first administrator, set limits, suspend |
-| LiveKit | `/platform/livekit` | Reachability, room count, last drift check, drifted rows, and LiveKit-only orphans (spec 46) |
+| LiveKit | `/platform/livekit` | Spec-11 administration topics, live rooms, drift check, drifted rows, and orphans |
 | Infrastructure | `/platform/infrastructure` | Live dependency probes and links into Grafana, Prometheus and MinIO |
 | Capacity | `/platform/capacity` | Inventory, live load, licensed concurrency (spec 48) |
 | Providers | `/platform/providers` | The STT/LLM/TTS catalog, including `requires_credential` |

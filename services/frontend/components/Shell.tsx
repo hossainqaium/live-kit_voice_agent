@@ -49,6 +49,7 @@ const TENANT_NAV: NavGroup[] = [
       { label: "SIP Setup Wizard", href: "/sip-wizard", permission: "sip_trunks.write" },
       { label: "PBXs", href: "/pbxs", permission: "pbxs.read" },
       { label: "SIP Trunks", href: "/sip-trunks", permission: "sip_trunks.read" },
+      { label: "Dispatch Rules", href: "/dispatch-rules", permission: "sip_trunks.read" },
       { label: "Phone Numbers", href: "/phone-numbers", permission: "sip_trunks.read" },
     ],
   },

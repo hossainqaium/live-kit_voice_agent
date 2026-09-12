@@ -4,7 +4,7 @@ A dedicated module (spec 80 rule 7). Nothing outside it should import the
 LiveKit SDK or hold the LiveKit API secret.
 """
 
-from app.livekit.client import LiveKitAdminClient
+from app.livekit.client import LiveKitAdminClient, RoomSnapshot
 from app.livekit.drift import (
     DriftFinding,
     DriftKind,
@@ -27,6 +27,7 @@ __all__ = [
     "DriftKind",
     "DriftReport",
     "LiveKitAdminClient",
+    "RoomSnapshot",
     "LiveKitError",
     "LiveKitRejectedError",
     "LiveKitResourceMissingError",

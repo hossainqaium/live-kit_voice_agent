@@ -400,6 +400,34 @@ class LiveKitOverview(BaseModel):
     orphans: list[OrphanedResource] = Field(default_factory=list)
     configuration_drift_detected: bool = False
 
+    #: Spec 11 administration topics. Tenant configuration is linked; cluster
+    #: topology, TURN and port ranges are reported read-only (spec 13).
+    sections: list["LiveKitAdminSection"] = Field(default_factory=list)
+    rooms: list["LiveKitRoom"] = Field(default_factory=list)
+    participant_count: int = 0
+    agent_dispatch_names: list[str] = Field(default_factory=list)
+    public_url: str | None = None
+
+
+class LiveKitAdminSection(BaseModel):
+    """One topic from the spec-11 administration section."""
+
+    id: str
+    title: str
+    summary: str
+    #: ``tenant`` is configured in the tenant console; ``observe`` is live
+    #: state; ``infra`` is platform/DevOps and never editable here.
+    scope: str
+    href: str | None = None
+
+
+class LiveKitRoom(BaseModel):
+    name: str
+    sid: str
+    num_participants: int
+    created_at: datetime | None = None
+    metadata: str = ""
+
 
 class DriftCheckResponse(BaseModel):
     """One compare pass (spec 46). Detection only — nothing is repaired."""

@@ -21,10 +21,14 @@ import {
 } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 
+const CODECS = ["PCMU", "PCMA", "OPUS", "G722"] as const;
+const DTMF_MODES = ["RFC2833", "SIP_INFO", "INBAND"] as const;
+
 const EMPTY: SipTrunkInput = {
   name: "", pbx_id: null, direction: "INBOUND", sip_host: "",
   port: 5060, transport: "UDP", allowed_ips: [], auth_username: "",
   auth_password: "", media_encryption_required: false,
+  codecs: ["PCMU", "PCMA", "OPUS"], dtmf_mode: "RFC2833",
 };
 
 export default function SipTrunksPage() {
@@ -260,6 +264,7 @@ function TrunkForm({
           sip_host: trunk.sip_host, port: trunk.port, transport: trunk.transport,
           allowed_ips: trunk.allowed_ips, auth_username: trunk.auth_username ?? "",
           auth_password: "", media_encryption_required: trunk.media_encryption_required,
+          codecs: trunk.codecs, dtmf_mode: trunk.dtmf_mode,
         }
       : EMPTY,
   );
@@ -330,6 +335,17 @@ function TrunkForm({
           )}
         </Field>
 
+        <Field label="Direction" required hint="LiveKit inbound trunks accept PBX→platform calls.">
+          {(id) => (
+            <select id={id} value={form.direction}
+              onChange={(e) => setForm({ ...form, direction: e.target.value as typeof form.direction })}>
+              <option value="INBOUND">Inbound</option>
+              <option value="OUTBOUND">Outbound</option>
+              <option value="BIDIRECTIONAL">Bidirectional</option>
+            </select>
+          )}
+        </Field>
+
         <div className="field-row">
           <Field label="SIP host" required>
             {(id) => <input id={id} required value={form.sip_host}
@@ -367,6 +383,54 @@ function TrunkForm({
           {(id) => <input id={id} value={allowedText} onChange={(e) => setAllowedText(e.target.value)}
             placeholder="192.168.0.113, 10.0.0.0/24" />}
         </Field>
+
+        <Field label="Codecs" hint="Offer at least PCMU for telephony.">
+          {() => (
+            <div className="row" style={{ flexWrap: "wrap", gap: 12 }}>
+              {CODECS.map((codec) => (
+                <label key={codec} className="row" style={{ gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={(form.codecs ?? []).includes(codec)}
+                    onChange={() => {
+                      const current = form.codecs ?? [];
+                      setForm({
+                        ...form,
+                        codecs: current.includes(codec)
+                          ? current.filter((item) => item !== codec)
+                          : [...current, codec],
+                      });
+                    }}
+                  />
+                  <span className="mono small">{codec}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </Field>
+
+        <div className="field-row">
+          <Field label="DTMF">
+            {(id) => (
+              <select id={id} value={form.dtmf_mode ?? ""}
+                onChange={(e) => setForm({ ...form, dtmf_mode: e.target.value || null })}>
+                <option value="">Provider default</option>
+                {DTMF_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+              </select>
+            )}
+          </Field>
+          <Field label="Media encryption">
+            {(id) => (
+              <label className="row" style={{ gap: 8 }}>
+                <input id={id} type="checkbox"
+                  checked={form.media_encryption_required ?? false}
+                  onChange={(e) => setForm({ ...form, media_encryption_required: e.target.checked })}
+                />
+                <span className="small">Require SRTP</span>
+              </label>
+            )}
+          </Field>
+        </div>
 
         <Notice tone="info">
           The numbers a trunk accepts come from the phone numbers assigned to it,

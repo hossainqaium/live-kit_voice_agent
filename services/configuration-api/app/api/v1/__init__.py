@@ -18,6 +18,7 @@ from app.api.v1 import (
     browser_test,
     calls,
     catalog,
+    dispatch_rules,
     pbxs,
     phone_numbers,
     platform,
@@ -32,6 +33,7 @@ api_router = APIRouter(dependencies=[Depends(reject_client_tenant_id)])
 api_router.include_router(auth.router)
 api_router.include_router(pbxs.router)
 api_router.include_router(sip_trunks.router)
+api_router.include_router(dispatch_rules.router)
 api_router.include_router(phone_numbers.router)
 api_router.include_router(agents.router)
 api_router.include_router(catalog.router)

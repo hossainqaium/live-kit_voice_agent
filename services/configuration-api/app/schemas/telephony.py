@@ -11,6 +11,7 @@ from app.schemas.common import TimestampedResponse
 from shared.models import (
     ConnectionTestResult,
     ResourceStatus,
+    RoomStrategy,
     SipTransport,
     SyncStatus,
     TrunkDirection,
@@ -134,6 +135,80 @@ class SipTrunkResponse(TimestampedResponse):
     last_test_result: ConnectionTestResult
     last_tested_at: datetime | None
     last_test_detail: str | None
+
+
+class DispatchRuleBase(BaseModel):
+    """A long-lived LiveKit dispatch rule (spec 21).
+
+    Created once and reused. A rule per call is refused — that would add an
+    admin API round-trip to the call path and leave stale rules in LiveKit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    sip_trunk_id: uuid.UUID | None = None
+    room_strategy: RoomStrategy = RoomStrategy.INDIVIDUAL
+    room_prefix: str | None = Field(default=None, max_length=128)
+    agent_dispatch_name: str = Field(min_length=1, max_length=128)
+
+    #: Caller-number allow-list on the LiveKit rule. Empty means any caller.
+    #: This is **not** the dialled DID — LiveKit matches the caller's number
+    #: here, and putting a DID in it is how inbound calls get ``486 flood``.
+    matched_numbers: list[str] = Field(default_factory=list)
+
+    @field_validator("name", "agent_dispatch_name")
+    @classmethod
+    def _strip_required(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("cannot be blank")
+        return cleaned
+
+    @field_validator("room_prefix")
+    @classmethod
+    def _strip_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+class DispatchRuleCreate(DispatchRuleBase):
+    pass
+
+
+class DispatchRuleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    sip_trunk_id: uuid.UUID | None = None
+    room_strategy: RoomStrategy | None = None
+    room_prefix: str | None = Field(default=None, max_length=128)
+    agent_dispatch_name: str | None = Field(default=None, min_length=1, max_length=128)
+    matched_numbers: list[str] | None = None
+    status: ResourceStatus | None = None
+
+
+class DispatchRuleResponse(TimestampedResponse):
+    name: str
+    sip_trunk_id: uuid.UUID | None
+    sip_trunk_name: str | None = None
+    room_strategy: RoomStrategy
+    room_prefix: str | None
+    agent_dispatch_name: str
+    matched_numbers: list[str] = Field(default_factory=list)
+    status: ResourceStatus
+
+    #: DIDs the attached trunk currently accepts — the numbers callers dial,
+    #: which is how a rule is associated with an agent/DID (spec 21).
+    trunk_dids: list[str] = Field(default_factory=list)
+
+    livekit_resource_id: str | None
+    sync_status: SyncStatus
+    last_synced_at: datetime | None
+    sync_error: str | None
+    sync_attempts: int
 
 
 class PhoneNumberBase(BaseModel):

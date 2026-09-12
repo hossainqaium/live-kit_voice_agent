@@ -19,7 +19,7 @@ import {
 import {
   ApiError, api, FALLBACK_ACTION_LABELS,
   type Agent, type BusinessHours, type Pbx, type PhoneNumber, type PhoneNumberInput,
-  type RoutingRule, type SipTrunk,
+  type DispatchRule, type RoutingRule, type SipTrunk,
 } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 
@@ -34,6 +34,7 @@ export default function PhoneNumbersPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [rules, setRules] = useState<RoutingRule[]>([]);
   const [hours, setHours] = useState<BusinessHours[]>([]);
+  const [dispatchRules, setDispatchRules] = useState<DispatchRule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<PhoneNumber | null>(null);
   const [calling, setCalling] = useState<{ did: string; agent: string } | null>(null);
@@ -44,13 +45,14 @@ export default function PhoneNumbersPage() {
 
   const load = useCallback(async () => {
     try {
-      const [numbers, pbxPage, trunkPage, agentPage, rulePage, hoursPage] = await Promise.all([
+      const [numbers, pbxPage, trunkPage, agentPage, rulePage, hoursPage, dispatchPage] = await Promise.all([
         api.phoneNumbers.list(),
         api.pbxs.list(200),
         api.sipTrunks.list(200),
         api.agents.list(200),
         api.routingRules.list(200),
         api.businessHours.list(200),
+        api.dispatchRules.list(200),
       ]);
       setRows(numbers.items);
       setPbxs(pbxPage.items);
@@ -58,6 +60,7 @@ export default function PhoneNumbersPage() {
       setAgents(agentPage.items);
       setRules(rulePage.items);
       setHours(hoursPage.items);
+      setDispatchRules(dispatchPage.items);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "could not load numbers");
@@ -187,7 +190,7 @@ export default function PhoneNumbersPage() {
       {(creating || editing) && (
         <NumberForm
           number={editing} pbxs={pbxs} trunks={trunks} agents={agents}
-          rules={rules} hours={hours}
+          rules={rules} hours={hours} dispatchRules={dispatchRules}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSaved={async (msg) => { setCreating(false); setEditing(null); toasts.ok(msg); await load(); }}
         />
@@ -226,11 +229,12 @@ export default function PhoneNumbersPage() {
 }
 
 function NumberForm({
-  number, pbxs, trunks, agents, rules, hours, onClose, onSaved,
+  number, pbxs, trunks, agents, rules, hours, dispatchRules, onClose, onSaved,
 }: {
   number: PhoneNumber | null;
   pbxs: Pbx[]; trunks: SipTrunk[]; agents: Agent[];
   rules: RoutingRule[]; hours: BusinessHours[];
+  dispatchRules: DispatchRule[];
   onClose(): void;
   onSaved(message: string): void | Promise<void>;
 }) {
@@ -249,6 +253,7 @@ function NumberForm({
   const chosenAgent = agents.find((a) => a.id === form.inbound_agent_id);
   const agentUnpublished = chosenAgent && chosenAgent.published_version_number === null;
   const chosenRule = rules.find((r) => r.id === form.routing_rule_id);
+  const dispatchForTrunk = dispatchRules.filter((r) => r.sip_trunk_id === form.sip_trunk_id);
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -309,6 +314,14 @@ function NumberForm({
             </select>
           )}
         </Field>
+
+        {form.sip_trunk_id && (
+          <Notice tone="info">
+            {dispatchForTrunk.length === 0
+              ? "This trunk has no dispatch rule — LiveKit will not invite a worker. Create one under Dispatch Rules."
+              : `LiveKit will dispatch workers named ${dispatchForTrunk.map((r) => r.agent_dispatch_name).join(", ")}. The inbound agent below is who speaks.`}
+          </Notice>
+        )}
 
         <Field label="Answered by" hint="The AI agent that takes calls to this number.">
           {(id) => (

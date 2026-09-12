@@ -14,10 +14,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TypeVar
 
 import aiohttp
 from livekit.api import ListRoomsRequest, LiveKitAPI, TwirpError
+from shared.logging import get_logger
 
 from app.core.settings import get_settings
 from app.livekit.errors import (
@@ -26,11 +29,25 @@ from app.livekit.errors import (
     LiveKitUnavailableError,
     LiveKitUnsupportedError,
 )
-from shared.logging import get_logger
 
 logger = get_logger(__name__)
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class RoomSnapshot:
+    """One LiveKit room, for the administration section (spec 11).
+
+    Rooms are ephemeral call containers, not mirrored configuration, so this
+    is a live read — never written from the console.
+    """
+
+    name: str
+    sid: str
+    num_participants: int
+    created_at: datetime | None
+    metadata: str
 
 #: Twirp codes that mean the request itself is wrong. Retrying cannot help.
 _CLIENT_ERROR_CODES = frozenset(
@@ -125,6 +142,28 @@ class LiveKitAdminClient:
             except aiohttp.ClientError as exc:
                 raise LiveKitUnavailableError(f"{operation}: {exc}") from exc
 
+    async def list_rooms(self) -> list[RoomSnapshot]:
+        """Every room LiveKit currently holds (spec 11 Rooms / Participants)."""
+        result = await self.call("list_rooms", lambda api: api.room.list_rooms(ListRoomsRequest()))
+        snapshots: list[RoomSnapshot] = []
+        for room in getattr(result, "rooms", None) or []:
+            created = getattr(room, "creation_time", None)
+            seconds = getattr(created, "seconds", None) if created is not None else None
+            if seconds is None and isinstance(created, (int, float)):
+                seconds = int(created)
+            snapshots.append(
+                RoomSnapshot(
+                    name=str(getattr(room, "name", "") or ""),
+                    sid=str(getattr(room, "sid", "") or ""),
+                    num_participants=int(getattr(room, "num_participants", 0) or 0),
+                    created_at=(
+                        datetime.fromtimestamp(int(seconds), tz=UTC) if seconds else None
+                    ),
+                    metadata=str(getattr(room, "metadata", "") or ""),
+                )
+            )
+        return snapshots
+
     async def room_count(self) -> int:
         """How many rooms LiveKit currently holds.
 
@@ -133,8 +172,7 @@ class LiveKitAdminClient:
         in-flight calls. A disagreement between the two is the useful signal:
         it means a call ended without the worker writing its terminal state.
         """
-        rooms = await self.call("room_count", lambda api: api.room.list_rooms(ListRoomsRequest()))
-        return len(getattr(rooms, "rooms", None) or [])
+        return len(await self.list_rooms())
 
     async def create_room_with_metadata(self, name: str, metadata: str) -> str:
         """Create (or update) a room carrying ``metadata``.

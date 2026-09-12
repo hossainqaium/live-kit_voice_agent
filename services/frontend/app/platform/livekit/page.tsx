@@ -163,6 +163,11 @@ export default function LiveKitPage() {
             <SyncCounts title="Trunks" counts={data.trunk_sync} />
             <SyncCounts title="Dispatch rules" counts={data.dispatch_rule_sync} />
             <div className="card">
+              <div className="stat-label">Participants</div>
+              <div className="stat-value">{data.participant_count ?? 0}</div>
+              <div className="stat-note">across open rooms</div>
+            </div>
+            <div className="card">
               <div className="stat-label">Last drift check</div>
               <div className="stat-value" style={{ fontSize: 18 }}>
                 {data.last_drift_check_at
@@ -172,6 +177,62 @@ export default function LiveKitPage() {
               <div className="stat-note">scheduled with jitter, or Check now</div>
             </div>
           </div>
+
+          {(data.sections ?? []).length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Administration</th><th>Scope</th><th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.sections.map((section) => (
+                    <tr key={section.id} id={`lk-${section.id}`}>
+                      <td>
+                        <div style={{ fontWeight: 500 }}>{section.title}</div>
+                        <div className="subtle small">{section.summary}</div>
+                      </td>
+                      <td className="small mono">{section.scope}</td>
+                      <td className="small">
+                        {section.href ? (
+                          <a href={section.href}>{section.scope === "infra" ? "Infrastructure" : "Open"}</a>
+                        ) : (
+                          <span className="subtle">live on this page</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {(data.rooms ?? []).length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Room</th><th>Participants</th><th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rooms.map((room) => (
+                    <tr key={room.sid || room.name}>
+                      <td>
+                        <div className="mono small">{room.name}</div>
+                        {room.metadata && <div className="subtle small">{room.metadata}</div>}
+                      </td>
+                      <td className="mono">{room.num_participants}</td>
+                      <td className="small">
+                        {room.created_at ? <RelativeTime iso={room.created_at} /> : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {data.orphans.length > 0 && (
             <div className="table-wrap">

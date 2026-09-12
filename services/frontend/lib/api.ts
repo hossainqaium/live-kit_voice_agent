@@ -338,6 +338,37 @@ export interface SipTrunkInput {
   dtmf_mode?: string | null;
 }
 
+export type RoomStrategy = "INDIVIDUAL" | "SHARED";
+
+export interface DispatchRule {
+  id: string;
+  name: string;
+  sip_trunk_id: string | null;
+  sip_trunk_name: string | null;
+  room_strategy: RoomStrategy;
+  room_prefix: string | null;
+  agent_dispatch_name: string;
+  matched_numbers: string[];
+  status: ResourceStatus;
+  trunk_dids: string[];
+  livekit_resource_id: string | null;
+  sync_status: SyncStatus;
+  last_synced_at: string | null;
+  sync_error: string | null;
+  sync_attempts: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DispatchRuleInput {
+  name: string;
+  sip_trunk_id?: string | null;
+  room_strategy?: RoomStrategy;
+  room_prefix?: string | null;
+  agent_dispatch_name: string;
+  matched_numbers?: string[];
+}
+
 // --- Phone numbers (spec 17) ---------------------------------------------- //
 
 export interface PhoneNumber {
@@ -1101,6 +1132,27 @@ export interface LiveKitOverview {
   drift_check_reachable: boolean | null;
   orphans: OrphanedResource[];
   configuration_drift_detected: boolean;
+  sections: LiveKitAdminSection[];
+  rooms: LiveKitRoom[];
+  participant_count: number;
+  agent_dispatch_names: string[];
+  public_url: string | null;
+}
+
+export interface LiveKitAdminSection {
+  id: string;
+  title: string;
+  summary: string;
+  scope: string;
+  href: string | null;
+}
+
+export interface LiveKitRoom {
+  name: string;
+  sid: string;
+  num_participants: number;
+  created_at: string | null;
+  metadata: string;
 }
 
 export interface DriftCheckResult {
@@ -1244,6 +1296,24 @@ export const api = {
     },
     disable(id: string): Promise<SipTrunk> {
       return request<SipTrunk>(`/sip-trunks/${id}/disable`, { method: "POST" });
+    },
+  },
+
+  dispatchRules: {
+    list(limit = 100, offset = 0): Promise<Page<DispatchRule>> {
+      return request<Page<DispatchRule>>(`/dispatch-rules?limit=${limit}&offset=${offset}`);
+    },
+    create(input: DispatchRuleInput): Promise<DispatchRule> {
+      return request<DispatchRule>("/dispatch-rules", { method: "POST", body: input });
+    },
+    update(id: string, input: Partial<DispatchRuleInput>): Promise<DispatchRule> {
+      return request<DispatchRule>(`/dispatch-rules/${id}`, { method: "PUT", body: input });
+    },
+    remove(id: string): Promise<void> {
+      return request<void>(`/dispatch-rules/${id}`, { method: "DELETE" });
+    },
+    sync(id: string): Promise<DispatchRule> {
+      return request<DispatchRule>(`/dispatch-rules/${id}/sync`, { method: "POST" });
     },
   },
 

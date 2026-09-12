@@ -53,7 +53,7 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.db.util import as_lookup
-from app.livekit import LiveKitAdminClient
+from app.livekit import LiveKitAdminClient, RoomSnapshot
 from app.livekit.drift import DriftReport, detect_drift, last_report
 from app.livekit.sip import SipResourceManager
 from app.schemas.common import Page
@@ -63,7 +63,9 @@ from app.schemas.platform import (
     ComponentHealth,
     DriftCheckResponse,
     DriftedResource,
+    LiveKitAdminSection,
     LiveKitOverview,
+    LiveKitRoom,
     ModelCreate,
     ModelResponse,
     ModelUpdate,
@@ -1292,30 +1294,30 @@ async def _probe_postgres(session: AsyncSession) -> ComponentHealth:
     )
 
 
-async def _probe_livekit() -> tuple[ComponentHealth, int | None]:
-    """Probe LiveKit and count rooms in the same call.
+async def _probe_livekit() -> tuple[ComponentHealth, list[RoomSnapshot]]:
+    """Probe LiveKit and list rooms in the same call.
 
-    Room count is the closest thing to live concurrency that LiveKit will tell
-    us, and asking twice would double the latency of this page for no extra
-    information.
+    Room count is the closest thing LiveKit will tell us to live concurrency.
+    Listing once serves both the count and the spec-11 Rooms / Participants
+    section — a second call would only add latency.
     """
     client = LiveKitAdminClient()
     started = time.perf_counter()
     try:
-        count = await client.room_count()
+        rooms = await client.list_rooms()
     except Exception as exc:
         return (
             ComponentHealth(name="livekit", reachable=False, detail=str(exc)[:200]),
-            None,
+            [],
         )
     return (
         ComponentHealth(
             name="livekit",
             reachable=True,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
-            detail=f"{count} room(s)",
+            detail=f"{len(rooms)} room(s)",
         ),
-        count,
+        rooms,
     )
 
 
@@ -1399,7 +1401,7 @@ async def capacity(session: SessionDep) -> CapacityResponse:
     # The PostgreSQL probe shares this request's session, so it runs first
     # rather than concurrently with the others.
     postgres = await _probe_postgres(session)
-    (livekit, rooms), redis = await asyncio.gather(_probe_livekit(), _probe_redis())
+    (livekit, room_list), redis = await asyncio.gather(_probe_livekit(), _probe_redis())
 
     return CapacityResponse(
         tenant_count=tenant_count,
@@ -1411,7 +1413,7 @@ async def capacity(session: SessionDep) -> CapacityResponse:
         active_calls=active_calls,
         calls_last_24h=calls_24h,
         licensed_concurrent_calls=licensed,
-        livekit_rooms=rooms,
+        livekit_rooms=len(room_list) if livekit.reachable else None,
         components=[postgres, livekit, redis],
     )
 
@@ -1436,7 +1438,7 @@ async def livekit_overview(session: SessionDep) -> LiveKitOverview:
     anything here is something a retry or a re-sync has to fix.
     """
     settings = get_settings()
-    health, rooms = await _probe_livekit()
+    health, room_snaps = await _probe_livekit()
 
     async def counts(column: InstrumentedAttribute[SyncStatus]) -> dict[str, int]:
         """Group by sync status.
@@ -1494,12 +1496,21 @@ async def livekit_overview(session: SessionDep) -> LiveKitOverview:
     drifted = trunk_counts.get(SyncStatus.DRIFTED.value, 0) + rule_counts.get(
         SyncStatus.DRIFTED.value, 0
     )
+    dispatch_names = sorted(
+        {
+            name
+            for name in (
+                await session.execute(select(LiveKitDispatchRule.agent_dispatch_name).distinct())
+            ).scalars()
+            if name
+        }
+    )
 
     return LiveKitOverview(
         url=settings.livekit_url,
         sip_uri=settings.livekit_sip_uri,
         reachable=health.reachable,
-        room_count=rooms,
+        room_count=len(room_snaps) if health.reachable else None,
         detail=health.detail,
         trunk_sync=trunk_counts,
         dispatch_rule_sync=rule_counts,
@@ -1508,7 +1519,130 @@ async def livekit_overview(session: SessionDep) -> LiveKitOverview:
         drift_check_reachable=report.livekit_reachable if report else None,
         orphans=orphans,
         configuration_drift_detected=bool(orphans) or drifted > 0,
+        sections=_livekit_admin_sections(
+            trunk_count=sum(trunk_counts.values()),
+            rule_count=sum(rule_counts.values()),
+            room_count=len(room_snaps),
+            participant_count=sum(item.num_participants for item in room_snaps),
+            dispatch_names=dispatch_names,
+        ),
+        rooms=[
+            LiveKitRoom(
+                name=item.name,
+                sid=item.sid,
+                num_participants=item.num_participants,
+                created_at=item.created_at,
+                metadata=item.metadata,
+            )
+            for item in room_snaps
+        ],
+        participant_count=sum(item.num_participants for item in room_snaps),
+        agent_dispatch_names=dispatch_names,
+        public_url=settings.livekit_public_url,
     )
+
+
+def _livekit_admin_sections(
+    *,
+    trunk_count: int,
+    rule_count: int,
+    room_count: int,
+    participant_count: int,
+    dispatch_names: list[str],
+) -> list[LiveKitAdminSection]:
+    """The thirteen spec-11 topics. Nothing here writes to LiveKit."""
+    names = ", ".join(dispatch_names) if dispatch_names else "none configured"
+    return [
+        LiveKitAdminSection(
+            id="clusters",
+            title="Clusters",
+            summary="One self-hosted cluster. Node topology lives in livekit.yaml, not this console.",
+            scope="infra",
+            href="/platform/infrastructure",
+        ),
+        LiveKitAdminSection(
+            id="sip_configuration",
+            title="SIP Configuration",
+            summary="Tenant SIP is the wizard and trunk form. The advertised SIP URI is infrastructure.",
+            scope="tenant",
+            href="/sip-wizard",
+        ),
+        LiveKitAdminSection(
+            id="sip_trunks",
+            title="SIP Trunks",
+            summary=f"{trunk_count} mirrored trunk(s). Tenants create them; this screen tracks sync.",
+            scope="tenant",
+            href="/sip-trunks",
+        ),
+        LiveKitAdminSection(
+            id="dispatch_rules",
+            title="Dispatch Rules",
+            summary=f"{rule_count} long-lived rule(s). Never created per call.",
+            scope="tenant",
+            href="/dispatch-rules",
+        ),
+        LiveKitAdminSection(
+            id="agent_dispatch",
+            title="Agent Dispatch",
+            summary=f"Worker identities LiveKit will dispatch: {names}.",
+            scope="tenant",
+            href="/dispatch-rules",
+        ),
+        LiveKitAdminSection(
+            id="rooms",
+            title="Rooms",
+            summary=f"{room_count} room(s) currently open. Ephemeral — one per call.",
+            scope="observe",
+        ),
+        LiveKitAdminSection(
+            id="participants",
+            title="Participants",
+            summary=f"{participant_count} participant(s) across those rooms.",
+            scope="observe",
+        ),
+        LiveKitAdminSection(
+            id="media",
+            title="Media",
+            summary="RTC media is one muxed UDP port in this deployment. Not tenant-editable.",
+            scope="infra",
+            href="/platform/infrastructure",
+        ),
+        LiveKitAdminSection(
+            id="codecs",
+            title="Codecs",
+            summary="Per-trunk codec preference is stored on the SIP trunk. Offer PCMU for telephony.",
+            scope="tenant",
+            href="/sip-trunks",
+        ),
+        LiveKitAdminSection(
+            id="recording_egress",
+            title="Recording/Egress",
+            summary="Room-composite egress to object storage when an agent has recording enabled.",
+            scope="observe",
+            href="/recordings",
+        ),
+        LiveKitAdminSection(
+            id="turn_ice",
+            title="TURN/ICE",
+            summary="Advertised ICE address is LIVEKIT_NODE_IP / SIP_NAT_IP. A container IP fails every call.",
+            scope="infra",
+            href="/platform/infrastructure",
+        ),
+        LiveKitAdminSection(
+            id="health",
+            title="Health",
+            summary="Admin API reachability on this page; dependency probes on Infrastructure.",
+            scope="observe",
+            href="/platform/infrastructure",
+        ),
+        LiveKitAdminSection(
+            id="metrics",
+            title="Metrics",
+            summary="Voice-latency dashboards in Grafana. This page is the mirror, not a second inventory.",
+            scope="observe",
+            href="/platform/infrastructure",
+        ),
+    ]
 
 
 @router.post(
