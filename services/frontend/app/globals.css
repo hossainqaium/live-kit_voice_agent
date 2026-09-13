@@ -138,16 +138,10 @@ h3 {
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;
   min-height: 100vh;
+  height: 100%;
 }
 
-@media (max-width: 860px) {
-  .shell {
-    grid-template-columns: 1fr;
-  }
-  .sidebar {
-    display: none;
-  }
-}
+/* ---- Sidebar (desktop) ------------------------------------------------- */
 
 .sidebar {
   background: var(--surface);
@@ -158,16 +152,24 @@ h3 {
   top: 0;
   height: 100vh;
   overflow-y: auto;
+  z-index: 20;
+  /* Smooth transitions for width collapse */
+  transition: transform 0.22s ease;
 }
 
 .sidebar-brand {
   padding: 18px 16px 14px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .sidebar-nav {
   padding: 10px 8px;
   flex: 1;
+  overflow-y: auto;
 }
 
 .nav-group-label {
@@ -217,10 +219,15 @@ h3 {
   color: var(--text-muted);
 }
 
+/* ---- Main column ------------------------------------------------------- */
+
 .main {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* Fill the full grid row height so pages with little content don't leave
+     a white gap at the bottom. */
+  min-height: 100vh;
 }
 
 .topbar {
@@ -228,18 +235,138 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 24px;
+  padding: 0 24px;
+  height: 52px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  z-index: 5;
+  z-index: 10;
+  flex-shrink: 0;
 }
 
 .content {
   padding: 24px;
-  max-width: 1180px;
+  /* Fills the available column width; no hard cap so wide viewports are used.
+     Pages that prefer a narrower reading width set their own max-width inline. */
   width: 100%;
+  flex: 1;
+}
+
+/* ---- Hamburger toggle button (mobile only) ----------------------------- */
+
+.menu-toggle {
+  display: none;
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 6px;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.menu-toggle:hover {
+  background: var(--surface-sunken);
+  color: var(--text);
+}
+.menu-toggle svg {
+  display: block;
+}
+
+/* ---- Mobile nav close button (inside sidebar header on mobile) --------- */
+
+.sidebar-close {
+  display: none;
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  line-height: 1;
+  font-size: 18px;
+}
+.sidebar-close:hover {
+  color: var(--text);
+}
+
+/* ---- Mobile drawer overlay -------------------------------------------- */
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 45%);
+  z-index: 19;
+  backdrop-filter: blur(1px);
+}
+
+/* ---- Responsive breakpoints -------------------------------------------- */
+
+@media (max-width: 860px) {
+  .shell {
+    /* Single column — sidebar is a floating drawer, not in the flow */
+    grid-template-columns: 1fr;
+  }
+
+  .menu-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sidebar-close {
+    display: block;
+  }
+
+  .sidebar-overlay.is-open {
+    display: block;
+  }
+
+  /* Sidebar slides in from the left as a fixed drawer */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100dvh;
+    width: min(var(--sidebar-width), 80vw);
+    transform: translateX(-110%);
+    box-shadow: var(--shadow-lg);
+    z-index: 20;
+  }
+  .sidebar.is-open {
+    transform: translateX(0);
+  }
+
+  .topbar {
+    padding: 0 16px;
+  }
+
+  .content {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .content {
+    padding: 12px;
+  }
+
+  .topbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .page-header {
+    gap: 10px;
+  }
+
+  /* Stack button groups vertically when very narrow */
+  .topbar .row {
+    gap: 4px;
+  }
 }
 
 .page-header {

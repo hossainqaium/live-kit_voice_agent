@@ -17,7 +17,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Badge, Button, Dialog, Field, Notice } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
@@ -128,18 +128,41 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const { principal, signOut, signOutAfterPasswordChange, can } = useAuth();
   const pathname = usePathname();
   const [changingPassword, setChangingPassword] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const isPlatform = principal?.is_platform_user ?? false;
   const groups = isPlatform ? PLATFORM_NAV : TENANT_NAV;
 
+  // Close the mobile drawer whenever the route changes.
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [pathname]);
+
   return (
     <div className="shell">
-      <aside className="sidebar">
+      {/* Mobile overlay — tap to close the drawer */}
+      <div
+        className={`sidebar-overlay${sidebarOpen ? " is-open" : ""}`}
+        aria-hidden="true"
+        onClick={() => setSidebarOpen(false)}
+      />
+
+      <aside className={`sidebar${sidebarOpen ? " is-open" : ""}`} aria-label="Main navigation">
         <div className="sidebar-brand">
-          <div style={{ fontWeight: 600, fontSize: 14 }}>Voice Agent Platform</div>
-          <div className="subtle small" style={{ marginTop: 2 }}>
-            {isPlatform ? "Platform console" : "Tenant console"}
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>Voice Agent Platform</div>
+            <div className="subtle small" style={{ marginTop: 2 }}>
+              {isPlatform ? "Platform console" : "Tenant console"}
+            </div>
           </div>
+          {/* Close button — only visible / tappable on mobile */}
+          <button
+            className="sidebar-close"
+            aria-label="Close navigation"
+            onClick={() => setSidebarOpen(false)}
+          >
+            ✕
+          </button>
         </div>
 
         <nav className="sidebar-nav">
@@ -162,6 +185,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                       href={entry.href}
                       className="nav-item"
                       aria-current={pathname === entry.href ? "page" : undefined}
+                      onClick={() => setSidebarOpen(false)}
                       {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
                     >
                       <span>{entry.label}</span>
@@ -200,6 +224,20 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <div className="main">
         <header className="topbar">
           <div className="row">
+            {/* Hamburger — only rendered on mobile via CSS */}
+            <button
+              className="menu-toggle"
+              aria-label="Open navigation"
+              aria-expanded={sidebarOpen}
+              onClick={() => setSidebarOpen(true)}
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <rect y="3"  width="18" height="1.8" rx="1" fill="currentColor" />
+                <rect y="8.1" width="18" height="1.8" rx="1" fill="currentColor" />
+                <rect y="13.2" width="18" height="1.8" rx="1" fill="currentColor" />
+              </svg>
+            </button>
+
             {isPlatform ? (
               <Badge tone="info" dot>
                 Platform — no tenant
